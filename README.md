@@ -21,3 +21,4 @@ Changed most (non-do_fun) functions to use std::strings instead of char*.
 
    Went through a full round of testing practically everything (as much as I can solo) while doing the above, so it's relatively clean at the moment.  I even found one in do_detrap from SWR!  Stay tuned, more bugs will be introduced soon I'm sure.
 
+Working on reimplementing newspace and creating wilderness.
