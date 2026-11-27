@@ -1,3 +1,41 @@
+SWRIPMUD MUDProg Setup
+=====================
+
+MUDProg support ships in the current server build. Build through src/Makefile,
+including when running under WSL. src/mud_prog.c and src/mud_comm.c provide
+the interpreter, event handlers, and mobile program commands. Their shared
+declarations and event constants are in src/mud.h.
+
+Builders edit mobile programs with mpedit, object programs with opedit,
+and room programs with rpedit. Area permissions apply. Mobile and object
+targets need their prototype flag. Use list to inspect an existing target,
+add or edit to open its command body, and /s to save the editor buffer.
+Use savearea or foldarea for the area's normal persistence workflow.
+
+The current DOC guide and TRIGGER.txt describe named affect checks and the
+online and serialized trigger catalogs. src/db.c reads inline programs from
+the enclosing mobile, object, or room record. The area's saver writes the
+records back with their trigger arguments and command bodies.
+
+External program files are optional. PROG_DIR in src/mud.h is ../mudprogs/
+relative to the area working directory, and runtime setup creates this
+directory. Put a referenced file there before loading an area that uses
+in_file_prog. An external file holds > trigger_prog argument~ records,
+each followed by its command body and a tilde, and ends with |.
+External includes do not nest.
+
+Validate a normal authoring change in an isolated world copy. Load the area,
+inspect the program list, exercise the intended event, save the area, and
+reload it to confirm that the program and argument survive. Use the ordinary
+academy push and greet/speech tests as examples of runtime verification.
+
+Historical MERC Installation Instructions
+=========================================
+
+The upstream instructions below describe integrating MOBprograms into
+MERC 2.0 beta. They are retained as historical source material. The current
+SWRIPMUD setup is described above.
+
 To install MOBprograms.
 Please start by making a copy of all your source files to a backup place 
 just in case somthing weird happens. (I dont want you to hate me forever)

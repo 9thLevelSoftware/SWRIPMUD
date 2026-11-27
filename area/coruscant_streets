@@ -1580,6 +1580,27 @@ Some god dropped a newly created bookend here.~
 
 
 #ROOMS
+#199
+Coruscant Shipyard Ferry Cockpit~
+Flight instruments look out over the ferry's approach to the Coruscant
+shipyard. A short passage leads south to the passenger cabin.
+~
+0 536870920 0
+D2
+~
+~
+0 -1 200
+S
+#200
+Coruscant Shipyard Ferry Passenger Cabin~
+Rows of seats face the boarding hatch. The cockpit is to the north.
+~
+0 536870920 0
+D0
+~
+~
+0 -1 199
+S
 #250
 Floating in a void~
 ~

@@ -24,10 +24,12 @@
 #include <time.h>
 #include "mud.h"
 
+
 char * const spell_flag[] =
 { "water", "earth", "air", "astral", "area", "distant", "reverse",
 "save_half_dam", "save_negates", "accumulative", "recastable", "noscribe",
-"nobrew", "group", "object", "character", "secretskill", "pksensitive" };
+"nobrew", "group", "object", "character", "secretskill", "pksensitive",
+"stoponfail" };
 
 char * const spell_saves[] =
 { "none", "poison_death", "wands", "para_petri", "breath", "spell_staff" };
@@ -54,6 +56,7 @@ void show_list_to_char( OBJ_DATA *list, CHAR_DATA *ch, bool fShort,
 	bool fShowN );
 
 int ris_save( CHAR_DATA *ch, int chance, int ris );
+int get_risflag( const std::string& flag );
 bool check_illegal_psteal( CHAR_DATA *ch, CHAR_DATA *victim );
 
 /* from magic.c */
@@ -172,23 +175,36 @@ bool check_skill( CHAR_DATA *ch, const std::string& command, const std::string& 
     
 	arg = argument;
 
-    /* bsearch for the skill */
-    for (;;)
-    {
-	sn = (first + top) >> 1;
+    if ( command.empty() || first < 0 )
+        return FALSE;
+    if ( top >= top_sn )
+        top = top_sn - 1;
 
-	if ( LOWER(command[0]) == LOWER(skill_table[sn]->name[0])
-	&&  !str_prefix(command, skill_table[sn]->name)
-	&&  (skill_table[sn]->skill_fun || skill_table[sn]->spell_fun != spell_null)
-	&&  (IS_NPC(ch)
-	||  ( ch->pcdata->learned[sn] > 0 )) )
-		break;
-	if (first >= top)
-	    return FALSE;
-    	if (strcmp( command.c_str(), skill_table[sn]->name) < 1)
-	    top = sn - 1;
-    	else
-	    first = sn + 1;
+    /* bsearch for the skill */
+    {
+        bool found = FALSE;
+        while ( first <= top )
+        {
+            sn = (first + top) >> 1;
+            if ( !skill_table[sn] || !skill_table[sn]->name )
+                return FALSE;
+
+            if ( LOWER(command[0]) == LOWER(skill_table[sn]->name[0])
+            &&  !str_prefix(command, skill_table[sn]->name)
+            &&  (skill_table[sn]->skill_fun || skill_table[sn]->spell_fun != spell_null)
+            &&  (IS_NPC(ch)
+            ||  ( ch->pcdata && ch->pcdata->learned[sn] > 0 )) )
+            {
+                found = TRUE;
+                break;
+            }
+            if ( strcasecmp( command.c_str(), skill_table[sn]->name ) < 0 )
+                top = sn - 1;
+            else
+                first = sn + 1;
+        }
+        if ( !found )
+            return FALSE;
     }
 
     if ( !check_pos( ch, skill_table[sn]->minimum_position ) )
@@ -300,7 +316,7 @@ bool check_skill( CHAR_DATA *ch, const std::string& command, const std::string& 
 	if ( (number_percent( ) + skill_table[sn]->difficulty * 5)
 	   > (IS_NPC(ch) ? 75 : ch->pcdata->learned[sn]) )
 	{
-	    failed_casting( skill_table[sn], ch, (CHAR_DATA *) vo, obj );
+	    failed_casting( skill_table[sn], ch, victim, obj );
 	    learn_from_failure( ch, sn );
 	    if ( mana )
 	    {
@@ -333,9 +349,10 @@ bool check_skill( CHAR_DATA *ch, const std::string& command, const std::string& 
 
 	if ( (skill_table[sn]->target == TAR_CHAR_OFFENSIVE ||
 		(skill_table[sn]->target == TAR_CHAR_SEMIOFFENSIVE &&
-IS_NPC(victim)))
-	&&   victim != ch
-	&&  !char_died(victim) )
+		 victim && IS_NPC(victim)))
+	&&   victim && victim != ch
+	&&  !char_died(victim)
+	&&   ch->in_room )
 	{
 	    CHAR_DATA *vch;
 	    CHAR_DATA *vch_next;
@@ -454,8 +471,8 @@ void do_slookup( CHAR_DATA *ch, char *argument )
 		spell_class[SPELL_CLASS( skill )],
 		spell_power[SPELL_POWER( skill )] );
 	    buf = "Flags:";
-	    for ( x = 11; x < 32; x++ )
-	      if ( SPELL_FLAG( skill, 1 << x ) )
+	    for ( x = 11; x < 32 && (x - 11) < (int)(sizeof(spell_flag) / sizeof(spell_flag[0])); x++ )
+	      if ( SPELL_FLAG( skill, 1U << x ) )
 	      {
 		buf += " ";
 		buf += spell_flag[x-11];
@@ -463,7 +480,7 @@ void do_slookup( CHAR_DATA *ch, char *argument )
 	    buf += "\n";
 	    send_to_char( buf, ch );
 	}
-	ch_printf( ch, "Saves: %s\n", spell_saves[(int) skill->saves] );
+	ch_printf( ch, "Saves: %s\n", spell_saves[URANGE( 0, (int) skill->saves, (int)(sizeof(spell_saves)/sizeof(spell_saves[0])) - 1 )] );
 
 	if ( skill->difficulty != '\0' )
 	    ch_printf( ch, "Difficulty: %d\n", (int) skill->difficulty );
@@ -644,7 +661,7 @@ void do_sset( CHAR_DATA *ch, char *argument )
 		ch_printf( ch, "The current top herb is %d, which is the maximum.  "
 			   "To add more herbs,\nMAX_HERB will have to be "
 			   "raised in mud.h, and the mud recompiled.\n",
-			   top_sn );
+			   top_herb );
 		return;
 	    }
 	}
@@ -782,11 +799,11 @@ void do_sset( CHAR_DATA *ch, char *argument )
 	{
 	    int x = get_sflag( argstr );
 
-	    if ( x == -1 )
+	    if ( x < 0 || x + 11 >= 32 )
 		send_to_char( "Not a spell flag.\n", ch );
 	    else
 	    {
-		TOGGLE_BIT( skill->flags, 1 << (x+11) );
+		TOGGLE_BIT( skill->flags, 1U << (x+11) );
 		send_to_char( "Ok.\n", ch );
 	    }
 	    return;
@@ -969,7 +986,9 @@ void do_sset( CHAR_DATA *ch, char *argument )
 	      modifier.clear();
 	    aff->duration = str_dup( duration );
 	    aff->location = loc;
-		if( loc == APPLY_AFFECT || loc == APPLY_RESISTANT || loc == APPLY_IMMUNE || loc == APPLY_SUSCEPTIBLE )
+	    {
+		int base_loc = loc % REVERSE_APPLY;
+		if( base_loc == APPLY_AFFECT )
 		{
 			int modval = get_aflag( modifier );
 
@@ -978,6 +997,14 @@ void do_sset( CHAR_DATA *ch, char *argument )
 				modval = 0;
 			modifier = str_printf("%d", modval);
 		}
+		else if( base_loc == APPLY_RESISTANT || base_loc == APPLY_IMMUNE || base_loc == APPLY_SUSCEPTIBLE )
+		{
+			int modval = get_risflag( modifier );
+			if( modval < 0 )
+				modval = 0;
+			modifier = str_printf("%d", modval);
+		}
+	    }
 		aff->modifier = str_dup( modifier );
 	    aff->bitvector = bit;
 	    aff->next = skill->affects;
@@ -1233,10 +1260,10 @@ void learn_from_success( CHAR_DATA *ch, int sn )
 {
     int adept, gain, sklvl, learn, percent, chance;
 
-    if ( IS_NPC(ch) || ch->pcdata->learned[sn] <= 0 )
+    if ( IS_NPC(ch) || !IS_VALID_SN(sn) || ch->pcdata->learned[sn] <= 0 )
       return;
     
-    if ( sn == skill_lookup( "meditate" ) && ch->skill_level[FORCE_ABILITY] < 2 )
+    if ( sn == gsn_meditate && ch->skill_level[FORCE_ABILITY] < 2 )
       if ( ch->pcdata->learned[sn] < 50 )
          gain_exp( ch, 25, FORCE_ABILITY );
                  
@@ -1286,8 +1313,9 @@ void learn_from_success( CHAR_DATA *ch, int sn )
 }
 
 
-void learn_from_failure( CHAR_DATA *ch, int sn )
+void learn_from_failure( CHAR_DATA *, int )
 {
+    // Skill progression is awarded on success.
 }
 
 void do_gouge( CHAR_DATA *ch, char *argument )
@@ -1373,6 +1401,8 @@ void do_detrap( CHAR_DATA *ch, char *argument )
     int percent;
     bool found = FALSE;
 
+    CHECK_SUBRESTRICTED( ch );
+
     switch( ch->substate )
     {
 	default:
@@ -1428,7 +1458,7 @@ void do_detrap( CHAR_DATA *ch, char *argument )
 	    if ( !ch->dest_buf )
 	    {
 		send_to_char( "Your detrapping was interrupted!\n", ch );
-		bug( "do_detrap: ch->dest_buf NULL!", 0 );
+		bug( "do_detrap: ch->dest_buf NULL!" );
 		return;
 	    }
 	    arg = (const char *)ch->dest_buf;
@@ -1492,6 +1522,8 @@ void do_dig( CHAR_DATA *ch, char *argument )
     OBJ_DATA *startobj;
     bool found, shovel;
     EXIT_DATA *pexit;
+
+    CHECK_SUBRESTRICTED( ch );
    
     switch( ch->substate )
     {
@@ -1507,7 +1539,7 @@ void do_dig( CHAR_DATA *ch, char *argument )
 	    return;
 	  }
 	  one_argument( argument, arg );
-	  if ( arg.empty() )
+	  if ( !arg.empty() )
 	  {
 	      if ( ( pexit = find_door( ch, arg, TRUE ) ) == NULL
 	      &&     get_dir(arg) == -1 )
@@ -1518,7 +1550,7 @@ void do_dig( CHAR_DATA *ch, char *argument )
 	      if ( pexit )
 	      {
 		  if ( !IS_SET(pexit->exit_info, EX_DIG)
-		  &&   !IS_SET(pexit->exit_info, EX_CLOSED) )
+		  ||   !IS_SET(pexit->exit_info, EX_CLOSED) )
 		  {
 		      send_to_char( "There is no need to dig out that exit.\n", ch );
 		      return;
@@ -1555,7 +1587,7 @@ void do_dig( CHAR_DATA *ch, char *argument )
 	  {
 	      send_to_char( "Your digging was interrupted!\n", ch );
 	      act( AT_PLAIN, "$n's digging was interrupted!", ch, NULL, NULL, TO_ROOM );
-	      bug( "do_dig: dest_buf NULL", 0 );
+	      bug( "do_dig: dest_buf NULL" );
 	      return;
 	  }
 	  arg = (const char *) ch->dest_buf;
@@ -1647,6 +1679,8 @@ void do_search( CHAR_DATA *ch, char *argument )
     int percent, door;
     bool found;//, room;
 
+    CHECK_SUBRESTRICTED( ch );
+
     door = -1;
     switch( ch->substate )
     {
@@ -1691,7 +1725,7 @@ void do_search( CHAR_DATA *ch, char *argument )
 	    if ( !ch->dest_buf )
 	    {
 		send_to_char( "Your search was interrupted!\n", ch );
-		bug( "do_search: dest_buf NULL", 0 );
+		bug( "do_search: dest_buf NULL" );
 		return;
 	    }
 		arg = (const char *) ch->dest_buf;
@@ -1788,6 +1822,9 @@ void do_steal( CHAR_DATA *ch, char *argument )
     CHAR_DATA *victim, *mst;
     OBJ_DATA *obj , *obj_next;
     int percent, xp;
+
+    if ( !ch->in_room )
+        return;
 
     argstr = one_argument( argstr, arg1 );
     argstr = one_argument( argstr, arg2 );
@@ -1901,7 +1938,7 @@ void do_steal( CHAR_DATA *ch, char *argument )
 	ch->gold     += amount;
 	victim->gold -= amount;
 	ch_printf( ch, "Aha!  You got %d credits.\n", amount );
-       if ( !IS_NPC(victim) || (ch->pcdata->learned[gsn_steal] < 50 ) )
+       if ( !IS_NPC(ch) && ch->pcdata && ( !IS_NPC(victim) || (ch->pcdata->learned[gsn_steal] < 50 ) ) )
 	learn_from_success( ch, gsn_steal );
 	
        if ( IS_NPC( victim ) )
@@ -1920,7 +1957,7 @@ void do_steal( CHAR_DATA *ch, char *argument )
         {   
            if ( ( obj = get_obj_wear( victim, arg1 ) ) != NULL ) 
            {
-             if ( (obj_next=get_eq_char(victim, obj->wear_loc)) != obj )
+             if ( (obj_next=get_eq_char(victim, obj->wear_loc)) != NULL && obj_next != obj )
              {
 	       ch_printf( ch, "They are wearing %s on top of %s.\n", obj_next->short_descr, obj->short_descr);
 	       send_to_char( "You'll have to steal that first.\n", ch );	
@@ -1961,7 +1998,7 @@ void do_steal( CHAR_DATA *ch, char *argument )
     }
 
     send_to_char( "Ok.\n", ch );
-    if ( IS_NPC(victim)  || ch->pcdata->learned[gsn_steal] )
+    if ( !IS_NPC(ch) && ch->pcdata && ( IS_NPC(victim) || ch->pcdata->learned[gsn_steal] ) )
       learn_from_success( ch, gsn_steal );
     if ( IS_NPC( victim ) )
     {
@@ -2180,7 +2217,7 @@ void do_kick( CHAR_DATA *ch, char *argument )
 	return;
     }
     
-    if ( BV_IS_SET(victim->act, PLR_AFK))
+    if ( !IS_NPC(victim) && BV_IS_SET(victim->act, PLR_AFK) )
     {
       log_printf( "%s just attacked %s with an afk flag on!." , ch->name, victim->name );
     }
@@ -2275,171 +2312,6 @@ void do_punch( CHAR_DATA *ch, char *argument )
     }
     gmcp_evt_char_stats(ch);	
     return;
-}
-
-
-void do_bite( CHAR_DATA *ch, char *argument )
-{
-/*
-    CHAR_DATA *victim;
-    char logbuf[MAX_STRING_LENGTH];
-
-    if ( IS_NPC(ch) && IS_AFFECTED( ch, AFF_CHARM ) )
-    {
-	send_to_char( "You can't concentrate enough for that.\n", ch );
-	return;
-    }
-
-    if ( ( victim = who_fighting( ch ) ) == NULL )
-    {
-	send_to_char( "You aren't fighting anyone.\n", ch );
-	return;
-    }
-    
-    if ( BV_IS_SET(victim->act, PLR_AFK))
-    {
-      log_printf( "%s just attacked %s with an afk flag on!." , ch->name, victim->name );
-    }
-    
-
-    WAIT_STATE( ch, skill_table[gsn_bite]->beats );
-    if ( IS_NPC(ch) || number_percent( ) < ch->pcdata->learned[gsn_bite] )
-    {
-	learn_from_success( ch, gsn_bite ); 
-	global_retcode = damage( ch, victim, number_range( 1, ch->skill_level[COMBAT_ABILITY] ), gsn_bite );
-    }
-    else
-    {
-	learn_from_failure( ch, gsn_bite );
-	global_retcode = damage( ch, victim, 0, gsn_bite );
-    }
-    */
-    return;
-
-
-}
-
-
-void do_claw( CHAR_DATA *ch, char *argument )
-{
-
-    /*
-    CHAR_DATA *victim;
-    char logbuf[MAX_STRING_LENGTH];
-
-    if ( IS_NPC(ch) && IS_AFFECTED( ch, AFF_CHARM ) )
-    {
-	send_to_char( "You can't concentrate enough for that.\n", ch );
-	return;
-    }
-
-    if ( ( victim = who_fighting( ch ) ) == NULL )
-    {
-	send_to_char( "You aren't fighting anyone.\n", ch );
-	return;
-    }
-    
-    if ( BV_IS_SET(victim->act, PLR_AFK))
-    {
-      log_printf( "%s just attacked %s with an afk flag on!." , ch->name, victim->name );
-    }
-    
-
-    WAIT_STATE( ch, skill_table[gsn_claw]->beats );
-    if ( IS_NPC(ch) || number_percent( ) < ch->pcdata->learned[gsn_claw] )
-    {
-	learn_from_success( ch, gsn_claw ); 
-	global_retcode = damage( ch, victim, number_range( 1, ch->skill_level[COMBAT_ABILITY] ), gsn_claw );
-    }
-    else
-    {
-	learn_from_failure( ch, gsn_claw );
-	global_retcode = damage( ch, victim, 0, gsn_claw );
-    }
-    */
-    return;
-
-}
-
-
-void do_sting( CHAR_DATA *ch, char *argument )
-{
-  /*  CHAR_DATA *victim;
-    char logbuf[MAX_STRING_LENGTH];
-
-    if ( IS_NPC(ch) && IS_AFFECTED( ch, AFF_CHARM ) )
-    {
-	send_to_char( "You can't concentrate enough for that.\n", ch );
-	return;
-    }
-
-    if ( ( victim = who_fighting( ch ) ) == NULL )
-    {
-	send_to_char( "You aren't fighting anyone.\n", ch );
-	return;
-    }
-    
-    if ( BV_IS_SET(victim->act, PLR_AFK))
-    {
-      log_printf( "%s just attacked %s with an afk flag on!." , ch->name, victim->name );
-    }
-    
-
-    WAIT_STATE( ch, skill_table[gsn_sting]->beats );
-    if ( IS_NPC(ch) || number_percent( ) < ch->pcdata->learned[gsn_sting] )
-    {
-	learn_from_success( ch, gsn_sting ); 
-	global_retcode = damage( ch, victim, number_range( 1, ch->skill_level[COMBAT_ABILITY] ), gsn_sting );
-    }
-    else
-    {
-	learn_from_failure( ch, gsn_sting );
-	global_retcode = damage( ch, victim, 0, gsn_sting );
-    }
-    
-    */
-    return;
-
-}
-
-
-void do_tail( CHAR_DATA *ch, char *argument )
-{/*
-    CHAR_DATA *victim;
-    char logbuf[MAX_STRING_LENGTH];
-
-    if ( IS_NPC(ch) && IS_AFFECTED( ch, AFF_CHARM ) )
-    {
-	send_to_char( "You can't concentrate enough for that.\n", ch );
-	return;
-    }
-
-    if ( ( victim = who_fighting( ch ) ) == NULL )
-    {
-	send_to_char( "You aren't fighting anyone.\n", ch );
-	return;
-    }
-    
-    if ( BV_IS_SET(victim->act, PLR_AFK))
-    {
-      log_printf( "%s just attacked %s with an afk flag on!." , ch->name, victim->name );
-    }
-    
-
-    WAIT_STATE( ch, skill_table[gsn_tail]->beats );
-    if ( IS_NPC(ch) || number_percent( ) < ch->pcdata->learned[gsn_tail] )
-    {
-	learn_from_success( ch, gsn_tail ); 
-	global_retcode = damage( ch, victim, number_range( 1, ch->skill_level[COMBAT_ABILITY] ), gsn_tail );
-    }
-    else
-    {
-	learn_from_failure( ch, gsn_tail );
-	global_retcode = damage( ch, victim, 0, gsn_tail );
-    }
-    */
-    return;
-
 }
 
 
@@ -2582,13 +2454,6 @@ void do_stun( CHAR_DATA *ch, char *argument )
 }
 
 
-void do_feed( CHAR_DATA *ch, char *argument )
-{
-	  send_to_char( "It is not of your nature to feed on living creatures.\n", ch );
-	  return;
-}
-
-
 /*
  * Disarm a creature.
  * Caller must check for successful attack.
@@ -2634,8 +2499,14 @@ void disarm( CHAR_DATA *ch, CHAR_DATA *victim )
 
     oprog_remove_trigger( victim, obj );
 
-    obj_from_char( obj );
-    obj_to_room( obj, victim->in_room );
+    if ( !obj_extracted( obj ) && obj->carried_by == victim )
+    {
+        obj_from_char( obj );
+        if ( !char_died( victim ) && victim->in_room )
+            obj_to_room( obj, victim->in_room );
+        else
+            extract_obj( obj );
+    }
 
     return;
 }
@@ -2879,14 +2750,22 @@ void do_pick( CHAR_DATA *ch, char *argument )
                 return;
 			if ( !str_cmp("Public",ship->owner) )
 				return;
+            std::vector<DESCRIPTOR_DATA *> targets;
             for ( d = first_descriptor; d; d = d->next )
             {
+                if ( comm_desc_alive( d ) && d->connected == CON_PLAYING )
+                    targets.push_back( d );
+            }
+            for ( DESCRIPTOR_DATA *td : targets )
+            {
+                if ( !comm_desc_alive( td ) || td->connected != CON_PLAYING )
+                    continue;
                 CHAR_DATA *victim;
                 bool victim_comlink;
                 OBJ_DATA *vobj;
-                victim = d->original ? d->original : d->character;
+                victim = td->original ? td->original : td->character;
 
-                if ( d->connected != CON_PLAYING )
+                if ( !victim )
                   continue;
             
                 if ( !check_pilot(victim,ship) )
@@ -2912,10 +2791,10 @@ void do_pick( CHAR_DATA *ch, char *argument )
                 || IS_AFFECTED(victim->switched, AFF_POSSESS) ) )
                     victim = victim->switched;
             
-                if ( !IS_AWAKE(victim) || BV_IS_SET(victim->in_room->room_flags,ROOM_SILENCE) )
+                if ( !victim->in_room || !IS_AWAKE(victim) || BV_IS_SET(victim->in_room->room_flags,ROOM_SILENCE) )
                     continue;
             
-                if ( d->connected == CON_EDITING )
+                if ( td->connected == CON_EDITING )
                     continue;
             
                 ch_printf(victim,"&R[alarm] Attempt to pick %s.\n",ship->name);
@@ -2934,14 +2813,22 @@ void do_pick( CHAR_DATA *ch, char *argument )
                 return;
 			if ( !str_cmp("Public",ship->owner) )
 				return;
+            std::vector<DESCRIPTOR_DATA *> targets;
             for ( d = first_descriptor; d; d = d->next )
             {
+                if ( comm_desc_alive( d ) && d->connected == CON_PLAYING )
+                    targets.push_back( d );
+            }
+            for ( DESCRIPTOR_DATA *td : targets )
+            {
+                if ( !comm_desc_alive( td ) || td->connected != CON_PLAYING )
+                    continue;
                 CHAR_DATA *victim;
                 bool victim_comlink;
                 OBJ_DATA *vobj;
-                victim = d->original ? d->original : d->character;
+                victim = td->original ? td->original : td->character;
 
-                if ( d->connected != CON_PLAYING )
+                if ( !victim )
                   continue;
             
                 if ( !check_pilot(victim,ship) )
@@ -2967,10 +2854,10 @@ void do_pick( CHAR_DATA *ch, char *argument )
                 || IS_AFFECTED(victim->switched, AFF_POSSESS) ) )
                     victim = victim->switched;
             
-                if ( !IS_AWAKE(victim) || BV_IS_SET(victim->in_room->room_flags,ROOM_SILENCE) )
+                if ( !victim->in_room || !IS_AWAKE(victim) || BV_IS_SET(victim->in_room->room_flags,ROOM_SILENCE) )
                     continue;
             
-                if ( d->connected == CON_EDITING )
+                if ( td->connected == CON_EDITING )
                     continue;
             
                 ch_printf(victim,"&R[alarm] %s has been picked!\n",ship->name);
@@ -3390,10 +3277,10 @@ bool check_parry( CHAR_DATA *ch, CHAR_DATA *victim )
     else
     {
 	if ( ( wield = get_eq_char( victim, WEAR_WIELD ) ) == NULL ||
-            ( BV_IS_SET(wield->objflags, WEAPON_LIGHTSABER) ) )
+            !BV_IS_SET(wield->objflags, WEAPON_LIGHTSABER) )
 	{
 	   if ( ( wield = get_eq_char( victim, WEAR_DUAL_WIELD ) ) == NULL ||
-            ( BV_IS_SET(wield->objflags, WEAPON_LIGHTSABER) ) )
+            !BV_IS_SET(wield->objflags, WEAPON_LIGHTSABER) )
               return FALSE;
 	}
 	chances = (int) (victim->pcdata->learned[gsn_parry] );
@@ -3552,9 +3439,13 @@ void do_poison_weapon( CHAR_DATA *ch, char *argument )
 	send_to_char( "You failed and spill some on yourself.  Ouch!\n", ch );
 	set_char_color( AT_GREY, ch );
 	damage( ch, ch, ch->skill_level[HUNTING_ABILITY] , gsn_poison_weapon );
+	if ( char_died( ch ) )
+	    return;
 	act(AT_RED, "$n spills the poison all over!", ch, NULL, NULL, TO_ROOM );
-	extract_obj( pobj );
-	extract_obj( wobj );
+	if ( !obj_extracted( pobj ) )
+	    extract_obj( pobj );
+	if ( !obj_extracted( wobj ) )
+	    extract_obj( wobj );
 	learn_from_failure( ch, gsn_poison_weapon );
 	return;
     }
@@ -3565,7 +3456,7 @@ void do_poison_weapon( CHAR_DATA *ch, char *argument )
     act(AT_GREEN, "You pour the poison over $p, which glistens wickedly!",ch, obj, NULL, TO_CHAR  );
     act(AT_GREEN, "$n pours the poison over $p, which glistens wickedly!",ch, obj, NULL, TO_ROOM  );
     BV_SET_BIT( obj->objflags, ITEM_POISONED );
-    obj->cost *= ch->skill_level[HUNTING_ABILITY]/2;
+    obj->cost *= UMAX( 1, ch->skill_level[HUNTING_ABILITY]/2 );
     /* Set an object timer.  Don't want proliferation of poisoned weapons */
     obj->timer = 10 + ch->skill_level[HUNTING_ABILITY] ;
 
@@ -3633,7 +3524,7 @@ void do_scribe( CHAR_DATA *ch, char *argument )
 
  
 
-    if ( (sn = find_spell( ch, argument, TRUE )) < 0 && (sn = find_skill( ch, argument, TRUE )) )
+    if ( (sn = find_spell( ch, argument, TRUE )) < 0 )
 
     {
 
@@ -3645,7 +3536,7 @@ void do_scribe( CHAR_DATA *ch, char *argument )
 
  
 
-    if ( skill_table[sn]->spell_fun == spell_null )
+    if ( !skill_table[sn]->spell_fun || skill_table[sn]->spell_fun == spell_null )
 
     {
 
@@ -3743,6 +3634,10 @@ void do_scribe( CHAR_DATA *ch, char *argument )
 
  
 
+     if ( obj_extracted(scroll) )
+       return;
+
+     separate_obj(scroll);
      if ( !IS_NPC(ch) && number_percent( ) > ch->pcdata->learned[gsn_scribe] )
 
      {
@@ -3902,10 +3797,6 @@ void do_scribe( CHAR_DATA *ch, char *argument )
      }
 
  }
-
-void do_brew( CHAR_DATA *ch, char *argument )
-{
-}
 
 bool check_grip( CHAR_DATA *ch, CHAR_DATA *victim )
 {
@@ -4096,7 +3987,7 @@ void do_hitall( CHAR_DATA *ch, char *argument )
     if ( ++nvict > ch->skill_level[COMBAT_ABILITY]  / 5 )
       break;
       
-    if ( BV_IS_SET(vch->act, PLR_AFK))
+    if ( !IS_NPC(vch) && BV_IS_SET(vch->act, PLR_AFK) )
     {
       log_printf( "%s just attacked %s with HITALL with an afk flag on!." , ch->name, vch->name );
     }
@@ -4267,14 +4158,10 @@ void do_scan( CHAR_DATA *ch, char *argument )
  
  void do_skin( CHAR_DATA *ch, char *argument)
  {
-     OBJ_DATA *korps;
      OBJ_DATA *corpse;
      OBJ_DATA *obj;
      OBJ_DATA *skin;
-//     bool found;
-     std::string name;
-     char buf[MAX_STRING_LENGTH]; // Need this for SPRINTF_RUNTIME for token replacement in the skin's short_descr and description.
-//     found = FALSE;
+     char buf[MAX_STRING_LENGTH];
   
      if ( argument[0] == '\0' )
      { 
@@ -4304,34 +4191,29 @@ void do_scan( CHAR_DATA *ch, char *argument )
      }
  
  
-     if ( obj->value[3] != 1
-     &&   obj->value[3] != 2
-     &&   obj->value[3] != 3
-     &&   obj->value[3] != 11 )
+     if ( !BV_IS_SET(obj->objflags, WEAPON_VIBRO_BLADE)
+     &&   !BV_IS_SET(obj->objflags, WEAPON_BLADE)
+     &&   !BV_IS_SET(obj->objflags, WEAPON_VIBRO_AXE) )
      {
          send_to_char( "There is nothing you can do with this corpse.\n", ch );
          return;
      }
-     if ( get_obj_index( OBJ_VNUM_SKIN ) == NULL )
+     OBJ_INDEX_DATA *skin_index = get_obj_index(OBJ_VNUM_SKIN);
+     if ( !skin_index )
      {
-       bug( "Vnum 23 (OBJ_VNUM_SKIN) not found for do_skin!", 0);
+       bug( "Vnum 23 (OBJ_VNUM_SKIN) not found for do_skin!");
        return;
      }
  
-     learn_from_success( ch, gsn_punch );
+     separate_obj(corpse);
+     learn_from_success( ch, gsn_skin );
  
      act( AT_BLOOD, "$n strips the skin from $p.", ch, corpse, NULL, TO_ROOM);
      act( AT_BLOOD, "You strip the skin from $p.", ch, corpse, NULL, TO_CHAR);
-     korps = corpse;
- //  korps               = create_object( get_obj_index(OBJ_VNUM_CORPSE_PC), 0 );
-     skin                = create_object( get_obj_index(OBJ_VNUM_SKIN), 0 );
-     name                = IS_NPC(ch) ? korps->short_descr : corpse->short_descr;
-     SPRINTF_RUNTIME( buf, skin->short_descr, name.c_str() );
-     STRFREE( skin->short_descr );
-     skin->short_descr = STRALLOC( buf );
-     SPRINTF_RUNTIME( buf, skin->description, name.c_str()	 );
-     STRFREE( skin->description );
-     skin->description = STRALLOC( buf );
+     skin = create_object(skin_index, 0);
+     const std::string name = corpse->short_descr ? corpse->short_descr : "someone";
+     format_object_description(skin->short_descr, 's', name);
+     format_object_description(skin->description, 's', name);
  
      SPRINTF( buf, "The skinned bones of %s", name.c_str() );
      STRFREE( corpse->name );
@@ -4350,16 +4232,15 @@ void do_scan( CHAR_DATA *ch, char *argument )
      return;
 }
   
-void do_slice( CHAR_DATA *ch, char *argument )
-{
-}
-
 /* Allows PCs to learn spells embedded in object. Should prove interesting. - Samson 8-9-98 */
 void do_study( CHAR_DATA *ch, char *argument ) /* study by Absalom */
 {
     std::string arg;
     OBJ_DATA *obj;
-    int sn = 0, bookskills = 0, book;
+    int sn = 0;
+
+    if ( IS_NPC(ch) || !ch->pcdata )
+        return;
 
     one_argument( argument, arg );
 
@@ -4388,20 +4269,24 @@ void do_study( CHAR_DATA *ch, char *argument ) /* study by Absalom */
     if (obj->item_type == ITEM_STAFF || obj->item_type == ITEM_WAND 
      || obj->item_type == ITEM_SCROLL || obj->item_type == ITEM_BOOK)
     {
-    	if( obj->value[1] >= 0 )
-    	  bookskills++;
-    	if( obj->value[2] >= 0 )
-    	  bookskills++;
-    	if( obj->value[3] >= 0 )
-    	  bookskills++;
-	book = number_range( 1, bookskills );
-	sn = obj->value[book];
-	
-	if ( sn < 0 || sn >= MAX_SKILL )
+	int valid_sns[3];
+	int count = 0;
+
+	for ( int idx = 1; idx <= 3; ++idx )
 	{
-	  bug( "Do_study: bad sn %d.", sn );
+	  int s = obj->value[idx];
+	  if ( s >= 0 && s < top_sn && skill_table[s] && skill_table[s]->name )
+	    valid_sns[count++] = s;
+	}
+
+	if ( count == 0 )
+	{
+	  send_to_char( "It contains no usable knowledge.\n", ch );
 	  return;
 	}
+
+	sn = valid_sns[number_range( 0, count - 1 )];
+
 	WAIT_STATE( ch, skill_table[gsn_study]->beats );
 	if ( number_percent() >= 55 + ch->pcdata->learned[gsn_study] * 4/5)
 	{
@@ -4417,7 +4302,6 @@ void do_study( CHAR_DATA *ch, char *argument ) /* study by Absalom */
 	  act( AT_MAGIC, "You have absorbed everything the book teachs you on the ability to $t!", ch ,skill_table[sn]->name, NULL, TO_CHAR);
 	
 	ch->pcdata->learned[sn] += URANGE( 0, 20-ch->pcdata->learned[sn], 5);
-	ch->pcdata->learned[sn] += 5;
 	learn_from_success( ch, gsn_study );
         return;
     }

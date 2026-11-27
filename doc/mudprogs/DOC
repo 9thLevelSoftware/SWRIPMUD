@@ -1,3 +1,127 @@
+SWRIPMUD MUDProg Builder Guide
+============================
+
+This section describes the current SWRIPMUD implementation. The upstream
+MERC manual follows under Historical MERC Manual. Its numeric flag and
+installation examples describe the older engine.
+
+Authoring and persistence
+------------------------
+
+Programs attach to a mobile prototype, object prototype, or room. Builders
+must have permission to modify the target area. Mobile and object program
+editing requires the prototype flag. Carry an object when editing below
+LEVEL_GOD. Stand in the target room for room programs.
+
+Use the ordinary builder entry points with short trigger names.
+
+    mpedit <mobile> list
+    mpedit <mobile> add speech hello
+    mpedit <mobile> edit <number>
+    opedit <object> list
+    opedit <object> add use 100
+    rpedit list
+    rpedit add speech hello
+
+The editor accepts the program command body. Its /s command saves the body
+to the edited target. The add, insert, edit, delete, and list operations
+use program numbers beginning at 1. Inserting also takes a program number,
+as in rpedit insert 1 speech hello. Save the area's data through the area's
+normal savearea or foldarea workflow after editing.
+
+Program commands execute through the existing command interpreter. A simple
+mobile speech program can say Hello, $n. The $n token names the actor when
+the trigger supplies one. Context varies by event. Check the actor before
+using actor-dependent commands. Object and room programs execute through
+the supermob context and receive event-specific objects and characters.
+
+Affect conditions use named flags
+--------------------------------
+
+The current isaffected condition resolves a flag name through get_aflag.
+For example, a speech program body can contain the following.
+
+    if isaffected($n) == blind
+      say I hope your sight returns soon.
+    else
+      say Hello, $n.
+    endif
+
+The comparison token is part of the ifcheck syntax. isaffected tests
+membership in the named affect flag directly. Consult the affect names in
+src/build.c and the current builder help when choosing a flag. BitSet
+fields use their named flag interfaces in the editor and area saver.
+
+Other ordinary conditions include ispc($n), isimmort($n), level($n) >= 6,
+and hitprcnt($n) < 50. Parentheses delimit the condition argument. Use
+if, or, else, endif, and break according to the driver in src/mud_prog.c.
+
+Triggers and their arguments
+---------------------------
+
+The file loader recognizes the following trigger names. The online editor
+uses the short names listed by mpedit, opedit, or rpedit. TRIGGER.txt gives
+the complete loader and editor catalogs.
+
+Mobile events include act, speech, rand, fight, hitprcnt, death, entry,
+greet, allgreet, give, bribe, time, hour, and script. Object events include
+wear, remove, sac, get, drop, damage, repair, greet, exa, use, pull, and
+push, along with the object's act, speech, random, and script hooks.
+Room hooks include act, speech, rand, sleep, rest, fight, entry, leave,
+death, time, hour, and script.
+
+An event fires only where the runtime calls its matching trigger. A loader
+name alone does not establish an event hook. Check the relevant
+mprog_*, oprog_*, or rprog_* function and its caller for the event context.
+The look, randiw, and speechiw names are accepted by the parser and need
+their individual hook checked before use.
+
+Speech and act arguments are word lists. A leading p selects phrase
+matching. Ordinary percentage triggers use a percentage argument.
+Time and hour compare their numeric argument with the current game hour.
+Script programs may specify an hour, or an empty argument to run without
+an hour restriction. Their command position persists across script ticks.
+
+Inline and external files
+-------------------------
+
+An inline program in a saved prototype or room uses this form.
+
+    > speech_prog hello~
+    say Hello, $n.
+    ~
+    |
+
+A series can contain several > records and ends with |. The first tilde
+terminates the trigger argument. The next terminates the command body.
+Use the editor and area's saver to generate the enclosing mobile, object,
+or room record.
+
+External programs are optional files in PROG_DIR, currently ../mudprogs/
+relative to the runtime area directory. Runtime directory initialization
+creates that directory. An area's program section can include
+> in_file_prog Greeting.prg~. The external file contains ordinary program
+records and ends with |. External includes do not nest. Deploy every
+referenced file along with the area before loading it. Missing external
+files cause a boot error.
+
+Verification references
+-----------------------
+
+This guide was checked against src/build.c mpedit, opedit, rpedit,
+get_mpflag and fold_area, src/db.c mprog_name_to_type and the mobile,
+object, and room program loaders, and src/mud_prog.c mprog_do_ifcheck.
+The active academy in area/newacad.are demonstrates inline mobile speech
+and act records. Its ordinary push program and greet/speech walkthrough
+are covered by T1-F13-01 and T1-F14-01.
+
+Historical MERC Manual
+=====================
+
+The original manual below is retained for provenance and background.
+Use the SWRIPMUD section above for current file paths, flags, and editor
+commands.
+
 === MOBprograms
 
 	MOBprograms are a way to make your mobiles more interesting.  This

@@ -77,9 +77,11 @@ A plaza guard stands at his post.
 0 0 0 0 1 1 0
 8 8 0 0 0 0 0 0
 0 0 0 0 0 0 0 0
-> entry_prog obliki~
+> greet_prog 100~
+if name($n) == Obliki
 say Hey! What are YOU doing here Mr Obliki?!?
-kill obliki
+kill $n
+endif
 ~
 |
 #26004

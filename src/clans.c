@@ -19,10 +19,14 @@
 ****************************************************************************/
 
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
-/* #include <stdlib.h> */
+#include <unistd.h>
+#include <climits>
+#include <cstdlib>
 #include <time.h>
 #include "mud.h"
 
@@ -46,11 +50,10 @@ GUARD_DATA * last_guard;
 /* local routines */
 void	fread_clan	args( ( CLAN_DATA *clan, FILE *fp ) );
 bool	load_clan_file	args( ( GameContext *game, const std::string& clanfile ) );
-void	write_clan_list	args( ( void ) );
 void	fread_planet	args( ( PLANET_DATA *planet, FILE *fp ) );
 bool	load_planet_file	args( ( GameContext *game, const std::string& planetfile ) );
-void	write_planet_list	args( ( void ) );
 void	save_member_list	args( ( MEMBER_LIST *members_list ) );
+static bool save_member_list_file( const CLAN_DATA *clan, const MEMBER_LIST *members_list );
 void	show_members		args( ( CHAR_DATA *ch, const std::string& argument, const std::string& format ) );
 
 
@@ -61,8 +64,11 @@ CLAN_DATA *get_clan( const std::string& name )
 {
     CLAN_DATA *clan;
     
+    if ( name.empty() )
+        return NULL;
+
     for ( clan = first_clan; clan; clan = clan->next )
-       if ( !str_cmp( name, clan->name ) )
+       if ( clan->name && !str_cmp( name, clan->name ) )
          return clan;
     return NULL;
 }
@@ -71,87 +77,177 @@ PLANET_DATA *get_planet( const std::string&name )
 {
     PLANET_DATA *planet;
     
+    if ( name.empty() )
+        return NULL;
+
     for ( planet = first_planet; planet; planet = planet->next )
-       if ( !str_cmp( name, planet->name ) )
+       if ( planet->name && !str_cmp( name, planet->name ) )
          return planet;
     return NULL;
 }
 
-void write_clan_list( )
+static bool realm_filename_valid( const std::string &name )
 {
-    CLAN_DATA *tclan;
-    FILE *fpout;
-    std::string filename;
-
-    filename = str_printf("%s%s", CLAN_DIR, CLAN_LIST);
-    fpout = fopen( filename.c_str(), "w" );
-    if ( !fpout )
-    {
-	bug( "FATAL: cannot open clan.lst for writing!\n", 0 );
- 	return;
-    }	  
-    for ( tclan = first_clan; tclan; tclan = tclan->next )
-	fprintf( fpout, "%s\n", tclan->filename );
-    fprintf( fpout, "$\n" );
-    FCLOSE( fpout );
+    return !name.empty() && isalnum( static_cast<unsigned char>( name.front() ) )
+        && name.find_first_not_of( "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" ) == std::string::npos
+        && name.find( ".." ) == std::string::npos;
 }
 
-void write_planet_list( )
+template <typename Writer>
+static bool write_realm_file( const std::string &path, Writer write )
 {
-    PLANET_DATA *tplanet;
-    FILE *fpout;
-    std::string filename;
-
-    filename = str_printf("%s%s", PLANET_DIR, PLANET_LIST);
-    fpout = fopen( filename.c_str(), "w" );
-    if ( !fpout )
+    std::string temporary = path + ".tmp.XXXXXX";
+    const int fd = mkstemp( temporary.data() );
+    if ( fd < 0 )
     {
-	bug( "FATAL: cannot open planet.lst for writing!\n", 0 );
- 	return;
-    }	  
-    for ( tplanet = first_planet; tplanet; tplanet = tplanet->next )
-	fprintf( fpout, "%s\n", tplanet->filename );
-    fprintf( fpout, "$\n" );
-    FCLOSE( fpout );
+        bug( "Cannot open temporary file for %s: %s", path.c_str(), strerror( errno ) );
+        return false;
+    }
+
+    FILE *fp = fdopen( fd, "wb" );
+    if ( !fp )
+    {
+        bug( "Cannot open temporary stream for %s: %s", path.c_str(), strerror( errno ) );
+        close( fd );
+        unlink( temporary.c_str() );
+        return false;
+    }
+
+    const bool complete = write( fp ) && !ferror( fp ) && fflush( fp ) == 0 && fsync( fd ) == 0;
+    const bool closed = fclose( fp ) == 0;
+    if ( complete && closed && rename( temporary.c_str(), path.c_str() ) == 0 )
+        return true;
+
+    bug( "Cannot save %s", path.c_str() );
+    unlink( temporary.c_str() );
+    return false;
+}
+
+template <typename Entity>
+static bool write_realm_list( const char *path, const Entity *first, const Entity *added = nullptr )
+{
+    return write_realm_file( path, [&]( FILE *fp ) {
+        for ( const Entity *entity = first; entity; entity = entity->next )
+        {
+            if ( !entity->filename || !realm_filename_valid( entity->filename ) )
+                return false;
+            fprintf( fp, "%s\n", entity->filename );
+        }
+        if ( added )
+            fprintf( fp, "%s\n", added->filename );
+        fprintf( fp, "$\n" );
+        return true;
+    } );
+}
+
+template <typename Entity>
+static bool realm_filename_available( CHAR_DATA *ch, const char *dir, const std::string &name,
+                                      const Entity *first )
+{
+    if ( name.size() > 230 || !realm_filename_valid( name ) )
+    {
+        send_to_char( "Choose a valid filename using letters, numbers, dots, hyphens or underscores.\n", ch );
+        return false;
+    }
+    for ( const Entity *entity = first; entity; entity = entity->next )
+    {
+        if ( entity->filename && !str_cmp( entity->filename, name ) )
+        {
+            send_to_char( "That filename is already in use.\n", ch );
+            return false;
+        }
+    }
+    if ( !is_valid_filename( ch, dir, name ) )
+        return false;
+
+    struct stat info;
+    const std::string path = std::string( dir ) + name;
+    if ( lstat( path.c_str(), &info ) < 0 && errno == ENOENT )
+        return true;
+
+    send_to_char( "That file cannot be used.\n", ch );
+    return false;
+}
+
+static bool clan_filename_available( CHAR_DATA *ch, const std::string &name )
+{
+    if ( !realm_filename_available( ch, CLAN_DIR, name, first_clan ) )
+        return false;
+
+    struct stat info;
+    const std::string path = std::string( CLAN_DIR ) + name;
+    for ( const char *suffix : { ".mem", ".vault" } )
+    {
+        if ( lstat( (path + suffix).c_str(), &info ) == 0 || errno != ENOENT )
+        {
+            send_to_char( "That filename already has member or vault data.\n", ch );
+            return false;
+        }
+    }
+    return true;
+}
+
+static std::string realm_filename_for_name( const std::string &name, const char *extension )
+{
+    std::string filename;
+    for ( const char letter : name )
+    {
+        if ( (letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z')
+        ||   (letter >= '0' && letter <= '9') )
+            filename += static_cast<char>( LOWER( letter ) );
+        else if ( !filename.empty() && filename.back() != '-' )
+            filename += '-';
+    }
+    if ( filename.empty() )
+        return {};
+    if ( filename.back() == '-' )
+        filename.pop_back();
+    return filename + extension;
+}
+
+static bool copy_clan_vault( const std::string &old_path, const std::string &new_path )
+{
+    FILE *source = fopen( old_path.c_str(), "rb" );
+    if ( !source )
+        return errno == ENOENT;
+
+    const bool saved = write_realm_file( new_path, [&]( FILE *target ) {
+        char buffer[4096];
+        size_t count;
+        while ( (count = fread( buffer, 1, sizeof( buffer ), source )) != 0 )
+            if ( fwrite( buffer, 1, count, target ) != count )
+                return false;
+        return !ferror( source );
+    } );
+    fclose( source );
+    return saved;
 }
 
 /*
  * Save a clan's data to its data file
  */
-void save_clan( CLAN_DATA *clan )
+static bool save_clan_file( const CLAN_DATA *clan )
 {
-    FILE *fp;
-    std::string filename;
-
     if ( !clan )
     {
-	bug( "save_clan: null clan pointer!", 0 );
-	return;
+	bug( "save_clan: null clan pointer!" );
+	return false;
     }
         
-    if ( !clan->filename || clan->filename[0] == '\0' )
+    if ( !clan->filename || !realm_filename_valid( clan->filename ) )
     {
-	bug( str_printf("save_clan: %s has no filename", clan->name).c_str(), 0 );
-	return;
+	bug( "save_clan: %s has no valid filename", clan->name ? clan->name : "(null)" );
+	return false;
     }
  
-    filename = str_printf("%s%s", CLAN_DIR, clan->filename);
-    
-    FCLOSE( fpReserve );
-    if ( ( fp = fopen( filename.c_str(), "w" ) ) == NULL )
-    {
-    	bug( "save_clan: fopen", 0 );
-    	perror( filename.c_str() );
-    }
-    else
-    {
+    return write_realm_file( std::string( CLAN_DIR ) + clan->filename, [&]( FILE *fp ) {
 	fprintf( fp, "#CLAN\n" );
-	fprintf( fp, "Name         %s~\n",	clan->name		);
+	fprintf( fp, "Name         %s~\n",	clan->name ? clan->name : "" );
 	fprintf( fp, "Filename     %s~\n",	clan->filename		);
-	fprintf( fp, "Description  %s~\n",	clan->description	);
-	fprintf( fp, "Leader       %s~\n",	clan->leader		);
-	fprintf( fp, "NumberOne    %s~\n",	clan->number1		);
-	fprintf( fp, "NumberTwo    %s~\n",	clan->number2		);
+	fprintf( fp, "Description  %s~\n",	clan->description ? clan->description : "" );
+	fprintf( fp, "Leader       %s~\n",	clan->leader ? clan->leader : "" );
+	fprintf( fp, "NumberOne    %s~\n",	clan->number1 ? clan->number1 : "" );
+	fprintf( fp, "NumberTwo    %s~\n",	clan->number2 ? clan->number2 : "" );
 	fprintf( fp, "PKills       %d\n",	clan->pkills		);
 	fprintf( fp, "PDeaths      %d\n",	clan->pdeaths		);
 	fprintf( fp, "MKills       %d\n",	clan->mkills		);
@@ -170,47 +266,38 @@ void save_clan( CLAN_DATA *clan )
 	fprintf( fp, "Enlist1      %d\n", clan->enlistroom1 );
 	fprintf( fp, "Enlist2      %d\n", clan->enlistroom2 );
 	fprintf( fp, "Jail         %d\n",       clan->jail            	);
-	if ( clan->mainclan )
+	if ( clan->mainclan && clan->mainclan->name )
    	   fprintf( fp, "MainClan     %s~\n",	clan->mainclan->name	);
 	fprintf( fp, "End\n\n"						);
 	fprintf( fp, "#END\n"						);
-    }
-    FCLOSE( fp );
-    fpReserve = fopen( NULL_FILE, "r" );
-    return;
+        return true;
+    } );
 }
 
-void save_planet( PLANET_DATA *planet )
+void save_clan( CLAN_DATA *clan )
 {
-    FILE *fp;
-    std::string filename;
+    save_clan_file( clan );
+}
 
+static bool save_planet_file( const PLANET_DATA *planet )
+{
     if ( !planet )
     {
-	bug( "save_planet: null planet pointer!", 0 );
-	return;
+	bug( "save_planet: null planet pointer!" );
+	return false;
     }
         
-    if ( !planet->filename || planet->filename[0] == '\0' )
+    if ( !planet->filename || !realm_filename_valid( planet->filename ) )
     {
-	bug( str_printf("save_planet: %s has no filename", planet->name).c_str(), 0 );
-	return;
+	bug( "save_planet: %s has no valid filename", planet->name ? planet->name : "(null)" );
+	return false;
     }
  
-    filename = str_printf("%s%s", PLANET_DIR, planet->filename);
-    
-    FCLOSE( fpReserve );
-    if ( ( fp = fopen( filename.c_str(), "w" ) ) == NULL )
-    {
-    	bug( "save_planet: fopen", 0 );
-    	perror( filename.c_str() );
-    }
-    else
-    {
+    return write_realm_file( std::string( PLANET_DIR ) + planet->filename, [&]( FILE *fp ) {
         AREA_DATA *pArea;
         
 	fprintf( fp, "#PLANET\n" );
-	fprintf( fp, "Name         %s~\n",	planet->name		);
+	fprintf( fp, "Name         %s~\n",	planet->name ? planet->name : "" );
 	fprintf( fp, "Filename     %s~\n",	planet->filename        );
 	fprintf( fp, "BaseValue    %ld\n",	planet->base_value      );
 	fprintf( fp, "Flags        %d\n",	planet->flags           );
@@ -224,10 +311,13 @@ void save_planet( PLANET_DATA *planet )
          	fprintf( fp, "Area         %s~\n",	pArea->filename  );
 	fprintf( fp, "End\n\n"						);
 	fprintf( fp, "#END\n"						);
-    }
-    FCLOSE( fp );
-    fpReserve = fopen( NULL_FILE, "r" );
-    return;
+        return true;
+    } );
+}
+
+void save_planet( PLANET_DATA *planet )
+{
+    save_planet_file( planet );
 }
 
 
@@ -247,6 +337,29 @@ void save_planet( PLANET_DATA *planet )
 				    break;				\
 				}
 
+static bool parse_clan_amount(const char *input, long &amount)
+{
+    if ( !input )
+        return false;
+    char *end;
+    errno = 0;
+    amount = strtol(input, &end, 10);
+    if ( errno == ERANGE || end == input )
+        return false;
+    while ( isspace(static_cast<unsigned char>(*end)) )
+        ++end;
+    return *end == '\0';
+}
+
+static long read_clan_funds(FILE *fp)
+{
+    long funds;
+    if ( parse_clan_amount(fread_word(fp), funds) )
+        return funds;
+    bug("Fread_clan: invalid funds balance");
+    return 0;
+}
+
 void fread_clan( CLAN_DATA *clan, FILE *fp )
 {
     const char *word;
@@ -255,6 +368,8 @@ void fread_clan( CLAN_DATA *clan, FILE *fp )
     for ( ; ; )
     {
 	word   = feof( fp ) ? "End" : fread_word( fp );
+	if ( !word || word[0] == '\0' )
+	    word = "End";
 	fMatch = FALSE;
 
 	switch ( UPPER(word[0]) )
@@ -294,7 +409,7 @@ void fread_clan( CLAN_DATA *clan, FILE *fp )
 	    break;
 	    
 	case 'F':
-	    KEY( "Funds",	clan->funds,		fread_number( fp ) );
+	    KEY( "Funds",	clan->funds,		read_clan_funds(fp) );
 	    KEY( "Filename",	clan->filename,		fread_string_nohash( fp ) );
 	    break;
 
@@ -344,7 +459,7 @@ void fread_clan( CLAN_DATA *clan, FILE *fp )
 	
 	if ( !fMatch )
 	{
-	    bug( str_printf("Fread_clan: no match: %s", word).c_str(), 0 );
+	    bug( "Fread_clan: no match: %s", word );
 	}
 	
     }
@@ -358,6 +473,8 @@ void fread_planet( PLANET_DATA *planet, FILE *fp )
     for ( ; ; )
     {
 	word   = feof( fp ) ? "End" : fread_word( fp );
+	if ( !word || word[0] == '\0' )
+	    word = "End";
 	fMatch = FALSE;
 
 	switch ( UPPER(word[0]) )
@@ -447,7 +564,7 @@ void fread_planet( PLANET_DATA *planet, FILE *fp )
 	
 	if ( !fMatch )
 	{
-	    bug( str_printf("Fread_planet: no match: %s", word).c_str(), 0 );
+	    bug( "Fread_planet: no match: %s", word );
 	}
 	
     }
@@ -478,14 +595,18 @@ bool load_clan_file( GameContext *game, const std::string& clanfile )
 
     if ( ( fp = fopen( filename.c_str(), "r" ) ) != NULL )
     {
-
-	found = TRUE;
 	for ( ; ; )
 	{
 	    char letter;
 	    char *word;
 
+	    if ( feof( fp ) )
+		break;
+
 	    letter = fread_letter( fp );
+	    if ( letter == '\0' )
+		break;
+
 	    if ( letter == '*' )
 	    {
 		fread_to_eol( fp );
@@ -494,7 +615,7 @@ bool load_clan_file( GameContext *game, const std::string& clanfile )
 
 	    if ( letter != '#' )
 	    {
-		bug( "Load_clan_file: # not found.", 0 );
+		bug( "Load_clan_file: # not found." );
 		break;
 	    }
 
@@ -502,6 +623,7 @@ bool load_clan_file( GameContext *game, const std::string& clanfile )
 	    if ( !str_cmp( word, "CLAN"	) )
 	    {
 	    	fread_clan( clan, fp );
+	    	found = TRUE;
 	    	break;
 	    }
 	    else
@@ -509,7 +631,7 @@ bool load_clan_file( GameContext *game, const std::string& clanfile )
 	        break;
 	    else
 	    {
-		bug( str_printf("Load_clan_file: bad section: %s.", word).c_str(), 0 );
+		bug( "Load_clan_file: bad section: %s.", word );
 		break;
 	    }
 	}
@@ -522,16 +644,23 @@ bool load_clan_file( GameContext *game, const std::string& clanfile )
 
 	LINK( clan, first_clan, last_clan, next, prev );
 
-         if( !load_member_list( game, clan->filename ) )
+         if( !clan->filename || clan->filename[0] == '\0' || !load_member_list( game, clan->filename ) )
          {
              MEMBER_LIST *members_list;
+             struct stat fst;
+             std::string mem_file = str_printf("%s%s.mem", CLAN_DIR, clan->filename ? clan->filename : "");
+             bool mem_exists = (clan->filename && clan->filename[0] != '\0' && stat(mem_file.c_str(), &fst) == 0);
 
-             log_string( "No memberlist found, creating new list" );
+             if ( mem_exists )
+                 bug( "load_clan_file: %s.mem failed to load; preserving file on disk", clan->filename );
+             else
+                 log_string( "No memberlist found, creating new list" );
              CREATE( members_list, MEMBER_LIST, 1 );
              members_list->game = game;
-             members_list->name = STRALLOC( clan->name );
+             members_list->name = STRALLOC( clan->name ? clan->name : "" );
              LINK( members_list, first_member_list, last_member_list, next, prev );
-             save_member_list( members_list );
+             if ( !mem_exists )
+                 save_member_list( members_list );
          }
 
 	if ( clan->storeroom == 0
@@ -541,6 +670,13 @@ bool load_clan_file( GameContext *game, const std::string& clanfile )
 	    return found;
 	}
 	
+	if ( !clan->filename || clan->filename[0] == '\0' )
+	{
+	    bug( "load_clan_file: %s has no filename; skipping vault load",
+		 clan->name ? clan->name : "(null)" );
+	    return found;
+	}
+
 	filename = str_printf("%s%s.vault", CLAN_DIR, clan->filename );
 	if ( ( fp = fopen( filename.c_str(), "r" ) ) != NULL )
 	{
@@ -549,6 +685,7 @@ bool load_clan_file( GameContext *game, const std::string& clanfile )
 
 	    log_string( "Loading clan storage room" );
 	    rset_supermob(storeroom);
+	    ObjectNest nest{};
 
 //	    found = TRUE;
 	    for ( ; ; )
@@ -565,21 +702,21 @@ bool load_clan_file( GameContext *game, const std::string& clanfile )
 
 		if ( letter != '#' )
 		{
-		    bug( "Load_clan_vault: # not found.", 0 );
-		    bug( clan->name, 0 );
+		    bug( "Load_clan_vault: # not found." );
+		    bug( "%s", clan->name ? clan->name : "(null)" );
 		    break;
 		}
 
 		word = fread_word( fp );
 		if ( !str_cmp( word, "OBJECT" ) )	/* Objects	*/
-		  fread_obj  ( game, supermob, fp, OS_CARRY );
+		  fread_obj(game, supermob, fp, OS_CARRY, nest);
 		else
 		if ( !str_cmp( word, "END"    ) )	/* Done		*/
 		  break;
 		else
 		{
-		    bug( "Load_clan_vault: bad section.", 0 );
-		    bug( clan->name, 0 );
+		    bug( "Load_clan_vault: bad section." );
+		    bug( "%s", clan->name ? clan->name : "(null)" );
 		    break;
 		}
 	    }
@@ -625,14 +762,18 @@ bool load_planet_file( GameContext *game, const std::string& planetfile )
 
     if ( ( fp = fopen( filename.c_str(), "r" ) ) != NULL )
     {
-
-	found = TRUE;
 	for ( ; ; )
 	{
 	    char letter;
 	    char *word;
 
+	    if ( feof( fp ) )
+		break;
+
 	    letter = fread_letter( fp );
+	    if ( letter == '\0' )
+		break;
+
 	    if ( letter == '*' )
 	    {
 		fread_to_eol( fp );
@@ -641,7 +782,7 @@ bool load_planet_file( GameContext *game, const std::string& planetfile )
 
 	    if ( letter != '#' )
 	    {
-		bug( "Load_planet_file: # not found.", 0 );
+		bug( "Load_planet_file: # not found." );
 		break;
 	    }
 
@@ -649,6 +790,7 @@ bool load_planet_file( GameContext *game, const std::string& planetfile )
 	    if ( !str_cmp( word, "PLANET"	) )
 	    {
 	    	fread_planet( planet, fp );
+	    	found = TRUE;
 	    	break;
 	    }
 	    else
@@ -656,7 +798,7 @@ bool load_planet_file( GameContext *game, const std::string& planetfile )
 	        break;
 	    else
 	    {
-		bug( str_printf("Load_planet_file: bad section: %s.", word).c_str(), 0 );
+		bug( "Load_planet_file: bad section: %s.", word );
 		break;
 	    }
 	}
@@ -705,7 +847,7 @@ void load_clans( GameContext *game )
 
 	if ( !load_clan_file( game, std::string( filename ) ) )
 	{
-	  bug( str_printf("Cannot load clan file: %s", filename.c_str()).c_str(), 0 );
+	  bug( "Cannot load clan file: %s", filename.c_str() );
 	}
     }
     FCLOSE( fpList );
@@ -757,7 +899,7 @@ void load_planets( GameContext *game )
 
 	if ( !load_planet_file( game, filename ) )
 	{
-	  bug( str_printf("Cannot load planet file: %s", filename.c_str()).c_str(), 0 );
+	  bug( "Cannot load planet file: %s", filename.c_str() );
 	}
     }
     FCLOSE( fpList );
@@ -778,7 +920,7 @@ void do_induct( CHAR_DATA *ch, char *argument )
     CHAR_DATA *victim;
     CLAN_DATA *clan;
 
-    if ( IS_NPC( ch ) || !ch->pcdata->clan )
+    if ( IS_NPC( ch ) || !ch->pcdata || !ch->pcdata->clan )
     {
 	send_to_char( "Huh?\n", ch );
 	return;
@@ -788,9 +930,9 @@ void do_induct( CHAR_DATA *ch, char *argument )
     
     if ( (ch->pcdata && ch->pcdata->bestowments
     &&    is_name("induct", ch->pcdata->bestowments))
-    ||   !str_cmp( ch->name, clan->leader  )
-    ||   !str_cmp( ch->name, clan->number1 )
-    ||   !str_cmp( ch->name, clan->number2 ) )
+    ||   (ch->name && clan->leader && !str_cmp( ch->name, clan->leader ))
+    ||   (ch->name && clan->number1 && !str_cmp( ch->name, clan->number1 ))
+    ||   (ch->name && clan->number2 && !str_cmp( ch->name, clan->number2 )) )
 	;
     else
     {
@@ -798,7 +940,7 @@ void do_induct( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    one_argument( argument, arg );
+    one_argument( argument ? argument : "", arg );
 
     if ( arg.empty() )
     {
@@ -847,11 +989,18 @@ void do_induct( CHAR_DATA *ch, char *argument )
       
     }
     
+    if ( !clan->name || clan->name[0] == '\0' )
+    {
+        send_to_char( "That organization has no name and cannot induct members.\n", ch );
+        return;
+    }
+
     clan->members++;
 
     victim->pcdata->clan = clan;
-    STRFREE(victim->pcdata->clan_name);
-    victim->pcdata->clan_name = QUICKLINK( clan->name );
+    if ( victim->pcdata->clan_name )
+        STRFREE(victim->pcdata->clan_name);
+    victim->pcdata->clan_name = STRALLOC( clan->name );
     update_member( victim );
     act( AT_MAGIC, "You induct $N into $t", ch, clan->name, victim, TO_CHAR );
     act( AT_MAGIC, "$n inducts $N into $t", ch, clan->name, victim, TO_NOTVICT );
@@ -863,19 +1012,19 @@ void do_induct( CHAR_DATA *ch, char *argument )
 /* Can the character outcast the victim? - FUSS/DV 3-13-26 */
 bool can_outcast( CLAN_DATA *clan, CHAR_DATA *ch, CHAR_DATA *victim )
 {
-   if( !clan || !ch || !victim )
+   if( !clan || !ch || !victim || !ch->name || !victim->name )
       return FALSE;
-   if( !str_cmp( ch->name, clan->leader ) )
+   if( clan->leader && !str_cmp( ch->name, clan->leader ) )
       return TRUE;
-   if( !str_cmp( victim->name, clan->leader ) )
+   if( clan->leader && !str_cmp( victim->name, clan->leader ) )
       return FALSE;
-   if( !str_cmp( ch->name, clan->number1 ) )
+   if( clan->number1 && !str_cmp( ch->name, clan->number1 ) )
       return TRUE;
-   if( !str_cmp( victim->name, clan->number1 ) )
+   if( clan->number1 && !str_cmp( victim->name, clan->number1 ) )
       return FALSE;
-   if( !str_cmp( ch->name, clan->number2 ) )
+   if( clan->number2 && !str_cmp( ch->name, clan->number2 ) )
       return TRUE;
-   if( !str_cmp( victim->name, clan->number2 ) )
+   if( clan->number2 && !str_cmp( victim->name, clan->number2 ) )
       return FALSE;
    return TRUE;
 }
@@ -886,7 +1035,7 @@ void do_outcast( CHAR_DATA *ch, char *argument )
     CHAR_DATA *victim;
     CLAN_DATA *clan;
 
-    if ( IS_NPC( ch ) || !ch->pcdata->clan )
+    if ( IS_NPC( ch ) || !ch->pcdata || !ch->pcdata->clan )
     {
 	send_to_char( "Huh?\n", ch );
 	return;
@@ -896,9 +1045,9 @@ void do_outcast( CHAR_DATA *ch, char *argument )
 
     if ( (ch->pcdata && ch->pcdata->bestowments
     &&    is_name("outcast", ch->pcdata->bestowments))
-    ||   !str_cmp( ch->name, clan->leader  )
-    ||   !str_cmp( ch->name, clan->number1 )
-    ||   !str_cmp( ch->name, clan->number2 ) )
+    ||   (ch->name && clan->leader && !str_cmp( ch->name, clan->leader ))
+    ||   (ch->name && clan->number1 && !str_cmp( ch->name, clan->number1 ))
+    ||   (ch->name && clan->number2 && !str_cmp( ch->name, clan->number2 )) )
 	;
     else
     {
@@ -907,7 +1056,7 @@ void do_outcast( CHAR_DATA *ch, char *argument )
     }
 
 
-    one_argument( argument, arg );
+    one_argument( argument ? argument : "", arg );
 
     if ( arg.empty() )
     {
@@ -944,34 +1093,37 @@ void do_outcast( CHAR_DATA *ch, char *argument )
         return;
     }
 
-    if ( victim->speaking & LANG_CLAN )
+    if ( victim->speaking == LANG_CLAN )
         victim->speaking = LANG_COMMON;
     BV_REMOVE_BIT( victim->speaks, LANG_CLAN );
     --clan->members;
     if( clan->members < 0 ) //--Shaddai/FUSS - DV added 3-13-26
         clan->members = 0;    
-    if ( !str_cmp( victim->name, ch->pcdata->clan->number1 ) )
+    if ( victim->name && ch->pcdata->clan->number1 && !str_cmp( victim->name, ch->pcdata->clan->number1 ) )
     {
 	STRFREE( ch->pcdata->clan->number1 );
 	ch->pcdata->clan->number1 = STRALLOC( "" );
     }
-    if ( !str_cmp( victim->name, ch->pcdata->clan->number2 ) )
+    if ( victim->name && ch->pcdata->clan->number2 && !str_cmp( victim->name, ch->pcdata->clan->number2 ) )
     {
 	STRFREE( ch->pcdata->clan->number2 );
 	ch->pcdata->clan->number2 = STRALLOC( "" );
     }
     victim->pcdata->clan = NULL;
     remove_member( victim );
-    STRFREE(victim->pcdata->clan_name);
+    if ( victim->pcdata->clan_name )
+        STRFREE(victim->pcdata->clan_name);
     victim->pcdata->clan_name = STRALLOC( "" );
-    act( AT_MAGIC, "You outcast $N from $t", ch, clan->name, victim, TO_CHAR );
-    act( AT_MAGIC, "$n outcasts $N from $t", ch, clan->name, victim, TO_ROOM );
-    act( AT_MAGIC, "$n outcasts you from $t", ch, clan->name, victim, TO_VICT );
+    act( AT_MAGIC, "You outcast $N from $t", ch, clan->name ? clan->name : "(unnamed)", victim, TO_CHAR );
+    act( AT_MAGIC, "$n outcasts $N from $t", ch, clan->name ? clan->name : "(unnamed)", victim, TO_ROOM );
+    act( AT_MAGIC, "$n outcasts you from $t", ch, clan->name ? clan->name : "(unnamed)", victim, TO_VICT );
     
-    STR_DISPOSE( victim->pcdata->bestowments );
+    if ( victim->pcdata->bestowments )
+        STR_DISPOSE( victim->pcdata->bestowments );
     victim->pcdata->bestowments = str_dup("");
     
-    save_char_obj( victim );	/* clan gets saved when pfile is saved */
+    save_clan(clan);
+    save_char_obj(victim);
     return;
 }
 
@@ -979,7 +1131,7 @@ void do_setclan( CHAR_DATA *ch, char *argument )
 {
     std::string arg1;
     std::string arg2;
-    std::string argstr = argument;
+    std::string argstr = argument ? argument : "";
     CLAN_DATA *clan;
 
     if ( IS_NPC( ch ) )
@@ -995,8 +1147,8 @@ void do_setclan( CHAR_DATA *ch, char *argument )
     {
 	send_to_char( "Usage: setclan <clan> <field> <leader|number1|number2> <player>\n", ch );
 	send_to_char( "\nField being one of:\n", ch );
-	send_to_char( " leader number1 number2 subclan enlist1\n", ch ); 
-	send_to_char( " enlist2 members board recall storage\n", ch );
+	send_to_char( " leader number1 number2 subclan enlistroom1\n", ch );
+	send_to_char( " enlistroom2 members board type storage\n", ch );
 	send_to_char( " funds trooper1 trooper2 jail", ch );	
 	send_to_char( " guard1 guard2 patrol1 patrol2\n", ch );
 	if ( get_trust( ch ) >= LEVEL_SUB_IMPLEM )
@@ -1029,7 +1181,8 @@ void do_setclan( CHAR_DATA *ch, char *argument )
 	}
     if ( !str_cmp( arg2, "leader" ) )
     {
-	STRFREE( clan->leader );
+	if ( clan->leader )
+	    STRFREE( clan->leader );
 	clan->leader = STRALLOC( argstr );
 	send_to_char( "Done.\n", ch );
 	save_clan( clan );
@@ -1065,7 +1218,8 @@ void do_setclan( CHAR_DATA *ch, char *argument )
 
     if ( !str_cmp( arg2, "number1" ) )
     {
-	STRFREE( clan->number1 );
+	if ( clan->number1 )
+	    STRFREE( clan->number1 );
 	clan->number1 = STRALLOC( argstr );
 	send_to_char( "Done.\n", ch );
 	save_clan( clan );
@@ -1074,7 +1228,8 @@ void do_setclan( CHAR_DATA *ch, char *argument )
 
     if ( !str_cmp( arg2, "number2" ) )
     {
-	STRFREE( clan->number2 );
+	if ( clan->number2 )
+	    STRFREE( clan->number2 );
 	clan->number2 = STRALLOC( argstr );
 	send_to_char( "Done.\n", ch );
 	save_clan( clan );
@@ -1210,7 +1365,8 @@ void do_setclan( CHAR_DATA *ch, char *argument )
          send_to_char( "There is already another clan with that name.\n", ch );
          return;
       }
-      STRFREE( clan->name );
+      if ( clan->name )
+          STRFREE( clan->name );
       clan->name = STRALLOC( argstr );
       send_to_char( "Done.\n", ch );
       save_clan( clan );
@@ -1219,26 +1375,59 @@ void do_setclan( CHAR_DATA *ch, char *argument )
 
    if( !str_cmp( arg2, "filename" ) )
    {
-      char filename[256];
-
-      if( !is_valid_filename( ch, CLAN_DIR, argstr ) )
+      if ( clan->filename && argstr == clan->filename )
+      {
+         send_to_char( "Done.\n", ch );
+         return;
+      }
+      if ( !clan_filename_available( ch, argstr ) )
          return;
 
-      snprintf( filename, sizeof( filename ), "%s%s", CLAN_DIR, clan->filename );
-      if( !remove( filename ) )
-         send_to_char( "Old clan file deleted.\n", ch );
+      MEMBER_LIST *members = first_member_list;
+      while ( members && (!members->name || str_cmp( members->name, clan->name )) )
+         members = members->next;
+      if ( !members )
+      {
+         send_to_char( "This clan has no member list.\n", ch );
+         return;
+      }
 
-      STR_DISPOSE( clan->filename );
+      char *old_filename = clan->filename;
+      const std::string old_path = old_filename ? std::string( CLAN_DIR ) + old_filename : "";
+      const std::string new_path = std::string( CLAN_DIR ) + argstr;
       clan->filename = str_dup( argstr );
+      const bool saved = save_clan_file( clan ) && save_member_list_file( clan, members )
+          && (old_path.empty() || copy_clan_vault( old_path + ".vault", new_path + ".vault" ))
+          && write_realm_list( CLAN_DIR CLAN_LIST, first_clan );
+      if ( !saved )
+      {
+         unlink( new_path.c_str() );
+         unlink( (new_path + ".mem").c_str() );
+         unlink( (new_path + ".vault").c_str() );
+         STR_DISPOSE( clan->filename );
+         clan->filename = old_filename;
+         send_to_char( "Could not save the new clan filename.\n", ch );
+         return;
+      }
+
+      if ( old_filename )
+      {
+         if ( realm_filename_valid( old_filename ) )
+         {
+            unlink( old_path.c_str() );
+            unlink( (old_path + ".mem").c_str() );
+            unlink( (old_path + ".vault").c_str() );
+         }
+         STR_DISPOSE( old_filename );
+      }
       send_to_char( "Done.\n", ch );
-      save_clan( clan );
-      write_clan_list(  );
       return;
    }
 
     if ( !str_cmp( arg2, "desc" ) )
     {
-	STRFREE( clan->description );
+	if ( clan->description )
+	    STRFREE( clan->description );
 	clan->description = STRALLOC( argstr );
 	send_to_char( "Done.\n", ch );
 	save_clan( clan );
@@ -1253,7 +1442,7 @@ void do_setplanet( CHAR_DATA *ch, char *argument )
 {
     std::string arg1;
     std::string arg2;
-    std::string argstr = argument;
+    std::string argstr = argument ? argument : "";
     PLANET_DATA *planet;
 
     if ( IS_NPC( ch ) )
@@ -1296,7 +1485,8 @@ void do_setplanet( CHAR_DATA *ch, char *argument )
             return;
         }
 
-        STRFREE( planet->name );
+        if ( planet->name )
+            STRFREE( planet->name );
         planet->name = STRALLOC( argstr );
         send_to_char( "Done.\n", ch );
         save_planet( planet );
@@ -1320,47 +1510,60 @@ void do_setplanet( CHAR_DATA *ch, char *argument )
 
     if ( !str_cmp( arg2, "spaceobject" ) )
     {
-        SPACE_DATA *spaceobject;
-        
-	if ( (planet->spaceobject = spaceobject_from_name(planet->game, argstr)) )
-	{
-         if ((spaceobject=planet->spaceobject) != NULL)
-         {
-           spaceobject = planet->spaceobject;
-           spaceobject->planet = planet;
+        SPACE_DATA *spaceobject = argstr.empty() ? nullptr : spaceobject_from_name( planet->game, argstr );
+        if ( !spaceobject )
+        {
+            send_to_char( "No such spaceobject.\n", ch );
+            return;
+        }
+        if ( spaceobject->planet && spaceobject->planet != planet )
+        {
+            send_to_char( "That spaceobject already has a planet.\n", ch );
+            return;
+        }
 
-           send_to_char( "Done.\n", ch );
-	 }
-	else 
-	       	send_to_char( "No such spaceobject.\n", ch );
-    }
-	save_planet( planet );
-	return;
+        SPACE_DATA *previous = planet->spaceobject;
+        planet->spaceobject = spaceobject;
+        if ( !save_planet_file( planet ) )
+        {
+            planet->spaceobject = previous;
+            send_to_char( "Could not save the planet's spaceobject.\n", ch );
+            return;
+        }
+        if ( previous && previous != spaceobject && previous->planet == planet )
+            previous->planet = nullptr;
+        spaceobject->planet = planet;
+        send_to_char( "Done.\n", ch );
+        return;
     }
 
     if( !str_cmp( arg2, "filename" ) )
     {
-        PLANET_DATA *tplanet;
-
-        if( argstr.empty() )
+        if ( planet->filename && argstr == planet->filename )
         {
-            send_to_char( "You must choose a file name.\n", ch );
+            send_to_char( "Done.\n", ch );
             return;
         }
-        for( tplanet = first_planet; tplanet; tplanet = tplanet->next )
-        {
-            if( !str_cmp( tplanet->filename, argstr ) )
-            {
-                send_to_char( "A planet with that filename already exists!\n", ch );
-                return;
-            }
-        }
+        if ( !realm_filename_available( ch, PLANET_DIR, argstr, first_planet ) )
+            return;
 
-        STR_DISPOSE( planet->filename );
+        char *old_filename = planet->filename;
         planet->filename = str_dup( argstr );
+        if ( !save_planet_file( planet ) || !write_realm_list( PLANET_DIR PLANET_LIST, first_planet ) )
+        {
+            unlink( (std::string( PLANET_DIR ) + argstr).c_str() );
+            STR_DISPOSE( planet->filename );
+            planet->filename = old_filename;
+            send_to_char( "Could not save the new planet filename.\n", ch );
+            return;
+        }
+        if ( old_filename )
+        {
+            if ( realm_filename_valid( old_filename ) )
+                unlink( (std::string( PLANET_DIR ) + old_filename).c_str() );
+            STR_DISPOSE( old_filename );
+        }
         send_to_char( "Done.\n", ch );
-        save_planet( planet );
-        write_planet_list(  );
         return;
     }
 
@@ -1410,7 +1613,7 @@ void do_showclan( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    if ( argument[0] == '\0' )
+    if ( !argument || argument[0] == '\0' )
     {
 	send_to_char( "Usage: showclan <clan>\n", ch );
 	return;
@@ -1426,14 +1629,14 @@ void do_showclan( CHAR_DATA *ch, char *argument )
     ch_printf( ch, "%s      : %s\nFilename: %s\n",
 			clan->clan_type == CLAN_CRIME ? "Crime Family " : 
 			    clan->clan_type == CLAN_GUILD ? "Guild " : "Organization ",
-    			clan->name,
-    			clan->filename);
+    			clan->name ? clan->name : "(none)",
+    			clan->filename ? clan->filename : "(none)");
     ch_printf( ch, "Description: %s\nLeader: %s\n",
-    			clan->description,
-    			clan->leader );
+    			clan->description ? clan->description : "(none)",
+    			clan->leader ? clan->leader : "(none)" );
     ch_printf( ch, "Number1: %s\nNumber2: %s\nPKills: %6d    PDeaths: %6d\n",
-    			clan->number1,
-    			clan->number2,
+    			clan->number1 ? clan->number1 : "(none)",
+    			clan->number2 ? clan->number2 : "(none)",
     			clan->pkills,
     			clan->pdeaths );
     ch_printf( ch, "MKills: %6d    MDeaths: %6d\n",
@@ -1456,7 +1659,7 @@ void do_showclan( CHAR_DATA *ch, char *argument )
     			clan->trooper2 );
     ch_printf( ch, "Funds: %ld\n",
     			clan->funds );
-    ch_printf( ch, "Enlist Room 1: %ld  Enlist Room 2: %ld\n",
+    ch_printf( ch, "Enlist Room 1: %5d  Enlist Room 2: %5d\n",
     			clan->enlistroom1, clan->enlistroom2 );
     return;
 }
@@ -1471,7 +1674,7 @@ void do_showplanet( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    if ( argument[0] == '\0' )
+    if ( !argument || argument[0] == '\0' )
     {
 	send_to_char( "Usage: showplanet <planet>\n", ch );
 	return;
@@ -1485,71 +1688,105 @@ void do_showplanet( CHAR_DATA *ch, char *argument )
     }
 
     ch_printf( ch, "%s\nFilename: %s\nStarsystem: %s\n",
-    			planet->name,
-    			planet->filename,
-    			planet->spaceobject ? planet->spaceobject->name : "None");
+    			planet->name ? planet->name : "(none)",
+    			planet->filename ? planet->filename : "(none)",
+    			(planet->spaceobject && planet->spaceobject->name) ? planet->spaceobject->name : "None");
     return;
 }
 
 void do_makeclan( CHAR_DATA *ch, char *argument )
 {
-    std::string filename;
-    CLAN_DATA *clan;
-//    bool found;
-
-    if ( !argument || argument[0] == '\0' )
+    const std::string name = argument ? argument : "";
+    if ( name.empty() || name.find_first_of( "~\r\n" ) != std::string::npos )
     {
-	send_to_char( "Usage: makeclan <clan name>\n", ch );
-	return;
+        send_to_char( "Usage: makeclan <clan name>\n", ch );
+        return;
+    }
+    if ( get_clan( name ) )
+    {
+        send_to_char( "A clan with that name already exists.\n", ch );
+        return;
     }
 
-//    found = FALSE;
-    filename = str_printf("%s%s", CLAN_DIR, strlower(argument).c_str());
+    const std::string filename = realm_filename_for_name( name, ".clan" );
+    if ( !clan_filename_available( ch, filename ) )
+        return;
 
+    CLAN_DATA *clan;
     CREATE( clan, CLAN_DATA, 1 );
     clan->game = ch->game;
+    clan->filename = str_dup( filename );
+    clan->name = STRALLOC( name );
+    clan->description = STRALLOC( "" );
+    clan->leader = STRALLOC( "" );
+    clan->number1 = STRALLOC( "" );
+    clan->number2 = STRALLOC( "" );
+    clan->tmpstr = STRALLOC( "" );
+
+    MEMBER_LIST *members;
+    CREATE( members, MEMBER_LIST, 1 );
+    members->game = ch->game;
+    members->name = QUICKLINK( clan->name );
+
+    if ( !save_clan_file( clan ) || !save_member_list_file( clan, members )
+    ||   !write_realm_list( CLAN_DIR CLAN_LIST, first_clan, clan ) )
+    {
+        const std::string path = std::string( CLAN_DIR ) + filename;
+        unlink( path.c_str() );
+        unlink( (path + ".mem").c_str() );
+        STRFREE( members->name );
+        DISPOSE( members );
+        STRFREE( clan->name );
+        STRFREE( clan->description );
+        STRFREE( clan->leader );
+        STRFREE( clan->number1 );
+        STRFREE( clan->number2 );
+        STRFREE( clan->tmpstr );
+        STR_DISPOSE( clan->filename );
+        DISPOSE( clan );
+        send_to_char( "Could not save the new clan.\n", ch );
+        return;
+    }
     LINK( clan, first_clan, last_clan, next, prev );
-    clan->next_subclan = NULL;
-    clan->prev_subclan = NULL;
-    clan->last_subclan = NULL;
-    clan->first_subclan = NULL;    
-    clan->mainclan     = NULL;
-    clan->name		= STRALLOC( argument );
-    clan->description	= STRALLOC( "" );
-    clan->leader	= STRALLOC( "" );
-    clan->number1	= STRALLOC( "" );
-    clan->number2	= STRALLOC( "" );
-    clan->tmpstr	= STRALLOC( "" );
+    LINK( members, first_member_list, last_member_list, next, prev );
+    send_to_char( "Clan created.\n", ch );
 }
 
 void do_makeplanet( CHAR_DATA *ch, char *argument )
 {
-    std::string filename;
-    PLANET_DATA *planet;
-//    bool found;
-
-    if ( !argument || argument[0] == '\0' )
+    const std::string name = argument ? argument : "";
+    if ( name.empty() || name.find_first_of( "~\r\n" ) != std::string::npos )
     {
-	send_to_char( "Usage: makeplanet <planet name>\n", ch );
-	return;
+        send_to_char( "Usage: makeplanet <planet name>\n", ch );
+        return;
+    }
+    if ( get_planet( name ) )
+    {
+        send_to_char( "A planet with that name already exists.\n", ch );
+        return;
     }
 
-//    found = FALSE;
-    filename = str_printf("%s%s", PLANET_DIR, strlower(argument).c_str() );
+    const std::string filename = realm_filename_for_name( name, ".planet" );
+    if ( !realm_filename_available( ch, PLANET_DIR, filename, first_planet ) )
+        return;
 
+    PLANET_DATA *planet;
     CREATE( planet, PLANET_DATA, 1 );
     planet->game = ch->game;
+    planet->filename = str_dup( filename );
+    planet->name = STRALLOC( name );
+
+    if ( !save_planet_file( planet ) || !write_realm_list( PLANET_DIR PLANET_LIST, first_planet, planet ) )
+    {
+        unlink( (std::string( PLANET_DIR ) + filename).c_str() );
+        STRFREE( planet->name );
+        STR_DISPOSE( planet->filename );
+        DISPOSE( planet );
+        send_to_char( "Could not save the new planet.\n", ch );
+        return;
+    }
     LINK( planet, first_planet, last_planet, next, prev );
-    planet->governed_by = NULL;
-    planet->next_in_system = NULL;
-    planet->prev_in_system = NULL;
-    planet->spaceobject = NULL ;
-    planet->first_area = NULL;
-    planet->last_area = NULL;
-    planet->first_guard = NULL;
-    planet->last_guard = NULL;
-    planet->name		= STRALLOC( argument );
-    planet->flags               = 0;
+    send_to_char( "Planet created.\n", ch );
 }
 
 void do_clans( CHAR_DATA *ch, char *argument )
@@ -1581,7 +1818,7 @@ void do_clans( CHAR_DATA *ch, char *argument )
         if ( pCount > 1 )
            support /= pCount;
 	ch_printf( ch, "--------------------------------------------------------------------------------\n");
-        ch_printf( ch, "&z&WOrganization: &Y%-20s    ", clan->name);
+        ch_printf( ch, "&z&WOrganization: &Y%-20s    ", clan->name ? clan->name : "(none)");
 	ch_printf( ch, "&WPlanets: &O%-4d &z&WAvg Pop Support: ",pCount);
 	if (support <50)
 	{
@@ -1593,7 +1830,7 @@ void do_clans( CHAR_DATA *ch, char *argument )
 	}
 	ch_printf( ch,"%-3.1f&W\nRevenue: &O%-29.0f",support,revenue);
 	ch_printf(ch,"&z&WLeader : ");
-	if( clan->leader[0] != 0 )
+	if( clan->leader && clan->leader[0] != 0 )
 	{
 		ch_printf(ch,"&O%-20s",clan->leader);
 	}
@@ -1610,7 +1847,8 @@ void do_clans( CHAR_DATA *ch, char *argument )
            for ( subclan = clan->first_subclan ; subclan ; subclan = subclan->next_subclan ) 
            {
                ch_printf( ch, "  &O%-20s %-10s\n",
-                  subclan->name, subclan->leader );
+                  subclan->name ? subclan->name : "(none)",
+                  subclan->leader ? subclan->leader : "" );
            }
         }
         count++;
@@ -1623,7 +1861,8 @@ void do_clans( CHAR_DATA *ch, char *argument )
           continue;
         
         ch_printf( ch, "&Y%-24s &O%-10s\n",
-                  clan->name, clan->leader );
+                  clan->name ? clan->name : "(none)",
+                  clan->leader ? clan->leader : "" );
         count++;
     }
 
@@ -1646,10 +1885,10 @@ void do_planets( CHAR_DATA *ch, char *argument )
     for ( planet = first_planet; planet; planet = planet->next )
     {
         pager_printf( ch, "&wPlanet: &G%-15s   &wGoverned By: &G%s %s\n", 
-                   planet->name ,
-                   planet->governed_by ? planet->governed_by->name : "",
+                   planet->name ? planet->name : "(none)",
+                   (planet->governed_by && planet->governed_by->name) ? planet->governed_by->name : "",
                    IS_SET(planet->flags, PLANET_NOCAPTURE ) ? "(permanent)" : "" );
-        pager_printf( ch, "&WValue: &O%-10.0f&W/&O%-10d   ", 
+        pager_printf( ch, "&WValue: &O%-10.0f&W/&O%-10ld   ", 
                    get_taxes(planet) , planet->base_value);
         pager_printf( ch, "&WPopulation: &O%-5d   &W Pop Support: &R%.1f\n", 
                    planet->population , planet->pop_support );
@@ -1657,7 +1896,7 @@ void do_planets( CHAR_DATA *ch, char *argument )
         {
           pager_printf( ch, "&WAreas: &G");
           for ( area = planet->first_area ; area ; area = area->next_on_planet )
-             pager_printf( ch , "%s,  ", area->filename );
+             pager_printf( ch , "%s,  ", area->filename ? area->filename : "(none)" );
           pager_printf( ch, "\n" );
         }         
 //        pager_printf( ch, "\n" );
@@ -1673,19 +1912,11 @@ void do_planets( CHAR_DATA *ch, char *argument )
     
 }
 
-void do_orders( CHAR_DATA *ch, char *argument )
-{
-}
-
-void do_guilds( CHAR_DATA *ch, char *argument)
-{
-}                                                                           
-
 void do_shove( CHAR_DATA *ch, char *argument )
 {
     std::string arg;
     std::string arg2;
-    std::string argstr = argument;
+    std::string argstr = argument ? argument : "";
     int exit_dir;
     EXIT_DATA *pexit;
     CHAR_DATA *victim;
@@ -1694,6 +1925,9 @@ void do_shove( CHAR_DATA *ch, char *argument )
     ROOM_INDEX_DATA *fromroom;
     SHIP_DATA *ship;    
     int chance;  
+
+    if ( !ch || !ch->in_room )
+        return;
 
     argstr = one_argument( argstr, arg );
     argstr = one_argument( argstr, arg2 );
@@ -1717,6 +1951,12 @@ void do_shove( CHAR_DATA *ch, char *argument )
 	return;
     }
     
+    if ( IS_NPC(victim) )
+    {
+	send_to_char("You can only shove player characters.\n", ch);
+	return;
+    }
+
     if ( (victim->position) != POS_STANDING )
     {
 	act( AT_PLAIN, "$N isn't standing up.", ch, NULL, victim, TO_CHAR );
@@ -1729,18 +1969,20 @@ void do_shove( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    exit_dir = get_dir( arg2 );
+    const bool entering_ship = !str_cmp(arg2, "in");
+    const bool leaving_ship = !str_cmp(arg2, "out");
+    exit_dir = entering_ship || leaving_ship ? -1 : get_dir(arg2);
     if ( BV_IS_SET(victim->in_room->room_flags, ROOM_SAFE)
     &&  get_timer(victim, TIMER_SHOVEDRAG) <= 0)
     {
 	send_to_char("That character cannot be shoved right now.\n", ch);
 	return;
     }
-    victim->position = POS_SHOVE;
     nogo = FALSE;
-    if ((pexit = get_exit(ch->in_room, exit_dir)) == NULL )
+    pexit = exit_dir < 0 ? nullptr : get_exit(ch->in_room, exit_dir);
+    if ( !pexit )
     {
-      if (!str_cmp( arg2, "in" ))
+      if ( entering_ship )
       {
         if ( argstr.empty() )
         {
@@ -1754,7 +1996,7 @@ void do_shove( CHAR_DATA *ch, char *argument )
           return;
         }
         
-	if ( BV_IS_SET( ch->act, ACT_MOUNTED ) )
+	if ( ch->mount )
    	{
           act( AT_PLAIN, "You can't go in there riding THAT.", ch, NULL, argstr, TO_CHAR );
           return;
@@ -1776,7 +2018,8 @@ void do_shove( CHAR_DATA *ch, char *argument )
 	        int count = 0;
 
 	       for ( ctmp = to_room->first_person; ctmp; ctmp = ctmp->next_in_room )
-	       if ( count+2 >= to_room->tunnel )
+                   ++count;
+	       if ( count + 2 > to_room->tunnel )
 	       {
                   send_to_char( "There is no room for you both in there.\n", ch );
 		  return;
@@ -1789,25 +2032,24 @@ void do_shove( CHAR_DATA *ch, char *argument )
             }
             
             act( AT_PLAIN, "$n enters $T.", ch,
-		NULL, ship->name , TO_ROOM );
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
 	    act( AT_PLAIN, "You enter $T.", ch,
-		NULL, ship->name , TO_CHAR );
+		NULL, ship->name ? ship->name : "the ship" , TO_CHAR );
    	    char_from_room( ch );
    	    char_to_room( ch , to_room );
    	    act( AT_PLAIN, "$n enters the ship.", ch,
 		NULL, argstr , TO_ROOM );
-            do_look( ch , "auto" );
-
             act( AT_PLAIN, "$n enters $T.", victim,
-		NULL, ship->name , TO_ROOM );
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
 	    act( AT_PLAIN, "You enter $T.", victim,
-		NULL, ship->name , TO_CHAR );
+		NULL, ship->name ? ship->name : "the ship" , TO_CHAR );
    	    char_from_room( victim );
    	    char_to_room( victim , to_room );
    	    act( AT_PLAIN, "$n enters the ship.", victim,
 		NULL, argstr , TO_ROOM );
-            do_look( victim , "auto" );
-            victim->position = POS_STANDING;            
+            do_look(ch, "auto");
+            if ( !char_died(victim) && victim->in_room == to_room )
+                do_look(victim, "auto");
 	    return;
         }
         else
@@ -1816,7 +2058,7 @@ void do_shove( CHAR_DATA *ch, char *argument )
           return;
         }
       }  
-      if (!str_cmp( arg2, "out" ))
+      if ( leaving_ship )
       {
     	fromroom = ch->in_room;
     
@@ -1826,7 +2068,7 @@ void do_shove( CHAR_DATA *ch, char *argument )
 	        return;
 	    }   
         
-	if ( BV_IS_SET( ch->act, ACT_MOUNTED ) )
+	if ( ch->mount )
    	{
           act( AT_PLAIN, "You can't go out there riding THAT.", ch, NULL, argstr, TO_CHAR );
           return;
@@ -1859,7 +2101,8 @@ void do_shove( CHAR_DATA *ch, char *argument )
 	        int count = 0;
 
 	       for ( ctmp = to_room->first_person; ctmp; ctmp = ctmp->next_in_room )
-	       if ( count+2 >= to_room->tunnel )
+                   ++count;
+	       if ( count + 2 > to_room->tunnel )
 	       {
                   send_to_char( "There is no room for you both in there.\n", ch );
 		  return;
@@ -1872,25 +2115,24 @@ void do_shove( CHAR_DATA *ch, char *argument )
             }
             
             act( AT_PLAIN, "$n exits the ship.", ch,
-		NULL, ship->name , TO_ROOM );
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
 	    act( AT_PLAIN, "You exits the ship.", ch,
-		NULL, ship->name , TO_CHAR );
+		NULL, ship->name ? ship->name : "the ship" , TO_CHAR );
    	    char_from_room( ch );
    	    char_to_room( ch , to_room );
    	    act( AT_PLAIN, "$n exits $T.", ch,
-		NULL, ship->name , TO_ROOM );
-            do_look( ch , "auto" );
-
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
             act( AT_PLAIN, "$n exits the ship.", victim,
-		NULL, ship->name , TO_ROOM );
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
 	    act( AT_PLAIN, "You exits the ship.", victim,
-		NULL, ship->name , TO_CHAR );
+		NULL, ship->name ? ship->name : "the ship" , TO_CHAR );
    	    char_from_room( victim );
    	    char_to_room( victim , to_room );
    	    act( AT_PLAIN, "$n exits $T.", victim,
-		NULL, ship->name , TO_ROOM );
-            do_look( victim , "auto" );
-	    victim->position = POS_STANDING;            
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
+            do_look(ch, "auto");
+            if ( !char_died(victim) && victim->in_room == to_room )
+                do_look(victim, "auto");
 	    return;
         }
         else
@@ -1909,22 +2151,20 @@ void do_shove( CHAR_DATA *ch, char *argument )
     if ( nogo )
     {
 	send_to_char( "There's no exit in that direction.\n", ch );
-        victim->position = POS_STANDING;
 	return;
     }
     to_room = pexit->to_room;
-
-    if ( IS_NPC(victim) )
+    if ( !to_room )
     {
-	send_to_char("You can only shove player characters.\n", ch);
-	return;
+        send_to_char("There's no exit in that direction.\n", ch);
+        return;
     }
-    
+
+
     if (ch->in_room->area != to_room->area
     &&  !in_hard_range( victim, to_room->area ) )
     {
       send_to_char("That character cannot enter that area.\n", ch);
-      victim->position = POS_STANDING;
       return;
     }
 
@@ -1940,14 +2180,16 @@ chance += (ch->top_level - victim->top_level);
 if (chance < number_percent( ))
 {
   send_to_char("You failed.\n", ch);
-  victim->position = POS_STANDING;
   return;
 }
     act( AT_ACTION, "You shove $M.", ch, NULL, victim, TO_CHAR );
     act( AT_ACTION, "$n shoves you.", ch, NULL, victim, TO_VICT );
-    move_char( victim, get_exit(ch->in_room,exit_dir), 0);
-    if ( !char_died(victim) )
-      victim->position = POS_STANDING;
+    victim->position = POS_SHOVE;
+    move_char(victim, pexit, 0);
+    if ( !char_died(victim) && victim->position == POS_SHOVE )
+        victim->position = POS_STANDING;
+    if ( char_died(ch) || !ch->in_room )
+        return;
     WAIT_STATE(ch, 12);
     /* Remove protection from shove/drag if char shoves -- Blodkai */
     if ( BV_IS_SET(ch->in_room->room_flags, ROOM_SAFE)   
@@ -1959,7 +2201,7 @@ void do_drag( CHAR_DATA *ch, char *argument )
 {
     std::string arg;
     std::string arg2;
-    std::string argstr = argument;
+    std::string argstr = argument ? argument : "";
     int exit_dir;
     CHAR_DATA *victim;
     EXIT_DATA *pexit;
@@ -1968,6 +2210,9 @@ void do_drag( CHAR_DATA *ch, char *argument )
     int chance;
    ROOM_INDEX_DATA *fromroom;
    SHIP_DATA *ship;
+
+    if ( !ch || !ch->in_room )
+        return;
 
     argstr = one_argument( argstr, arg );
     argstr = one_argument( argstr, arg2 );
@@ -2008,7 +2253,9 @@ void do_drag( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    exit_dir = get_dir( arg2 );
+    const bool entering_ship = !str_cmp(arg2, "in");
+    const bool leaving_ship = !str_cmp(arg2, "out");
+    exit_dir = entering_ship || leaving_ship ? -1 : get_dir(arg2);
 
     if ( BV_IS_SET(victim->in_room->room_flags, ROOM_SAFE)
     &&   get_timer( victim, TIMER_SHOVEDRAG ) <= 0)
@@ -2018,9 +2265,10 @@ void do_drag( CHAR_DATA *ch, char *argument )
     }
 
     nogo = FALSE;
-    if ((pexit = get_exit(ch->in_room, exit_dir)) == NULL )
+    pexit = exit_dir < 0 ? nullptr : get_exit(ch->in_room, exit_dir);
+    if ( !pexit )
     {
-      if (!str_cmp( arg2, "in" ))
+      if ( entering_ship )
       {
         if ( argstr.empty() )
         {
@@ -2034,7 +2282,7 @@ void do_drag( CHAR_DATA *ch, char *argument )
           return;
         }
         
-	if ( BV_IS_SET( ch->act, ACT_MOUNTED ) )
+	if ( ch->mount )
    	{
           act( AT_PLAIN, "You can't go in there riding THAT.", ch, NULL, argstr, TO_CHAR );
           return;
@@ -2056,7 +2304,8 @@ void do_drag( CHAR_DATA *ch, char *argument )
 	        int count = 0;
 
 	       for ( ctmp = to_room->first_person; ctmp; ctmp = ctmp->next_in_room )
-	       if ( count+2 >= to_room->tunnel )
+                   ++count;
+	       if ( count + 2 > to_room->tunnel )
 	       {
                   send_to_char( "There is no room for you both in there.\n", ch );
 		  return;
@@ -2069,24 +2318,24 @@ void do_drag( CHAR_DATA *ch, char *argument )
             }
             
             act( AT_PLAIN, "$n enters $T.", ch,
-		NULL, ship->name , TO_ROOM );
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
 	    act( AT_PLAIN, "You enter $T.", ch,
-		NULL, ship->name , TO_CHAR );
+		NULL, ship->name ? ship->name : "the ship" , TO_CHAR );
    	    char_from_room( ch );
    	    char_to_room( ch , to_room );
    	    act( AT_PLAIN, "$n enters the ship.", ch,
 		NULL, argstr , TO_ROOM );
-            do_look( ch , "auto" );
-
             act( AT_PLAIN, "$n enters $T.", victim,
-		NULL, ship->name , TO_ROOM );
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
 	    act( AT_PLAIN, "You enter $T.", victim,
-		NULL, ship->name , TO_CHAR );
+		NULL, ship->name ? ship->name : "the ship" , TO_CHAR );
    	    char_from_room( victim );
    	    char_to_room( victim , to_room );
    	    act( AT_PLAIN, "$n enters the ship.", victim,
 		NULL, argstr , TO_ROOM );
-            do_look( victim , "auto" );
+            do_look(ch, "auto");
+            if ( !char_died(victim) && victim->in_room == to_room )
+                do_look(victim, "auto");
 	    return;
         }
         else
@@ -2095,7 +2344,7 @@ void do_drag( CHAR_DATA *ch, char *argument )
           return;
         }
       }  
-      if (!str_cmp( arg2, "out" ))
+      if ( leaving_ship )
       {
     	fromroom = ch->in_room;
     
@@ -2105,7 +2354,7 @@ void do_drag( CHAR_DATA *ch, char *argument )
 	        return;
 	    }   
         
-	if ( BV_IS_SET( ch->act, ACT_MOUNTED ) )
+	if ( ch->mount )
    	{
           act( AT_PLAIN, "You can't go out there riding THAT.", ch, NULL, argstr, TO_CHAR );
           return;
@@ -2138,7 +2387,8 @@ void do_drag( CHAR_DATA *ch, char *argument )
 	        int count = 0;
 
 	       for ( ctmp = to_room->first_person; ctmp; ctmp = ctmp->next_in_room )
-	       if ( count+2 >= to_room->tunnel )
+                   ++count;
+	       if ( count + 2 > to_room->tunnel )
 	       {
                   send_to_char( "There is no room for you both in there.\n", ch );
 		  return;
@@ -2151,24 +2401,24 @@ void do_drag( CHAR_DATA *ch, char *argument )
             }
             
             act( AT_PLAIN, "$n exits the ship.", ch,
-		NULL, ship->name , TO_ROOM );
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
 	    act( AT_PLAIN, "You exits the ship.", ch,
-		NULL, ship->name , TO_CHAR );
+		NULL, ship->name ? ship->name : "the ship" , TO_CHAR );
    	    char_from_room( ch );
    	    char_to_room( ch , to_room );
    	    act( AT_PLAIN, "$n exits $T.", ch,
-		NULL, ship->name , TO_ROOM );
-            do_look( ch , "auto" );
-
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
             act( AT_PLAIN, "$n exits the ship.", victim,
-		NULL, ship->name , TO_ROOM );
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
 	    act( AT_PLAIN, "You exits the ship.", victim,
-		NULL, ship->name , TO_CHAR );
+		NULL, ship->name ? ship->name : "the ship" , TO_CHAR );
    	    char_from_room( victim );
    	    char_to_room( victim , to_room );
    	    act( AT_PLAIN, "$n exits $T.", victim,
-		NULL, ship->name , TO_ROOM );
-            do_look( victim , "auto" );
+		NULL, ship->name ? ship->name : "the ship" , TO_ROOM );
+            do_look(ch, "auto");
+            if ( !char_died(victim) && victim->in_room == to_room )
+                do_look(victim, "auto");
 	    return;
         }
         else
@@ -2191,6 +2441,11 @@ void do_drag( CHAR_DATA *ch, char *argument )
     }
 
     to_room = pexit->to_room;
+    if ( !to_room )
+    {
+        send_to_char("There's no exit in that direction.\n", ch);
+        return;
+    }
 
     if (ch->in_room->area != to_room->area
     && !in_hard_range( victim, to_room->area ) )
@@ -2215,12 +2470,17 @@ if (chance < number_percent( ))
 	victim->position = POS_DRAG;
 	act( AT_ACTION, "You drag $M into the next room.", ch, NULL, victim, TO_CHAR ); 
 	act( AT_ACTION, "$n grabs your hair and drags you.", ch, NULL, victim, TO_VICT ); 
-	move_char( victim, get_exit(ch->in_room,exit_dir), 0);
-	if ( !char_died(victim) )
+        fromroom = ch->in_room;
+	move_char(victim, pexit, 0);
+	if ( !char_died(victim) && victim->position == POS_DRAG )
 	  victim->position = temp;
 /* Move ch to the room too.. they are doing dragging - Scryn */
-	move_char( ch, get_exit(ch->in_room,exit_dir), 0);
-	WAIT_STATE(ch, 12);
+        if ( char_died(ch) || ch->in_room != fromroom )
+            return;
+        if ( !char_died(victim) && victim->in_room && victim->in_room != fromroom )
+            move_char(ch, get_exit(fromroom, exit_dir), 0);
+        if ( !char_died(ch) )
+            WAIT_STATE(ch, 12);
 	return;
     }
     send_to_char("You cannot do that to someone who is standing.\n", ch);
@@ -2240,11 +2500,12 @@ void do_enlist( CHAR_DATA *ch, char *argument )
         
 	if ( ch->pcdata->clan )
 	{
-		ch_printf( ch , "You will have to resign from %s before you can join a new organization.\n", ch->pcdata->clan->name );
+		ch_printf( ch , "You will have to resign from %s before you can join a new organization.\n",
+			ch->pcdata->clan->name ? ch->pcdata->clan->name : "your current organization" );
 		return;
 	}
         
-	if ( ! BV_IS_SET( ch->in_room->room_flags , ROOM_RECRUIT ) )
+	if ( !ch->in_room || ! BV_IS_SET( ch->in_room->room_flags , ROOM_RECRUIT ) )
 	{
 		send_to_char( "You don't seem to be in a recruitment office.\n", ch );
 		return;
@@ -2255,6 +2516,8 @@ void do_enlist( CHAR_DATA *ch, char *argument )
 		if ( ( ch->in_room->vnum == clan->enlistroom1 ||
 		       ch->in_room->vnum == clan->enlistroom2 ) )
 		{
+		  if ( !clan->name || clan->name[0] == '\0' )
+		      continue;
 		  if( !str_cmp( clan->name, "The Empire" ) && ch->race != RACE_HUMAN && ch->race != RACE_DEFEL )
 		  {
 		    send_to_char( "&CThe recruiter says, 'You will need to find a sponsor to enlist'&R&w\n", ch );
@@ -2262,12 +2525,14 @@ void do_enlist( CHAR_DATA *ch, char *argument )
 		  }
 			BV_SET_BIT( ch->speaks, LANG_CLAN );
 			++clan->members;
-			STRFREE( ch->pcdata->clan_name );
-			ch->pcdata->clan_name = QUICKLINK( clan->name );
+			if ( ch->pcdata->clan_name )
+				STRFREE( ch->pcdata->clan_name );
+			ch->pcdata->clan_name = STRALLOC( clan->name );
 			ch->pcdata->clan = clan;
 			ch_printf( ch, "Welcome to %s.\n", clan->name );
 			update_member( ch );
-			save_clan ( clan );
+			save_clan(clan);
+			save_char_obj(ch);
 			return;
 		}
 	}
@@ -2297,43 +2562,64 @@ void do_resign( CHAR_DATA *ch, char *argument )
 	    return;
 	}
 
-       if ( !str_cmp( ch->name, ch->pcdata->clan->leader ) )
+       if ( ch->name && ch->pcdata->clan->leader && !str_cmp( ch->name, ch->pcdata->clan->leader ) )
        {
-           ch_printf( ch, "You can't resign from %s ... you are the leader!\n", clan->name );
+           ch_printf( ch, "You can't resign from %s ... you are the leader!\n", clan->name ? clan->name : "(unnamed)" );
            return;
        }
        
-    if ( ch->speaking & LANG_CLAN )
+    if ( ch->speaking == LANG_CLAN )
       ch->speaking = LANG_COMMON;
     BV_REMOVE_BIT( ch->speaks, LANG_CLAN );
     --clan->members;
-    if ( !str_cmp( ch->name, ch->pcdata->clan->number1 ) )
+    if ( ch->name && ch->pcdata->clan->number1 && !str_cmp( ch->name, ch->pcdata->clan->number1 ) )
     {
 	STRFREE( ch->pcdata->clan->number1 );
 	ch->pcdata->clan->number1 = STRALLOC( "" );
     }
-    if ( !str_cmp( ch->name, ch->pcdata->clan->number2 ) )
+    if ( ch->name && ch->pcdata->clan->number2 && !str_cmp( ch->name, ch->pcdata->clan->number2 ) )
     {
 	STRFREE( ch->pcdata->clan->number2 );
 	ch->pcdata->clan->number2 = STRALLOC( "" );
     }
     remove_member( ch );
     ch->pcdata->clan = NULL;
-    STRFREE(ch->pcdata->clan_name);
+    if ( ch->pcdata->clan_name )
+        STRFREE(ch->pcdata->clan_name);
     ch->pcdata->clan_name = STRALLOC( "" );
-    act( AT_MAGIC, "You resign your position in $t", ch, clan->name, NULL , TO_CHAR );
+    act( AT_MAGIC, "You resign your position in $t", ch, clan->name ? clan->name : "(unnamed)", NULL , TO_CHAR );
     
     lose_exp = UMAX( ch->experience[DIPLOMACY_ABILITY] - exp_level( ch->skill_level[DIPLOMACY_ABILITY]  ) , 0 );
     ch_printf( ch, "You lose %ld diplomacy experience.\n", lose_exp ); 
     ch->experience[DIPLOMACY_ABILITY] -= lose_exp; 
 
-    STR_DISPOSE( ch->pcdata->bestowments );
+    if ( ch->pcdata->bestowments )
+        STR_DISPOSE( ch->pcdata->bestowments );
     ch->pcdata->bestowments = str_dup("");
 
-    save_char_obj( ch );	/* clan gets saved when pfile is saved */
+    save_clan(clan);
+    save_char_obj(ch);
     
     return;
 
+}
+
+static bool transfer_clan_funds(CHAR_DATA *ch, CLAN_DATA *clan, long change)
+{
+    const int old_gold = ch->gold;
+    const long old_funds = clan->funds;
+    ch->gold = static_cast<int>(ch->gold + static_cast<long long>(change));
+    clan->funds -= change;
+    const bool clan_saved = save_clan_file(clan);
+    if ( clan_saved && save_char_obj(ch) )
+        return true;
+
+    ch->gold = old_gold;
+    clan->funds = old_funds;
+    if ( clan_saved && !save_clan_file(clan) )
+        bug("Could not restore clan funds for %s", clan->name ? clan->name : "(unnamed)");
+    send_to_char("Unable to save the clan transfer.\n", ch);
+    return false;
 }
 
 void do_clan_withdraw( CHAR_DATA *ch, char *argument )
@@ -2343,7 +2629,7 @@ void do_clan_withdraw( CHAR_DATA *ch, char *argument )
     OBJ_DATA *obj;
     bool ch_comlink = FALSE;
     
-    if ( IS_NPC( ch ) || !ch->pcdata->clan )
+    if ( IS_NPC( ch ) || !ch->pcdata || !ch->pcdata->clan )
     {
 	send_to_char( "You don't seem to belong to an organization to withdraw funds from...\n", ch );
 	return;
@@ -2351,7 +2637,7 @@ void do_clan_withdraw( CHAR_DATA *ch, char *argument )
 
     if ( (ch->pcdata && ch->pcdata->bestowments
     &&    is_name("withdraw", ch->pcdata->bestowments))
-    ||   !str_cmp( ch->name, ch->pcdata->clan->leader  ))
+    ||   (ch->name && ch->pcdata->clan->leader && !str_cmp( ch->name, ch->pcdata->clan->leader )) )
 	;
     else
     {
@@ -2380,9 +2666,7 @@ void do_clan_withdraw( CHAR_DATA *ch, char *argument )
 
     clan = ch->pcdata->clan;
     
-    amount = atoi( argument );
-    
-    if ( !amount )
+    if ( !parse_clan_amount(argument, amount) || amount == 0 )
     {
 	send_to_char( "How much would you like to withdraw?\n", ch );
 	return;
@@ -2390,7 +2674,7 @@ void do_clan_withdraw( CHAR_DATA *ch, char *argument )
     
     if ( amount > clan->funds )
     {
-	ch_printf( ch,  "%s doesn't have that much!\n", clan->name );
+	ch_printf( ch,  "%s doesn't have that much!\n", clan->name ? clan->name : "Your organization" );
 	return;
     }
     
@@ -2400,12 +2684,14 @@ void do_clan_withdraw( CHAR_DATA *ch, char *argument )
 	return;
     }
     
-    ch_printf( ch,  "You withdraw %ld credits from %s's funds.\n", amount, clan->name );
-    
-    clan->funds -= amount;
-    ch->gold += amount;
-    save_clan ( clan );
-            
+    if ( amount > static_cast<long long>(INT_MAX) - ch->gold )
+    {
+        send_to_char("You cannot carry that many credits.\n", ch);
+        return;
+    }
+    if ( transfer_clan_funds(ch, clan, amount) )
+        ch_printf( ch,  "You withdraw %ld credits from %s's funds.\n", amount, clan->name ? clan->name : "your organization" );
+
 }
 
 
@@ -2416,7 +2702,7 @@ void do_clan_donate( CHAR_DATA *ch, char *argument )
     OBJ_DATA *obj;
     bool ch_comlink = FALSE;
 
-    if ( IS_NPC( ch ) || !ch->pcdata->clan )
+    if ( IS_NPC( ch ) || !ch->pcdata || !ch->pcdata->clan )
     {
 	send_to_char( "You don't seem to belong to an organization to donate to...\n", ch );
 	return;
@@ -2443,9 +2729,7 @@ void do_clan_donate( CHAR_DATA *ch, char *argument )
 
     clan = ch->pcdata->clan;
     
-    amount = atoi( argument );
-    
-    if ( !amount )
+    if ( !parse_clan_amount(argument, amount) || amount == 0 )
     {
 	send_to_char( "How much would you like to donate?\n", ch );
 	return;
@@ -2463,24 +2747,20 @@ void do_clan_donate( CHAR_DATA *ch, char *argument )
 	return;
     }
     
-    ch_printf( ch,  "You donate %ld credits to %s's funds.\n", amount, clan->name );
-    
-    clan->funds += amount;
-    ch->gold -= amount;
-    save_clan ( clan );
-            
-}
+    if ( clan->funds > LONG_MAX - amount )
+    {
+        send_to_char("Your organization cannot hold that many credits.\n", ch);
+        return;
+    }
+    if ( transfer_clan_funds(ch, clan, -amount) )
+        ch_printf( ch,  "You donate %ld credits to %s's funds.\n", amount, clan->name ? clan->name : "your organization" );
 
-void do_newclan ( CHAR_DATA *ch , char *argument )
-{
-	send_to_char( "This command is being recycled to conserve thought.\n", ch );
-	return;
 }
 
 void do_appoint ( CHAR_DATA *ch , char *argument )
 {
     std::string arg;
-    std::string argstr = argument;
+    std::string argstr = argument ? argument : "";
     
     argstr = one_argument( argstr, arg );
     
@@ -2493,7 +2773,7 @@ void do_appoint ( CHAR_DATA *ch , char *argument )
 	return;
     }
 
-    if (  str_cmp( ch->name, ch->pcdata->clan->leader  )  )
+    if ( !ch->name || !ch->pcdata->clan->leader || str_cmp( ch->name, ch->pcdata->clan->leader ) )
     {
 	send_to_char( "Only your leader can do that!\n", ch );
 	return;
@@ -2513,7 +2793,8 @@ void do_appoint ( CHAR_DATA *ch , char *argument )
 	     return;
 	 }
          
-         STRFREE( ch->pcdata->clan->number1 );
+         if ( ch->pcdata->clan->number1 )
+             STRFREE( ch->pcdata->clan->number1 );
          ch->pcdata->clan->number1 = STRALLOC( arg );
     }        
     else if ( !str_cmp( argstr , "second" )  )
@@ -2524,7 +2805,8 @@ void do_appoint ( CHAR_DATA *ch , char *argument )
 	     return;
 	 }
          
-         STRFREE( ch->pcdata->clan->number2 );
+         if ( ch->pcdata->clan->number2 )
+             STRFREE( ch->pcdata->clan->number2 );
          ch->pcdata->clan->number2 = STRALLOC( arg );
     }
     else do_appoint( ch , "" );
@@ -2544,26 +2826,26 @@ void do_demote ( CHAR_DATA *ch , char *argument )
 	return;
     }
 
-    if (  str_cmp( ch->name, ch->pcdata->clan->leader  )  )
+    if ( !ch->name || !ch->pcdata->clan->leader || str_cmp( ch->name, ch->pcdata->clan->leader ) )
     {
 	send_to_char( "Only your leader can do that!\n", ch );
 	return;
     }
 
-    if ( argument[0] == '\0' )
+    if ( !argument || argument[0] == '\0' )
     {
 	send_to_char( "Demote who?\n", ch );
 	return;
     }
     
-    if ( !str_cmp( argument , ch->pcdata->clan->number1 )  )
+    if ( ch->pcdata->clan->number1 && !str_cmp( argument , ch->pcdata->clan->number1 ) )
     {
          send_to_char( "Player Demoted!", ch );
          
          STRFREE( ch->pcdata->clan->number1 );
          ch->pcdata->clan->number1 = STRALLOC( "" );
     }        
-    else if ( !str_cmp( argument , ch->pcdata->clan->number2 )  )
+    else if ( ch->pcdata->clan->number2 && !str_cmp( argument , ch->pcdata->clan->number2 ) )
     {
          send_to_char( "Player Demoted!", ch );
          
@@ -2644,6 +2926,8 @@ void do_capture ( CHAR_DATA *ch , char *argument )
        	    continue;
        	  if( !space_in_range_c( ship, planet->spaceobject ) )
        	    continue;
+          if ( !ship->owner || ship->owner[0] == '\0' )
+             continue;
           sClan = get_clan(ship->owner);
           if ( !sClan ) 
              continue;
@@ -2685,7 +2969,11 @@ void do_capture ( CHAR_DATA *ch , char *argument )
    planet->governed_by = clan;
    planet->pop_support = 50;
    
-   echo_to_all( AT_RED , str_printf("%s has claimed the planet %s!", clan->name, planet->name ) , 0 );
+   echo_to_all( AT_RED,
+       str_printf( "%s has claimed the planet %s!",
+           clan->name ? clan->name : "(unnamed)",
+           planet->name ? planet->name : "(unnamed)" ),
+       0 );
    
    save_planet( planet );
       
@@ -2696,11 +2984,11 @@ void do_empower ( CHAR_DATA *ch , char *argument )
 {
     std::string arg;
     std::string arg2;
-    std::string argstr = argument;
+    std::string argstr = argument ? argument : "";
     CHAR_DATA *victim;
     CLAN_DATA *clan;
 
-    if ( IS_NPC( ch ) || !ch->pcdata->clan )
+    if ( IS_NPC( ch ) || !ch->pcdata || !ch->pcdata->clan )
     {
 	send_to_char( "Huh?\n", ch );
 	return;
@@ -2710,7 +2998,7 @@ void do_empower ( CHAR_DATA *ch , char *argument )
 
     if ( (ch->pcdata && ch->pcdata->bestowments
     &&    is_name("empower", ch->pcdata->bestowments))
-    || !str_cmp( ch->name, clan->leader  ) )
+    || (ch->name && clan->leader && !str_cmp( ch->name, clan->leader )) )
 	;
     else
     {
@@ -2757,9 +3045,9 @@ void do_empower ( CHAR_DATA *ch , char *argument )
     if ( arg2.empty() || !str_cmp( arg2, "list" ) )
     {
         ch_printf( ch, "Current bestowed commands on %s: %s.\n",
-                      victim->name, victim->pcdata->bestowments );
+                      victim->name ? victim->name : "Someone", victim->pcdata->bestowments );
         ch_printf( ch, "Current salary on %s: %d.\n",
-                      victim->name, victim->pcdata->salary );
+                      victim->name ? victim->name : "Someone", victim->pcdata->salary );
 
         return;
     }
@@ -2771,9 +3059,9 @@ void do_empower ( CHAR_DATA *ch , char *argument )
 	    return;
     }
 
-   if( str_cmp( ch->name, clan->leader ) && !str_cmp( ch->name, clan->number1 ) )
+   if( !ch->name || !clan->leader || str_cmp( ch->name, clan->leader ) )
    {
-      if( !is_name( arg2, ch->pcdata->bestowments ) )
+      if( !ch->pcdata->bestowments || !is_name( arg2, ch->pcdata->bestowments ) )
       {
          send_to_char( "&RI don't think you're even allowed to do that.&W\n", ch );
          return;
@@ -2783,75 +3071,55 @@ void do_empower ( CHAR_DATA *ch , char *argument )
 
     if ( !str_cmp( arg2, "none" ) )
     {
-        STR_DISPOSE( victim->pcdata->bestowments );
-	    victim->pcdata->bestowments = str_dup("");
-        ch_printf( ch, "Bestowments removed from %s.\n", victim->name );
-        ch_printf( victim, "%s has removed your bestowed clan abilities.\n", ch->name );
+        if ( victim->pcdata->bestowments )
+            STR_DISPOSE( victim->pcdata->bestowments );
+        victim->pcdata->bestowments = str_dup("");
+        ch_printf( ch, "Bestowments removed from %s.\n", victim->name ? victim->name : "Someone" );
+        ch_printf( victim, "%s has removed your bestowed clan abilities.\n", ch->name ? ch->name : "Someone" );
+        save_char_obj( victim );
         return;
     }
-    else if ( !str_cmp( arg2, "pilot" ) )
+
+    struct EmpowerEntry
     {
-      STR_DISPOSE( victim->pcdata->bestowments );
-      victim->pcdata->bestowments = str_dup( str_printf("%s %s", victim->pcdata->bestowments, arg2.c_str()) );
-      ch_printf( victim, "%s has given you permission to fly clan ships.\n", 
-             ch->name );
-      send_to_char( "Ok, they now have the ability to fly clan ships.\n", ch );
-    }
-    else if ( !str_cmp( arg2, "withdraw" ) )
+        const char *ability;
+        const char *vict_msg;
+        const char *ch_msg;
+    };
+    static const EmpowerEntry empower_table[] = {
+        { "pilot",       "has given you permission to fly clan ships.",         "Ok, they now have the ability to fly clan ships.\n" },
+        { "withdraw",    "has given you permission to withdraw clan funds.",    "Ok, they now have the ablitity to withdraw clan funds.\n" },
+        { "clanbuyship", "has given you permission to buy clan ships.",         "Ok, they now have the ablitity to use clanbuyship.\n" },
+        { "induct",      "has given you permission to induct new members.",     "Ok, they now have the ablitity to induct new members.\n" },
+        { "empower",     "has given you permission to empower members.",        "Ok, they now have the ablitity to empower members.\n" },
+        { "salary",      "has given you permission to assign salaries.",        "Ok, they now have the ablitity to assign salaries.\n" },
+        { "roster",      "has given you permission to access the roster.",      "Ok, they now have the ablitity to access the roster.\n" },
+    };
+
+    bool matched = false;
+    for ( const auto& entry : empower_table )
     {
-      STR_DISPOSE( victim->pcdata->bestowments );
-      victim->pcdata->bestowments = str_dup( str_printf("%s %s", victim->pcdata->bestowments, arg2.c_str()) );
-      ch_printf( victim, "%s has given you permission to withdraw clan funds.\n", 
-             ch->name );
-      send_to_char( "Ok, they now have the ablitity to withdraw clan funds.\n", ch );
+        if ( !str_cmp( arg2, entry.ability ) )
+        {
+            std::string current = victim->pcdata->bestowments ? victim->pcdata->bestowments : "";
+            std::string updated = current.empty() ? std::string(entry.ability) : (current + " " + entry.ability);
+            if ( victim->pcdata->bestowments )
+                STR_DISPOSE( victim->pcdata->bestowments );
+            victim->pcdata->bestowments = str_dup( updated );
+            ch_printf( victim, "%s %s\n", ch->name ? ch->name : "Someone", entry.vict_msg );
+            send_to_char( entry.ch_msg, ch );
+            matched = true;
+            break;
+        }
     }
-    else if ( !str_cmp( arg2, "clanbuyship" ) )
-    {
-      STR_DISPOSE( victim->pcdata->bestowments );
-      victim->pcdata->bestowments = str_dup( str_printf("%s %s", victim->pcdata->bestowments, arg2.c_str()) );
-      ch_printf( victim, "%s has given you permission to buy clan ships.\n", 
-             ch->name );
-      send_to_char( "Ok, they now have the ablitity to use clanbuyship.\n", ch );
-    }
-    else if ( !str_cmp( arg2, "induct" ) )
-    {
-      STR_DISPOSE( victim->pcdata->bestowments );
-      victim->pcdata->bestowments = str_dup( str_printf("%s %s", victim->pcdata->bestowments, arg2.c_str()) );
-      ch_printf( victim, "%s has given you permission to induct new members.\n", 
-             ch->name );
-      send_to_char( "Ok, they now have the ablitity to induct new members.\n", ch );
-    }
-    else if ( !str_cmp( arg2, "empower" ) )
-    {
-      STR_DISPOSE( victim->pcdata->bestowments );
-      victim->pcdata->bestowments = str_dup( str_printf("%s %s", victim->pcdata->bestowments, arg2.c_str()) );
-      ch_printf( victim, "%s has given you permission to empower members.\n", 
-             ch->name );
-      send_to_char( "Ok, they now have the ablitity to empower members.\n", ch );
-    }
-    else if ( !str_cmp( arg2, "salary" ) )
-    {
-      STR_DISPOSE( victim->pcdata->bestowments );
-      victim->pcdata->bestowments = str_dup( str_printf("%s %s", victim->pcdata->bestowments, arg2.c_str()) );
-      ch_printf( victim, "%s has given you permission to assign salaries.\n", 
-             ch->name );
-      send_to_char( "Ok, they now have the ablitity to assign salaries.\n", ch );
-    }
-    else if ( !str_cmp( arg2, "roster" ) )
-    {
-      STR_DISPOSE( victim->pcdata->bestowments );
-      victim->pcdata->bestowments = str_dup( str_printf("%s %s", victim->pcdata->bestowments, arg2.c_str()) );
-      ch_printf( victim, "%s has given you permission to access the roster.\n", 
-             ch->name );
-      send_to_char( "Ok, they now have the ablitity to access the roster.\n", ch );
-    }
-    else
+    if ( !matched )
     {
       send_to_char( "Currently you may empower members with only the following:\n", ch ); 
       send_to_char( "\npilot:       ability to fly clan ships\n", ch );
       send_to_char(     "withdraw:    ability to withdraw clan funds\n", ch );
       send_to_char(     "clanbuyship: ability to buy clan ships\n", ch );    
       send_to_char(     "induct:      ability to induct new members\n", ch );    
+      send_to_char(     "empower:     ability to empower members\n", ch );
       send_to_char(     "salary:      ability to assign salaries\n", ch );    
       send_to_char(     "roster:      ability to see the full clan roster\n", ch );
       send_to_char(     "none:        removes bestowed abilities\n", ch );    
@@ -2861,132 +3129,6 @@ void do_empower ( CHAR_DATA *ch , char *argument )
     return;
 
 
-}
-
-void save_senate( )
-{
-/*
-    BOUNTY_DATA *tbounty;
-    FILE *fpout;
-    std::string filename;
-    
-    filename = str_printf("%s%s", SYSTEM_DIR, BOUNTY_LIST );
-    fpout = fopen( filename.c_str(), "w" );
-    if ( !fpout )
-    {
-         bug( "FATAL: cannot open bounty.lst for writing!\n", 0 );
-         return;
-    }
-    for ( tbounty = first_bounty; tbounty; tbounty = tbounty->next )
-    {
-        fprintf( fpout, "%s\n", tbounty->target );
-        fprintf( fpout, "%ld\n", tbounty->amount );
-    }
-    fprintf( fpout, "$\n" );
-    FCLOSE( fpout );
-*/
-}
-
-void load_senate( GameContext *game )
-{
-    first_senator = NULL;
-    last_senator = NULL;
-/*
-    FILE *fpList;
-    char *target;
-    std::string bountylist;
-    BOUNTY_DATA *bounty;
-    long int  amount;
-     
-    first_bounty = NULL;
-    last_bounty	= NULL;
-
-    first_disintigration = NULL;
-    last_disintigration	= NULL;
-
-    log_string( "Loading disintigrations..." );
-
-    bountylist = str_printf("%s%s", SYSTEM_DIR, DISINTIGRATION_LIST );
-    FCLOSE( fpReserve );
-    if ( ( fpList = fopen( bountylist.c_str(), "r" ) ) == NULL )
-    {
-	perror( bountylist.c_str() );
-	exit( 1 );
-    }
-
-    for ( ; ; )
-    {
-        target = feof( fpList ) ? "$" : fread_word( fpList );
-        if ( target[0] == '$' )
-        break;                                  
-	CREATE( bounty, BOUNTY_DATA, 1 );
-    bounty->game = game;
-        LINK( bounty, first_disintigration, last_disintigration, next, prev );
-	bounty->target = STRALLOC(target);
-	amount = fread_number( fpList );
-	bounty->amount = amount;
-    }
-    FCLOSE( fpList );
-    log_string(" Done bounties " );
-    fpReserve = fopen( NULL_FILE, "r" );
-
-    return;
-*/
-}
-
-void do_senate( CHAR_DATA *ch, char *argument )
-{
-/*
-    GOV_DATA *gov;
-    int count = 0;
-    
-    set_char_color( AT_WHITE, ch );
-    send_to_char( "\nGoverning Area                 Controlled By             Value\n", ch );
-    for ( gov = first_gov; gov; gov = gov->next )
-    {
-        set_char_color( AT_YELLOW, ch );
-        ch_printf( ch, "%-30s %-25s %-15ld\n", gov->name, gov->controlled_by , gov->value );
-        count++;
-    }
-
-    if ( !count )
-    {
-        set_char_color( AT_GREY, ch );
-        send_to_char( "There are no governments to capture at this time.\n", ch );
-	return;
-    }
-*/
-}
-
-void do_addsenator( CHAR_DATA *ch , char *argument )
-{   
-/*
-    GOVE_DATA *gov;
-    
-    CREATE( gov, GOV_DATA, 1 );
-    gov->game = ch->game;
-    LINK( gov, first_gov, last_gov, next, prev );
-
-    gov->name		= STRALLOC( argument );
-    gov->value          = atoi( arg2 );
-    gov->vnum           = object;
-    gov->controlled_by  = STRALLOC( "" );
-        
-    ch_printf( ch, "OK, making %s.\n", argument );
-    save_govs();
-*/
-}
-
-void do_remsenator( CHAR_DATA *ch , char *argument )
-
-{
-/*
-	UNLINK( bounty, first_bounty, last_bounty, next, prev );
-	STRFREE( bounty->target );
-	DISPOSE( bounty );
-	
-	save_bounties();
-*/
 }
 
 float get_taxes( PLANET_DATA *planet )
@@ -3015,13 +3157,13 @@ void do_addsalary ( CHAR_DATA *ch , char *argument )
 {
     std::string arg;
     std::string arg2;
-    std::string argstr = argument;
+    std::string argstr = argument ? argument : "";
     CHAR_DATA *victim;
     CLAN_DATA *clan;
-    int salary;
+    long salary;
 //    bool info = FALSE;
 
-    if ( IS_NPC( ch ) || !ch->pcdata->clan )
+    if ( IS_NPC( ch ) || !ch->pcdata || !ch->pcdata->clan )
     {
 	send_to_char( "Huh?\n", ch );
 	return;
@@ -3031,7 +3173,7 @@ void do_addsalary ( CHAR_DATA *ch , char *argument )
 
     if ( (ch->pcdata && ch->pcdata->bestowments
     &&    is_name("salary", ch->pcdata->bestowments))
-    || !str_cmp( ch->name, clan->leader  ) )
+    || (ch->name && clan->leader && !str_cmp( ch->name, clan->leader )) )
 	;
     else
     {
@@ -3045,7 +3187,6 @@ void do_addsalary ( CHAR_DATA *ch , char *argument )
 //      info = TRUE;
     
     
-    salary = strtoi(arg2);
 
     if ( arg.empty() )
     {
@@ -3059,7 +3200,7 @@ void do_addsalary ( CHAR_DATA *ch , char *argument )
 	return;
     }
 
-    if ( IS_NPC(victim) )
+    if ( IS_NPC(victim) || !victim->pcdata )
     {
 	send_to_char( "Not on NPC's.\n", ch );
 	return;
@@ -3077,15 +3218,22 @@ void do_addsalary ( CHAR_DATA *ch , char *argument )
 	    return;
     }
 
-    if ( salary < 0 )
+    if ( !parse_clan_amount(arg2.c_str(), salary) || salary < 0 || salary > INT_MAX )
     {
-        ch_printf( ch, "Salary's must be positive!\n", victim->name );
+        ch_printf( ch, "Salary's must be positive!\n" );
         return;
     }
 
-        victim->pcdata->salary = salary;
-        ch_printf( ch, "%s has been assigned %d credits for a salary.\n", victim->name, salary );
-        ch_printf( victim, "%s has give you a %d credit salary.\n", ch->name, salary );
+        const int old_salary = victim->pcdata->salary;
+        victim->pcdata->salary = static_cast<int>(salary);
+        if ( !save_char_obj(victim) )
+        {
+            victim->pcdata->salary = old_salary;
+            send_to_char("Unable to save that salary.\n", ch);
+            return;
+        }
+        ch_printf( ch, "%s has been assigned %ld credits for a salary.\n", victim->name ? victim->name : "Someone", salary );
+        ch_printf( victim, "%s has given you a %ld credit salary.\n", ch->name ? ch->name : "Someone", salary );
         return;
 
 }    
@@ -3096,9 +3244,13 @@ void show_members( CHAR_DATA *ch, const std::string& argument, const std::string
      MEMBER_DATA	*member;
      CLAN_DATA	*clan;
      int members = 0;
+
+     if ( !ch )
+         return;
+
      for( members_list = first_member_list; members_list; members_list = members_list->next )
      {
-         if( !str_cmp( members_list->name, argument ) )
+         if( members_list->name && !str_cmp( members_list->name, argument ) )
              break;
      }
 
@@ -3110,12 +3262,32 @@ void show_members( CHAR_DATA *ch, const std::string& argument, const std::string
      if ( !clan  )
          return;
 
-    pager_printf( ch, "\nMembers of %s\n", clan->name );
+     auto print_member_line = [&]( MEMBER_DATA *m ) {
+         const char *mname = m->name ? m->name : "";
+         const char *cname = (m->plrclass >= 0 && m->plrclass < MAX_ABILITY)
+             ? ability_name[m->plrclass] : "Unknown";
+         const char *msince = m->since ? m->since : "Unknown";
+         const char *mlaston = m->laston ? m->laston : "Unknown";
+         pager_printf( ch, "[%3d] %12s %15s %5d %6d %10s %10s\n",
+                       m->level,
+                       capitalize( mname ).c_str(),
+                       cname,
+                       m->kills,
+                       m->deaths,
+                       msince,
+                       mlaston );
+     };
+
+     const char *leader = clan->leader ? clan->leader : "";
+     const char *num1 = clan->number1 ? clan->number1 : "";
+     const char *num2 = clan->number2 ? clan->number2 : "";
+
+    pager_printf( ch, "\nMembers of %s\n", clan->name ? clan->name : "" );
     pager_printf( ch, 
 "------------------------------------------------------------\n" );
-    pager_printf( ch, "Leader: %s\n", clan->leader );
-    pager_printf( ch, "Number1: %s\n", clan->number1 );
-    pager_printf( ch, "Number2: %s\n", clan->number2 );
+    pager_printf( ch, "Leader: %s\n", leader );
+    pager_printf( ch, "Number1: %s\n", num1 );
+    pager_printf( ch, "Number2: %s\n", num2 );
     pager_printf( ch, "Spacecraft: %d  Vehicles: %d\n", clan->spacecraft, clan->vehicles );
     pager_printf( ch, 
 "------------------------------------------------------------\n" );
@@ -3127,110 +3299,107 @@ void show_members( CHAR_DATA *ch, const std::string& argument, const std::string
              || !str_cmp( format, "deaths" )
              || !str_cmp( format, "alpha" ))
          {
-             MS_DATA *insert = NULL;
-             MS_DATA *sort;
-             MS_DATA *first_member = NULL;
-             MS_DATA *last_member = NULL;
-
-             CREATE( sort, MS_DATA, 1 );
-             sort->member = members_list->first_member;
-             LINK( sort, first_member, last_member, next, prev );
-
-             for( member = members_list->first_member->next; member; member = member->next )
+             if ( members_list->first_member )
              {
-                 insert = NULL;
+                 MS_DATA *insert = NULL;
+                 MS_DATA *sort, *sort_next;
+                 MS_DATA *first_member = NULL;
+                 MS_DATA *last_member = NULL;
+
+                 CREATE( sort, MS_DATA, 1 );
+                 sort->member = members_list->first_member;
+                 LINK( sort, first_member, last_member, next, prev );
+
+                 for( member = members_list->first_member->next; member; member = member->next )
+                 {
+                     insert = NULL;
+                     for( sort = first_member; sort; sort = sort->next )
+                     {
+                         if( !str_cmp( format, "kills" ))
+                         {
+                             if( member->kills > sort->member->kills )
+                             {
+                                 CREATE( insert, MS_DATA, 1 );
+                                 insert->member = member;
+                                 INSERT( insert, sort, first_member, next, prev );
+                                 break;
+                             }
+                         }
+                         else if( !str_cmp( format, "deaths" ))
+                         {
+                             if( member->deaths > sort->member->deaths )
+                             {
+                                 CREATE( insert, MS_DATA, 1 );
+                                 insert->member = member;
+                                 INSERT( insert, sort, first_member, next, prev );
+                                 break;
+                             }
+                         }
+                         else if( !str_cmp( format, "alpha" ))
+                         {
+                             const char *a = member->name ? member->name : "";
+                             const char *b = sort->member->name ? sort->member->name : "";
+                             if( strcmp( a, b ) < 0 )
+                             {
+                                 CREATE( insert, MS_DATA, 1 );
+                                 insert->member = member;
+                                 INSERT( insert, sort, first_member, next, prev );
+                                 break;
+                             }
+                         }
+                     }
+                     if( insert == NULL )
+                     {
+                         CREATE( insert, MS_DATA, 1 );
+                         insert->member = member;
+                         LINK( insert, first_member, last_member, next, prev );
+                     }
+                 }
+
                  for( sort = first_member; sort; sort = sort->next )
                  {
-                     if( !str_cmp( format, "kills" ))
+                     const char *sname = sort->member->name ? sort->member->name : "";
+                     if( str_cmp( sname, leader )
+                         && str_cmp( sname, num1 )
+                         && str_cmp( sname, num2 ) )
                      {
-                         if( member->kills > sort->member->kills )
-                         {
-                             CREATE( insert, MS_DATA, 1 );
-                             insert->member = member;
-                             INSERT( insert, sort, first_member, next, prev );
-                             break;
-                         }
+                         members++;
+                         print_member_line( sort->member );
                      }
-                     else if( !str_cmp( format, "deaths" ))
-                     {
-                         if( member->deaths > sort->member->deaths )
-                         {
-                             CREATE( insert, MS_DATA, 1 );
-                             insert->member = member;
-                             INSERT( insert, sort, first_member, next, prev );
-                             break;
-                         }
-                     }
-                     else if( !str_cmp( format, "alpha" ))
-                     {
-                         if( strcmp( member->name, sort->member->name ) < 0 )
-                         {
-                             CREATE( insert, MS_DATA, 1 );
-                             insert->member = member;
-                             INSERT( insert, sort, first_member, next, prev );
-                             break;
-                         }
-                     }
-
                  }
-                 if( insert == NULL )
+
+                 for( sort = first_member; sort; sort = sort_next )
                  {
-                     CREATE( insert, MS_DATA, 1 );
-                     insert->member = member;
-                     LINK( insert, first_member, last_member, next, prev );
+                     sort_next = sort->next;
+                     UNLINK( sort, first_member, last_member, next, prev );
+                     DISPOSE( sort );
                  }
              }
-
-             for( sort = first_member; sort; sort = sort->next )
-                 if( str_cmp( sort->member->name, clan->leader )
-                     && str_cmp( sort->member->name, clan->number1 )
-                     && str_cmp( sort->member->name, clan->number2 ) )
+         }
+         else
+         {
+             for( member = members_list->first_member; member; member = member->next )
+             {
+                 if( member->name && !str_prefix( format, member->name ) )
                  {
                      members++;
-                     pager_printf( ch, "[%3d] %12s %15s %5d %6d %10s %10s\n",
-                                   sort->member->level,
-                                   capitalize(sort->member->name ).c_str(),
-                                   ability_name[sort->member->plrclass],
-                                   sort->member->kills,
-                                   sort->member->deaths,
-                                   sort->member->since,
-                                   sort->member->laston );
-		 }
-
-         }
-
-         for( member = members_list->first_member; member; member = member->next )
-             if( !str_prefix( format, member->name ) )
-             {
-             	 members++;
-                 pager_printf( ch, "[%3d] %12s %15s %5d %6d %10s %10s\n",
-                               member->level,
-                               capitalize(member->name ).c_str(),
-                               ability_name[member->plrclass],
-                               member->kills,
-                               member->deaths,
-                               member->since,
-                               member->laston );
+                     print_member_line( member );
+                 }
              }
-
+         }
      }
      else
      {
-
          for( member = members_list->first_member; member; member = member->next )
-             if( str_cmp( member->name, clan->leader ) && str_cmp( member->name, clan->number1 )
-                 && str_cmp( member->name, clan->number2 ) )
+         {
+             const char *mname = member->name ? member->name : "";
+             if( str_cmp( mname, leader ) && str_cmp( mname, num1 )
+                 && str_cmp( mname, num2 ) )
              {
-             	 members++;
-                 pager_printf( ch, "[%3d] %12s %15s %5d %6d %10s %10s\n", 
-                 	       member->level,
-                               capitalize(member->name).c_str(), 
-                               ability_name[member->plrclass],
-                               member->kills, 
-                               member->deaths, 
-                               member->since,
-                               member->laston );
+                 members++;
+                 print_member_line( member );
              }
+         }
      }
 
              pager_printf( ch, 
@@ -3247,19 +3416,23 @@ void remove_member( CHAR_DATA *ch )
     MEMBER_LIST	*members_list;
     MEMBER_DATA	*member;
 
-    if( !ch->pcdata )
+    if( !ch || !ch->pcdata || !ch->pcdata->clan_name )
         return;
 
     for( members_list = first_member_list; members_list; members_list = members_list->next )
     {
-      if( !str_cmp( members_list->name, ch->pcdata->clan_name ) )
+      if( members_list->name && !str_cmp( members_list->name, ch->pcdata->clan_name ) )
         for( member = members_list->first_member; member; member = member->next )
         {
-          if( !str_cmp( member->name, ch->name ) )
+          if( member->name && ch->name && !str_cmp( member->name, ch->name ) )
           {
             UNLINK( member, members_list->first_member, members_list->last_member, next, prev );
-            STRFREE( member->name );
-            STRFREE( member->since );
+            if ( member->name )
+              STRFREE( member->name );
+            if ( member->since )
+              STRFREE( member->since );
+            if ( member->laston )
+              STRFREE( member->laston );
             DISPOSE( member );
             save_member_list( members_list );
             break;
@@ -3270,26 +3443,29 @@ void remove_member( CHAR_DATA *ch )
 
 void do_roster( CHAR_DATA *ch, char *argument )
 {
-     if( IS_NPC( ch ) || !ch->pcdata->clan
-         || ( str_cmp(ch->name, ch->pcdata->clan->leader )
-              && str_cmp(ch->name, ch->pcdata->clan->number1 )
-              && str_cmp(ch->name, ch->pcdata->clan->number2 )
-              && (!ch->pcdata || !ch->pcdata->bestowments
+     if( IS_NPC( ch ) || !ch->pcdata || !ch->pcdata->clan
+         || ( (!ch->name || !ch->pcdata->clan->leader || str_cmp(ch->name, ch->pcdata->clan->leader ))
+              && (!ch->name || !ch->pcdata->clan->number1 || str_cmp(ch->name, ch->pcdata->clan->number1 ))
+              && (!ch->name || !ch->pcdata->clan->number2 || str_cmp(ch->name, ch->pcdata->clan->number2 ))
+              && (!ch->pcdata->bestowments
     || !is_name("roster", ch->pcdata->bestowments)) ) )
      {
          send_to_char( "Huh?\n", ch );
          return;
      }
 
-     show_members( ch, ch->pcdata->clan->name, argument );
+     show_members( ch, ch->pcdata->clan->name ? ch->pcdata->clan->name : "", argument ? argument : "" );
      return;
 
 }
 void do_members( CHAR_DATA *ch, char *argument )
 {
      std::string arg1;
-     std::string argstr = argument;
+     std::string argstr = argument ? argument : "";
      argstr = one_argument( argstr, arg1 );
+
+     if( !ch )
+         return;
 
      if( argstr.empty() || arg1.empty() )
      {
@@ -3299,15 +3475,15 @@ void do_members( CHAR_DATA *ch, char *argument )
 
      if( !str_cmp( arg1, "show" ) )
      {
-         if( !str_cmp( argument, "all" ) )
+         if( !str_cmp( argstr, "all" ) )
          {
              MEMBER_LIST *members_list;
              for( members_list = first_member_list; members_list; members_list = members_list->next )
-                 show_members( ch, members_list->name, NULL );
+                 show_members( ch, members_list->name ? members_list->name : "", "" );
              return;
          }
 
-         show_members( ch, argstr, NULL );
+         show_members( ch, argstr, "" );
          return;
      }
 
@@ -3330,18 +3506,23 @@ void do_members( CHAR_DATA *ch, char *argument )
          MEMBER_DATA *member;
 
          for( members_list = first_member_list; members_list; members_list = members_list->next )
-             if( !str_cmp( argstr, members_list->name ) )
+             if( members_list->name && !str_cmp( argstr, members_list->name ) )
              {
                  while( members_list->first_member )
                  {
                      member = members_list->first_member;
-                     STRFREE( member->name );
-                     STRFREE( member->since );
+                     if ( member->name )
+                       STRFREE( member->name );
+                     if ( member->since )
+                       STRFREE( member->since );
+                     if ( member->laston )
+                       STRFREE( member->laston );
                      UNLINK( member, members_list->first_member, members_list->last_member, next, prev );
                      DISPOSE( member );
                  }
 
-                 STRFREE( members_list->name );
+                 if ( members_list->name )
+                   STRFREE( members_list->name );
                  UNLINK( members_list, first_member_list, last_member_list, next, prev );
                  DISPOSE( members_list );
                  ch_printf( ch, "Member list \"%s\" destroyed.\n", argstr.c_str() );
@@ -3354,40 +3535,43 @@ void do_members( CHAR_DATA *ch, char *argument )
 
 void save_member_list( MEMBER_LIST *members_list )
 {
-     MEMBER_DATA	*member;
-     FILE		*fp;
-     CLAN_DATA    *clan;
-     std::string         buf;
+    if ( !members_list )
+    {
+        bug( "save_member_list: NULL members_list" );
+        return;
+    }
 
-     if( !members_list )
-     {
-         bug( "save_member_list: NULL members_list" );
-         return;
-     }
+    CLAN_DATA *clan = members_list->name ? get_clan( members_list->name ) : nullptr;
+    if ( !clan )
+    {
+        bug( "save_member_list: no such clan: %s", members_list->name ? members_list->name : "(null)" );
+        return;
+    }
 
-     if( ( clan = get_clan( members_list->name )) == NULL )
-     {
-         bug( "save_member_list: no such clan: %s", members_list->name );
-         return;
-     }
+    save_member_list_file( clan, members_list );
+}
 
-     buf = str_printf("%s%s.mem", CLAN_DIR, clan->filename);
+static bool save_member_list_file( const CLAN_DATA *clan, const MEMBER_LIST *members_list )
+{
+    if ( !clan->filename || !realm_filename_valid( clan->filename ) )
+    {
+        bug( "save_member_list: clan %s has no valid filename", clan->name ? clan->name : "(null)" );
+        return false;
+    }
 
-     if( ( fp = fopen( buf.c_str(), "w" ) ) == NULL )
-     {
-         bug( "Cannot open clan.mem file for writing", 0 );
-         perror( buf.c_str() );
-         return;
-     }
-
-     fprintf( fp, "Version       2\n" );
-     fprintf( fp, "Name          %s~\n", members_list->name );
-     for( member = members_list->first_member; member; member = member->next )
-         fprintf( fp, "Member        %s %s %d %d %d %d %s\n", 
-         member->name, member->since, member->kills, member->deaths, member->level, member->plrclass, member->laston);
-     fprintf( fp, "End\n\n" );
-     FCLOSE( fp );
-
+    const std::string path = std::string( CLAN_DIR ) + clan->filename + ".mem";
+    return write_realm_file( path, [&]( FILE *fp ) {
+        fprintf( fp, "Version       2\n" );
+        fprintf( fp, "Name          %s~\n", members_list->name );
+        for ( const MEMBER_DATA *member = members_list->first_member; member; member = member->next )
+            fprintf( fp, "Member        %s %s %d %d %d %d %s\n",
+                     member->name ? member->name : "Unknown",
+                     member->since ? member->since : "Unknown",
+                     member->kills, member->deaths, member->level, member->plrclass,
+                     member->laston ? member->laston : "Unknown" );
+        fprintf( fp, "End\n\n" );
+        return true;
+    } );
 }
 
 bool load_member_list( GameContext *game, const std::string& filename )
@@ -3396,33 +3580,67 @@ bool load_member_list( GameContext *game, const std::string& filename )
      std::string buf;
      MEMBER_LIST *members_list;
      MEMBER_DATA *member;
-     int version;
+     int version = 1;
 
      buf = str_printf("%s%s.mem", CLAN_DIR, filename.c_str());
 
      if( ( fp = fopen( buf.c_str(), "r" ) ) == NULL )
      {
-         bug( "Cannot open member list for reading", 0 );
+         bug( "Cannot open member list for reading" );
          return FALSE;
      }
 
      CREATE( members_list, MEMBER_LIST, 1 );
      members_list->game = game;
 
+     auto cleanup_partial = [&]() {
+         while ( members_list->first_member )
+         {
+             MEMBER_DATA *m = members_list->first_member;
+             UNLINK( m, members_list->first_member, members_list->last_member, next, prev );
+             if ( m->name )
+                 STRFREE( m->name );
+             if ( m->since )
+                 STRFREE( m->since );
+             if ( m->laston )
+                 STRFREE( m->laston );
+             DISPOSE( m );
+         }
+         if ( members_list->name )
+             STRFREE( members_list->name );
+         DISPOSE( members_list );
+         FCLOSE( fp );
+     };
+
      for( ; ; )
      {
          char *word;
 
+         if ( feof( fp ) )
+         {
+             bug( "load_member_list: unexpected EOF" );
+             cleanup_partial();
+             return FALSE;
+         }
+
          word = fread_word( fp );
+         if ( !word || word[0] == '\0' )
+         {
+             bug( "load_member_list: unexpected EOF" );
+             cleanup_partial();
+             return FALSE;
+         }
 
          if( !str_cmp( word, "Version" ) )
          {
-             version = fread_number( fp );;
+             version = fread_number( fp );
              continue;
          }
          else
          if( !str_cmp( word, "Name" ) )
          {
+             if ( members_list->name )
+                 STRFREE( members_list->name );
              members_list->name = fread_string( fp );
              continue;
          }
@@ -3430,29 +3648,34 @@ bool load_member_list( GameContext *game, const std::string& filename )
          if( !str_cmp( word, "Member" ) )
          {
              CREATE( member, MEMBER_DATA, 1 );
+             member->game = game;
              member->name = STRALLOC( fread_word( fp ) );
              member->since = STRALLOC( fread_word( fp ) );
              member->kills = fread_number( fp );
              member->deaths = fread_number( fp );
              member->level = fread_number( fp );
-	     member->plrclass = fread_number( fp );
-	     if ( version == 2 )
-	       member->laston = STRALLOC( fread_word( fp ) );
-	     
+             member->plrclass = fread_number( fp );
+             if ( version == 2 )
+                 member->laston = STRALLOC( fread_word( fp ) );
+             else
+                 member->laston = STRALLOC( "Unknown" );
+             
              LINK( member, members_list->first_member, members_list->last_member, next, prev );
              continue;
          }
          else
          if( !str_cmp( word, "End" ) )
          {
+             if ( !members_list->name )
+                 members_list->name = STRALLOC( filename );
              LINK( members_list, first_member_list, last_member_list, next, prev );
              FCLOSE( fp );
              return TRUE;
          }
          else
          {
-             bug( "load_members_list: bad section", 0 );
-             FCLOSE( fp );
+             bug( "load_members_list: bad section" );
+             cleanup_partial();
              return FALSE;
          }
      }
@@ -3464,15 +3687,18 @@ void update_member( CHAR_DATA *ch )
      MEMBER_LIST *members_list;
      MEMBER_DATA *member;
      struct tm *t = localtime(&current_time);
+     std::string date_str = t
+         ? str_printf("[%02d|%02d|%04d]", t->tm_mon+1, t->tm_mday, t->tm_year+1900)
+         : "Unknown";
 
-     if( IS_NPC( ch ) || IS_IMMORTAL(ch) || !ch->pcdata->clan )
+     if( !ch || IS_NPC( ch ) || IS_IMMORTAL(ch) || !ch->pcdata || !ch->pcdata->clan )
          return;
 
      for( members_list = first_member_list; members_list; members_list = members_list->next )
-         if( !str_cmp( members_list->name, ch->pcdata->clan_name ) )
+         if( members_list->name && ch->pcdata->clan_name && !str_cmp( members_list->name, ch->pcdata->clan_name ) )
          {
              for( member = members_list->first_member; member; member = member->next )
-                 if ( !str_cmp( member->name, ch->name ) )
+                 if ( member->name && ch->name && !str_cmp( member->name, ch->name ) )
                  {
                      if( ch->pcdata->clan->clan_type == CLAN_PLAIN )
                      {
@@ -3484,9 +3710,11 @@ void update_member( CHAR_DATA *ch )
                          member->kills = ch->pcdata->pkills;
                          member->deaths = ch->pcdata->clones;
                      }
-		             member->plrclass = ch->main_ability;
+                     member->plrclass = ch->main_ability;
                      member->level = ch->top_level;
-                     member->laston = STRALLOC( str_printf("[%02d|%02d|%04d]", t->tm_mon+1, t->tm_mday, t->tm_year+1900) );
+                     if ( member->laston )
+                         STRFREE( member->laston );
+                     member->laston = STRALLOC( date_str );
                      gmcp_evt_char_status(ch);
                      save_member_list( members_list );
                      return;
@@ -3495,11 +3723,12 @@ void update_member( CHAR_DATA *ch )
              if( member == NULL )
              {
                  CREATE( member, MEMBER_DATA, 1 );
-                 member->name = STRALLOC( ch->name );
+                 member->game = members_list->game ? members_list->game : ch->game;
+                 member->name = STRALLOC( ch->name ? ch->name : "" );
                  member->level = ch->top_level;
-		 member->plrclass = ch->main_ability;
-                 member->since = STRALLOC( str_printf("[%02d|%02d|%04d]", t->tm_mon+1, t->tm_mday, t->tm_year+1900) );
-                 member->laston = STRALLOC( str_printf("[%02d|%02d|%04d]", t->tm_mon+1, t->tm_mday, t->tm_year+1900) );
+                 member->plrclass = ch->main_ability;
+                 member->since = STRALLOC( date_str );
+                 member->laston = STRALLOC( date_str );
                  if( ch->pcdata->clan->clan_type == CLAN_PLAIN )
                  {
                      member->kills = ch->pcdata->pkills;
@@ -3526,7 +3755,7 @@ void do_clanfunds( CHAR_DATA *ch, char *argument )
   OBJ_DATA *obj;
   bool ch_comlink = FALSE;
 
-  if ( IS_NPC( ch ) || !ch->pcdata->clan )
+  if ( IS_NPC( ch ) || !ch->pcdata || !ch->pcdata->clan )
   {
     send_to_char("You don't seem to belong to an organization.\n",ch);
     return;
@@ -3553,8 +3782,8 @@ void do_clanfunds( CHAR_DATA *ch, char *argument )
   clan = ch->pcdata->clan;
   if ( clan->funds == 0 )
   {
-    ch_printf(ch,"%s has no funds at its disposal.",clan->name);
+    ch_printf(ch,"%s has no funds at its disposal.",clan->name ? clan->name : "Your organization");
     return;
   }
-  ch_printf(ch,"%s has %ld credits at its disposal.\n",clan->name,clan->funds);
+  ch_printf(ch,"%s has %ld credits at its disposal.\n",clan->name ? clan->name : "Your organization",clan->funds);
 }

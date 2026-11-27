@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <unordered_map>
 /***************************************************************************
 *                           STAR WARS REALITY 1.0                          *
 *--------------------------------------------------------------------------*
@@ -25,12 +27,14 @@
 #include <errno.h>
 #include <stdio.h>
 #include <time.h>
+#include <chrono>
 #include <string.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <openssl/crypto.h>
 
 #include "mud.h"
 #ifdef DNS_SLAVE /* DNS Slave stuff */
@@ -61,6 +65,7 @@ typedef enum
  */
 
 #ifndef _WIN32
+#include <crypt.h>
 #include <sys/wait.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -72,20 +77,29 @@ typedef enum
 #include <netdb.h>
 #endif
 
-#define PAGEPOINT_NULL ((size_t)-1) 
+#define PAGEPOINT_NULL ((size_t)-1)
+static constexpr size_t descriptor_output_limit = 50000;
+static constexpr size_t wire_output_limit = 2 * descriptor_output_limit;
 
-const	unsigned char	echo_off_str	[] = { IAC, WILL, TELOPT_ECHO, '\0' };
-const	unsigned char	echo_on_str	[] = { IAC, WONT, TELOPT_ECHO, '\0' };
-const	unsigned char 	go_ahead_str	[] = { IAC, GA, '\0' };
+// Socket backpressure must retain the already-framed bytes across mode changes.
+static std::unordered_map<DESCRIPTOR_DATA *, std::string> wire_output;
+
+static bool has_wire_output(DESCRIPTOR_DATA *d)
+{
+    return wire_output.find(d) != wire_output.end();
+}
+
+const	unsigned char	echo_off_str	[] = { IAC, WILL, TELOPT_ECHO };
+const	unsigned char	echo_on_str	[] = { IAC, WONT, TELOPT_ECHO };
+const	unsigned char 	go_ahead_str	[] = { IAC, GA };
 
 #ifdef MCCP
 #define COMPRESS_BUF_SIZE 8192
 
 #define TELOPT_COMPRESS 85
 #define TELOPT_COMPRESS2 86
-const   unsigned char    eor_on_str      [] = { IAC, WILL, TELOPT_EOR, '\0' };
-const   unsigned char    compress_on_str [] = { IAC, WILL, TELOPT_COMPRESS, '\0' };
-const   unsigned char    compress2_on_str [] = { IAC, WILL, TELOPT_COMPRESS2, '\0' };
+const   unsigned char    compress_on_str [] = { IAC, WILL, TELOPT_COMPRESS };
+const   unsigned char    compress2_on_str [] = { IAC, WILL, TELOPT_COMPRESS2 };
 
 bool    compressStart   args( ( DESCRIPTOR_DATA *d, unsigned char telopt ) );
 bool    compressEnd     args( ( DESCRIPTOR_DATA *d ) );
@@ -108,6 +122,53 @@ int player_count = 0;
 DESCRIPTOR_DATA *   first_descriptor;	/* First descriptor		*/
 DESCRIPTOR_DATA *   last_descriptor;	/* Last descriptor		*/
 DESCRIPTOR_DATA *   d_next;		/* Next descriptor in loop	*/
+static DESCRIPTOR_DATA *s_loop_desc = nullptr;
+
+static bool comm_desc_in_list(const DESCRIPTOR_DATA *d)
+{
+    if (!d)
+        return false;
+
+    for (const DESCRIPTOR_DATA *cur = first_descriptor; cur; cur = cur->next)
+    {
+        if (cur == d)
+            return true;
+    }
+    return false;
+}
+
+bool comm_desc_alive(const DESCRIPTOR_DATA *d)
+{
+    return comm_desc_in_list(d) && !d->closing && !d->write_failed && d->descriptor >= 0;
+}
+
+static void comm_close_failed_descriptors_internal(bool save_chars)
+{
+    bool swept;
+    do
+    {
+        swept = false;
+        for ( DESCRIPTOR_DATA *df = first_descriptor; df; df = df->next )
+        {
+            if ( df->write_failed && !df->closing )
+            {
+                if ( save_chars && df->character
+                &&   ( df->connected == CON_PLAYING || df->connected == CON_EDITING ) )
+                    save_char_obj( df->character );
+                df->outtop = 0;
+                close_socket( df, TRUE );
+                swept = true;
+                break;
+            }
+        }
+    }
+    while ( swept );
+}
+
+void comm_close_failed_descriptors( void )
+{
+    comm_close_failed_descriptors_internal( false );
+}
 int		    num_descriptors;
 FILE *		    fpReserve;		/* Reserved file handle		*/
 bool		    mud_down;		/* Shutdown			*/
@@ -135,6 +196,7 @@ static int slave_socket = -1;
 #endif
 static volatile sig_atomic_t g_alarm_fired = 0;
 static volatile sig_atomic_t g_pending_accept_fd = -1;
+static int s_mud_port = 4000;
 
 
 /*
@@ -150,7 +212,8 @@ bool	read_from_descriptor	args( ( DESCRIPTOR_DATA *d ) );
  * Other local functions (OS-independent).
  */
 void send_mssp(DESCRIPTOR_DATA *d);
-ssize_t net_write(DESCRIPTOR_DATA *d, const unsigned char *data, size_t len);
+static bool queue_descriptor_output(DESCRIPTOR_DATA *d);
+static bool drain_wire_output(DESCRIPTOR_DATA *d);
 void send_telnet(DESCRIPTOR_DATA *d, const unsigned char *data, size_t len);
 void output_to_descriptor(DESCRIPTOR_DATA *d, const std::string& txt);
 void output_to_descriptor_char(DESCRIPTOR_DATA *d, const char *txt);
@@ -160,7 +223,6 @@ std::string wrap_text_smart( const std::string& txt, int width );
 size_t visible_length(const char *txt);
 size_t visible_length(const std::string&txt);
 std::string wrap_text_ex( const std::string& txt, int width, int flags, int indent );
-bool process_compressed(DESCRIPTOR_DATA *d);
 bool	check_parse_name	args( ( const std::string& name ) );
 short	check_reconnect		args( ( DESCRIPTOR_DATA *d, const std::string& name,
 				    bool fConn ) );
@@ -277,7 +339,8 @@ int main( int argc, char **argv )
     {
 	if ( !is_number( argv[1] ) )
 	{
-	    fprintf( stderr, "Usage: %s [port #]\n", argv[0] );
+	    const char *program_name = argv[0];
+	    fprintf( stderr, "Usage: %s [port #]\n", program_name );
 	    exit( 1 );
 	}
 	else if ( ( port = atoi( argv[1] ) ) <= 1024 )
@@ -286,6 +349,7 @@ int main( int argc, char **argv )
 	    exit( 1 );
 	}
     }
+    s_mud_port = port;
 
     /*
      * Run the game.
@@ -306,6 +370,8 @@ int main( int argc, char **argv )
     log_printf( "Rise in Power ready on port %d.", port );
     bootup = FALSE;
     game_loop(game);
+    while (first_descriptor)
+        close_socket(first_descriptor, FALSE);
     close( control  );
     close( control2 );
     close( conclient);
@@ -580,6 +646,8 @@ void game_loop(GameContext *game)
                 d->game = game;
             if (d->character && d->character->game == nullptr)
                 d->character->game = game;
+            if (d->original && d->original->game == nullptr)
+                d->original->game = game;
         }
 
 	    if ( d == d->next )
@@ -588,18 +656,34 @@ void game_loop(GameContext *game)
 	      d->next = NULL;
 	    }
  	    d_next = d->next;   
+            s_loop_desc = d;
 
-        if (d->mccp_pending == 1 && d->connected == CON_PLAYING)
+#ifdef MCCP
+        if (d->mccp_pending && d->connected == CON_PLAYING)
         {
-            compressStart(d, TELOPT_COMPRESS2);
-            d->mccp_pending = false;
-        }      
+            const unsigned char option = d->mccp_pending;
+            d->mccp_pending = 0;
+            compressStart(d, option);
+        }
+#endif
 
-	    d->idle++;	/* make it so a descriptor can idle out */
-	    if ( FD_ISSET( d->descriptor, &exc_set ) )
+            if (d->idle < SHRT_MAX)
+                ++d->idle;
+            CHAR_DATA *session_player = d->original ? d->original : d->character;
+            const bool can_idle_out = !session_player || !IS_IMMORTAL(session_player);
+            const bool active_session = d->connected == CON_PLAYING || d->connected == CON_EDITING;
+            const bool idle_timeout = can_idle_out
+                && ((!session_player && d->idle > 360)
+                 || (d->connected != CON_PLAYING && d->idle > 1200)
+                 || d->idle > 28800);
+
+	    if ( d->write_failed || ( d->descriptor >= 0 && FD_ISSET( d->descriptor, &exc_set ) ) )
 	    {
-            FD_CLR( d->descriptor, &in_set  );
-            FD_CLR( d->descriptor, &out_set );
+            if ( d->descriptor >= 0 )
+            {
+                FD_CLR( d->descriptor, &in_set  );
+                FD_CLR( d->descriptor, &out_set );
+            }
             if ( d->character
             && ( d->connected == CON_PLAYING
             ||   d->connected == CON_EDITING ) )
@@ -608,52 +692,47 @@ void game_loop(GameContext *game)
             close_socket( d, TRUE );
             continue;
 	    }
-	    else 
-	    if (( d->character ? d->character->top_level <= LEVEL_IMMORTAL : FALSE) &&
-	    ( d->idle > 7200 ) && !BV_IS_SET(d->character->act, PLR_AFK))		  /* 30 minutes  */
-	    {
-            if( (d->character && d->character->in_room) ? d->character->top_level <= LEVEL_IMMORTAL : FALSE)
+            else if (idle_timeout)
             {
-                output_to_descriptor( d,
-                "Idle 30 Minutes. Activating AFK Flag\n");
-                BV_SET_BIT(d->character->act, PLR_AFK);
-                act(AT_GREY,"$n is now afk due to idle time.", d->character, NULL, NULL, TO_ROOM);
+                output_to_descriptor(d, "Idle timeout... disconnecting.\n");
+                if (s_loop_desc != d || !comm_desc_in_list(d) || d->closing)
+                    continue;
+                if (session_player && active_session && !IS_NPC(session_player))
+                    save_char_obj(session_player);
+                close_socket(d, FALSE);
                 continue;
             }
-	    }
-	    else 
-	    if (( d->character ? d->character->top_level <= LEVEL_IMMORTAL : TRUE) &&
-	    ( (!d->character && d->idle > 360)		  /* 2 mins */
-            ||   ( d->connected != CON_PLAYING && d->idle > 1200) /* 5 mins */
-	    ||     d->idle > 28800 ))				  /* 2 hrs  */
-	    {
-            if( d->character ? d->character->top_level <= LEVEL_IMMORTAL : TRUE)
+            else if (can_idle_out && active_session && session_player && session_player->in_room
+                     && d->idle > 7200 && !BV_IS_SET(session_player->act, PLR_AFK))
             {
-                output_to_descriptor( d,
-                "Idle timeout... disconnecting.\n");
-                d->outtop	= 0;
-                close_socket( d, TRUE );
+                output_to_descriptor(d, "Idle 30 Minutes. Activating AFK Flag\n");
+                if (s_loop_desc != d || !comm_desc_alive(d))
+                    continue;
+                BV_SET_BIT(session_player->act, PLR_AFK);
+                act(AT_GREY, "$n is now afk due to idle time.", session_player, NULL, NULL, TO_ROOM);
                 continue;
             }
-	    }
 	    else
 	    {
             d->fcommand	= FALSE;
 
-            if ( FD_ISSET( d->descriptor, &in_set ) )
+            if ( d->descriptor >= 0 && FD_ISSET( d->descriptor, &in_set ) )
             {
                 d->idle = 0;
                 if ( d->character )
                 d->character->timer = 0;
                 if ( !read_from_descriptor( d ) )
                 {
-                    FD_CLR( d->descriptor, &out_set );
+                    if ( s_loop_desc != d || !comm_desc_in_list( d ) || d->closing )
+                        continue;
+                    if ( d->descriptor >= 0 )
+                        FD_CLR( d->descriptor, &out_set );
                     if ( d->character
                     && ( d->connected == CON_PLAYING
                     ||   d->connected == CON_EDITING ) )
                     save_char_obj( d->character );
                     d->outtop	= 0;
-                    close_socket( d, FALSE );
+                    close_socket( d, d->write_failed ? TRUE : FALSE );
                     continue;
                 }
             }
@@ -680,6 +759,8 @@ void game_loop(GameContext *game)
                 check_ban( d );*/
             }
             }
+            if ( s_loop_desc != d || !comm_desc_alive( d ) )
+                continue;
             if ( d->character && d->character->wait > 0 )
             {
                 --d->character->wait;
@@ -699,6 +780,8 @@ void game_loop(GameContext *game)
                     break;
 
                 read_from_buffer( d );
+                if ( s_loop_desc != d || !comm_desc_alive( d ) )
+                    break;
 
                 /* No full command ready */
                 if ( d->incomm_str.empty() )
@@ -737,7 +820,7 @@ void game_loop(GameContext *game)
                             
                     }
                 }
-                if ( d->descriptor < 0 )   /* CLOSED inside interpret/nanny */
+                if ( s_loop_desc != d || !comm_desc_alive( d ) )   /* CLOSED/FAILED inside interpret/nanny */
                 {
                     break;
                 }
@@ -756,26 +839,23 @@ void game_loop(GameContext *game)
             */
         }
 
-        gmcp_flush(d); 
+        if ( s_loop_desc != d || !comm_desc_alive( d ) )
+            continue;
 
-        if ( d->descriptor < 0 )   /* CLOSED inside interpret/nanny */
-        {
-            DISPOSE(d);
-            break;    
-        }
-	   if ( d == last_descriptor )
-	        break;
+        gmcp_flush(d);
+
+        if ( s_loop_desc != d || !comm_desc_alive( d ) )
+            continue;
 	}
+	s_loop_desc = nullptr;
+	comm_close_failed_descriptors_internal( true );
 
 	/*
 	 * Autonomous game motion.
 	 */
 	update_handler( game );
 
-	/*
-	 * Check REQUESTS pipe
-	 */
-        check_requests( game );
+	comm_close_failed_descriptors_internal( true );
 
 	/*
 	 * Output.
@@ -783,41 +863,54 @@ void game_loop(GameContext *game)
 	for ( d = first_descriptor; d; d = d_next )
 	{
 	    d_next = d->next;   
+	    s_loop_desc = d;
 
-        if ( d->descriptor < 0 )
-        {
-            DISPOSE(d);
-            continue;
-        }
+	    if ( d->write_failed )
+	    {
+	        if ( d->character
+	        && ( d->connected == CON_PLAYING
+	        ||   d->connected == CON_EDITING ) )
+	            save_char_obj( d->character );
+	        d->outtop = 0;
+	        close_socket( d, TRUE );
+	        continue;
+	    }
 
-       if ( ( d->fcommand || d->outtop > 0 )
+       if ( ( d->fcommand || d->outtop > 0 || has_wire_output(d) )
+	    &&   d->descriptor >= 0
 	    &&   FD_ISSET(d->descriptor, &out_set) )
 	    {
-	        if ( d->pagepoint != PAGEPOINT_NULL )
+	        if ( d->pagepoint != PAGEPOINT_NULL && d->pagecmd != -1 )
 	        {
 	          if ( !pager_output(d) )
 	          {
-	            if ( d->character
-	            && ( d->connected == CON_PLAYING
-	            ||   d->connected == CON_EDITING ) )
-	                save_char_obj( d->character );
-	            d->outtop = 0;
-	            close_socket(d, FALSE);
+	            if ( s_loop_desc == d && comm_desc_in_list( d ) && !d->closing )
+	            {
+	                if ( d->character
+	                && ( d->connected == CON_PLAYING
+	                ||   d->connected == CON_EDITING ) )
+	                    save_char_obj( d->character );
+	                d->outtop = 0;
+	                close_socket(d, d->write_failed ? TRUE : FALSE);
+	            }
 	          }
 	        }
-		else if ( !flush_buffer( d, TRUE ) )
+		else if ( !flush_buffer( d, d->pagepoint == PAGEPOINT_NULL && (d->fcommand || d->outtop > 0) ) )
 		{
-		    if ( d->character
-		    && ( d->connected == CON_PLAYING
-		    ||   d->connected == CON_EDITING ) )
-			save_char_obj( d->character );
-		    d->outtop	= 0;
-		    close_socket( d, FALSE );
+		    if ( s_loop_desc == d && comm_desc_in_list( d ) && !d->closing )
+		    {
+		        if ( d->character
+		        && ( d->connected == CON_PLAYING
+		        ||   d->connected == CON_EDITING ) )
+			    save_char_obj( d->character );
+		        d->outtop	= 0;
+		        close_socket( d, d->write_failed ? TRUE : FALSE );
+		    }
 		}
 	    }
-	    if ( d == last_descriptor )
-	      break;
 	}
+	s_loop_desc = nullptr;
+	comm_close_failed_descriptors_internal( true );
 
 	/*
 	 * Synchronize to a clock.
@@ -920,6 +1013,7 @@ void new_descriptor( GameContext *game, int new_desc )
 
     if ( check_bad_desc( new_desc ) )
     {
+      close( desc );
       set_alarm( 0 );
       g_pending_accept_fd = -1;
       return;
@@ -952,6 +1046,8 @@ void new_descriptor( GameContext *game, int new_desc )
     if ( g_alarm_fired )
     {
         log_string( "new_descriptor: aborted due to alarm (post-accept/post-fcntl)" );
+        if ( g_pending_accept_fd >= 0 )
+            close( desc );
         g_pending_accept_fd = -1;
         set_alarm( 0 );
         return;
@@ -1040,6 +1136,8 @@ void new_descriptor( GameContext *game, int new_desc )
     if ( g_alarm_fired )
     {
         log_string( "new_descriptor: aborted due to alarm (post-DNS)" );
+        if ( hostname )
+            STRFREE( hostname );
         free_desc( dnew );
         g_pending_accept_fd = -1;
         set_alarm( 0 );
@@ -1073,16 +1171,21 @@ void new_descriptor( GameContext *game, int new_desc )
 	  &&  pban->level >= LEVEL_SUPREME 
 	)
 	{
-	    output_to_descriptor( dnew,
-		    "Your site has been banned from this Mud.\n" );
-        flush_buffer(dnew, FALSE);
+	    const char *ban_msg = "Your site has been banned from this Mud.\n";
+	    ssize_t ignored = write( dnew->descriptor, ban_msg, strlen( ban_msg ) );
+	    (void)ignored;
+	    if ( hostname )
+	        STRFREE( hostname );
 	    free_desc( dnew );
-        g_pending_accept_fd = -1;          
+            g_pending_accept_fd = -1;          
 	    set_alarm( 0 );
       
 	    return;
 	}
     }
+
+    if ( hostname )
+        STRFREE( hostname );
 
     buf = inet_ntoa( sock.sin_addr );
     log_printf_plus( LOG_COMM, game->get_sysdata()->log_level, "Sock.sinaddr:  %s, port %d.",	buf.c_str(), dnew->port );
@@ -1112,9 +1215,7 @@ void new_descriptor( GameContext *game, int new_desc )
 // Start Telnet Initiation
 
 #ifdef MCCP
-    send_telnet(dnew, (const unsigned char *)eor_on_str, sizeof(eor_on_str));
-    send_telnet(dnew, (const unsigned char *)compress2_on_str, sizeof(compress2_on_str));
-//  output_to_descriptor(dnew, (const char *)compress_on_str);
+    send_telnet(dnew, compress2_on_str, sizeof(compress2_on_str));
 #endif
 
     const unsigned char will_naws[] = { IAC, DO, TELOPT_NAWS };
@@ -1126,6 +1227,7 @@ void new_descriptor( GameContext *game, int new_desc )
 
     /* EOR negotiation */
     const unsigned char will_eor[] = { IAC, WILL, TELOPT_EOR };
+    dnew->eor_offer_pending = true;
     send_telnet(dnew, will_eor, 3);
 
     /* TTYPE negotiation */
@@ -1163,6 +1265,7 @@ void new_descriptor( GameContext *game, int new_desc )
     }
     start_auth( dnew ); /* Start username authorization */
 
+    dnew->counted = true;
     if ( ++num_descriptors > game->get_sysdata()->maxplayers )
     	game->get_sysdata()->maxplayers = num_descriptors;
     if ( game->get_sysdata()->maxplayers > game->get_sysdata()->alltimemax )
@@ -1177,6 +1280,12 @@ void new_descriptor( GameContext *game, int new_desc )
     }
     set_alarm(0);
 
+    if ( dnew->write_failed )
+    {
+        close_socket( dnew, TRUE );
+        return;
+    }
+
 //    fprintf(stderr, "COLDB: NEW DESC INIT: init=%d color=%02x\n", dnew->color_initialized, dnew->last_sent_color);
 
     return;
@@ -1184,21 +1293,48 @@ void new_descriptor( GameContext *game, int new_desc )
 
 void free_desc( DESCRIPTOR_DATA *d )
 {
-    close( d->descriptor );
-    d->descriptor = -1;
-    STRFREE( d->host );
-    DISPOSE_ARRAY( d->outbuf );
-    STRFREE( d->user );    /* identd */
+    if ( !d )
+        return;
 
+    if ( s_loop_desc == d )
+        s_loop_desc = nullptr;
 
 #ifdef MCCP
-    if (d->compressing)
-    {
-        compressEnd(d);
-    }
+    if ( d->out_compress )
+        compressEnd( d );
 #endif
 
-    --num_descriptors;
+    wire_output.erase(d);
+    if ( d->descriptor >= 0 )
+    {
+        close( d->descriptor );
+        d->descriptor = -1;
+    }
+
+    if ( d->auth_fd != -1 )
+    {
+        close( d->auth_fd );
+        d->auth_fd = -1;
+    }
+
+    if ( d->host )
+        STRFREE( d->host );
+    if ( d->hostip )
+        STRFREE( d->hostip );
+    if ( d->outbuf )
+        DISPOSE_ARRAY( d->outbuf );
+    if ( d->user )
+        STRFREE( d->user );    /* identd */
+
+    olc_abort_descriptor( d );
+
+    if ( d->counted )
+    {
+        --num_descriptors;
+        d->counted = false;
+    }
+
+    DISPOSE( d );
     return;
 }
 
@@ -1208,21 +1344,31 @@ void close_socket( DESCRIPTOR_DATA *dclose, bool force )
     DESCRIPTOR_DATA *d;
     bool DoNotUnlink = FALSE;
 
+    if ( !dclose || dclose->closing )
+        return;
+    dclose->closing = true;
+
     GameContext *game = dclose->game;
 
     /* flush outbuf */
-    if ( !force && dclose->outtop > 0 )
+    if ( !force && ( dclose->outtop > 0 || has_wire_output(dclose) ) )
 	    flush_buffer( dclose, FALSE );
 
     /* say bye to whoever's snooping this descriptor */
-    if ( dclose->snoop_by )
+    if ( dclose->snoop_by && !dclose->snoop_by->closing && !dclose->snoop_by->write_failed )
 	output_to_descriptor( dclose->snoop_by,
 	    "Your victim has left the game.\n" );
 
     /* stop snooping everyone else */
-    for ( d = first_descriptor; d; d = d->next )
-	if ( d->snoop_by == dclose )
-	  d->snoop_by = NULL;
+    {
+        DESCRIPTOR_DATA *d_snoop_next;
+        for ( d = first_descriptor; d; d = d_snoop_next )
+        {
+            d_snoop_next = d->next;
+            if ( d->snoop_by == dclose )
+                d->snoop_by = NULL;
+        }
+    }
 
     /* Check for switched people who go link-dead. -- Altrag */
     if ( dclose->original )
@@ -1244,8 +1390,9 @@ void close_socket( DESCRIPTOR_DATA *dclose, bool force )
     if ( !dclose->prev && dclose != first_descriptor )
     {
 	DESCRIPTOR_DATA *dp, *dn;
+	const char *dhost = dclose->host ? dclose->host : "(unknown)";
 	bug( "Close_socket: %s desc:%p != first_desc:%p and desc->prev = NULL!",
-		ch ? ch->name : d->host, dclose, first_descriptor );
+		ch ? ch->name : dhost, dclose, first_descriptor );
 	dp = NULL;
 	for ( d = first_descriptor; d; d = dn )
 	{
@@ -1253,7 +1400,7 @@ void close_socket( DESCRIPTOR_DATA *dclose, bool force )
 	   if ( d == dclose )
 	   {
 		bug( "Close_socket: %s desc:%p found, prev should be:%p, fixing.",
-		    ch ? ch->name : d->host, dclose, dp );
+		    ch ? ch->name : dhost, dclose, dp );
 		dclose->prev = dp;
 		break;
 	   }
@@ -1262,15 +1409,16 @@ void close_socket( DESCRIPTOR_DATA *dclose, bool force )
 	if ( !dclose->prev )
 	{
 	    bug( "Close_socket: %s desc:%p could not be found!.",
-		    ch ? ch->name : dclose->host, dclose );
+		    ch ? ch->name : dhost, dclose );
 	    DoNotUnlink = TRUE;
 	}
     }
     if ( !dclose->next && dclose != last_descriptor )
     {
 	DESCRIPTOR_DATA *dp, *dn;
+	const char *dhost = dclose->host ? dclose->host : "(unknown)";
 	bug( "Close_socket: %s desc:%p != last_desc:%p and desc->next = NULL!",
-		ch ? ch->name : d->host, dclose, last_descriptor );
+		ch ? ch->name : dhost, dclose, last_descriptor );
 	dn = NULL;
 	for ( d = last_descriptor; d; d = dp )
 	{
@@ -1278,7 +1426,7 @@ void close_socket( DESCRIPTOR_DATA *dclose, bool force )
 	   if ( d == dclose )
 	   {
 		bug( "Close_socket: %s desc:%p found, next should be:%p, fixing.",
-		    ch ? ch->name : d->host, dclose, dn );
+		    ch ? ch->name : dhost, dclose, dn );
 		dclose->next = dn;
 		break;
 	   }
@@ -1287,10 +1435,12 @@ void close_socket( DESCRIPTOR_DATA *dclose, bool force )
 	if ( !dclose->next )
 	{
 	    bug( "Close_socket: %s desc:%p could not be found!.",
-		    ch ? ch->name : dclose->host, dclose );
+		    ch ? ch->name : dhost, dclose );
 	    DoNotUnlink = TRUE;
 	}
     }
+
+    olc_abort_descriptor( dclose );
 
     if ( dclose->character )
     {
@@ -1298,6 +1448,8 @@ void close_socket( DESCRIPTOR_DATA *dclose, bool force )
 	if ( dclose->connected == CON_PLAYING
 	||   dclose->connected == CON_EDITING )
 	{
+	    if ( ch->editor || dclose->connected == CON_EDITING )
+	        stop_editing( ch );
 	    act( AT_ACTION, "$n has lost $s link.", ch, NULL, NULL, TO_ROOM );
 	    ch->desc = NULL;
 	}
@@ -1306,6 +1458,7 @@ void close_socket( DESCRIPTOR_DATA *dclose, bool force )
 	    /* clear descriptor pointer to get rid of bug message in log */
 	    dclose->character->desc = NULL;
 	    free_char( dclose->character );
+	    dclose->character = NULL;
 	}
     }
 
@@ -1319,13 +1472,17 @@ void close_socket( DESCRIPTOR_DATA *dclose, bool force )
     }
 
 #ifdef MCCP
-    compressEnd(dclose);
+    if ( dclose->out_compress )
+        compressEnd(dclose);
 #endif
 
-    if ( dclose->descriptor == maxdesc )
+    if ( dclose->descriptor >= 0 && dclose->descriptor == maxdesc )
       --maxdesc;
-    if ( dclose->auth_fd != -1 ) 
+    if ( dclose->auth_fd != -1 )
+    {
       close( dclose->auth_fd );
+      dclose->auth_fd = -1;
+    }
 
     free_desc( dclose );
     return;
@@ -1378,11 +1535,21 @@ const char *telopt(unsigned char c)
 
 #define TELLOG_APPEND(d, fmt, ...) \
     do { \
-        if ((d)->debug_telnet) { \
-            (d)->telnet_logpos += snprintf( \
-                (d)->telnet_logbuf + (d)->telnet_logpos, \
-                sizeof((d)->telnet_logbuf) - (d)->telnet_logpos, \
-                fmt, ##__VA_ARGS__); \
+        if ((d) && (d)->debug_telnet) { \
+            int tl_cap = static_cast<int>(sizeof((d)->telnet_logbuf)); \
+            if ((d)->telnet_logpos >= 0 && (d)->telnet_logpos < tl_cap - 1) { \
+                int tl_rem = tl_cap - (d)->telnet_logpos; \
+                int tl_n = snprintf((d)->telnet_logbuf + (d)->telnet_logpos, \
+                                    static_cast<size_t>(tl_rem), \
+                                    fmt, ##__VA_ARGS__); \
+                if (tl_n < 0) { \
+                    (d)->telnet_logbuf[(d)->telnet_logpos] = '\0'; \
+                } else if (tl_n >= tl_rem) { \
+                    (d)->telnet_logpos = tl_cap - 1; \
+                } else { \
+                    (d)->telnet_logpos += tl_n; \
+                } \
+            } \
         } \
     } while(0)
 
@@ -1407,6 +1574,7 @@ bool is_known_telopt(unsigned char opt)
         case TELOPT_LINEMODE:
         case TELOPT_GMCP:
 #ifdef MCCP
+        case TELOPT_COMPRESS:
         case TELOPT_COMPRESS2:
 #endif
             return true;
@@ -1420,12 +1588,11 @@ telnet_policy_t telnet_policy(DESCRIPTOR_DATA *d, int cmd, int opt)
 {
     switch (opt)
     {
+#ifdef MCCP
+        case TELOPT_COMPRESS:
         case TELOPT_COMPRESS2:
-            if (cmd == DO)
-                return TELPOLICY_ACCEPT;
-            if (cmd == DONT)
-                return TELPOLICY_ACCEPT;
-            return TELPOLICY_IGNORE;
+            return (cmd == DO || cmd == DONT) ? TELPOLICY_ACCEPT : TELPOLICY_IGNORE;
+#endif
 
         case TELOPT_NAWS:
             if (cmd == WILL)
@@ -1467,7 +1634,6 @@ telnet_policy_t telnet_policy(DESCRIPTOR_DATA *d, int cmd, int opt)
 int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, unsigned char *out, int out_max )
 {
     int i, out_len = 0;
-    bool last_was_cr = false;    
 
     for (i = 0; i < in_len; i++)
     {
@@ -1477,6 +1643,7 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
         if (d->telstate == TS_IAC && c == IAC)
         {
             d->telstate = TS_DATA;
+            d->last_was_cr = false;
 
             if (out_len < out_max - 1)
                 out[out_len++] = IAC;
@@ -1535,7 +1702,6 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                         break;
 
                     case SB:
-                        /* Only allow SB if NAWS enabled */
                         d->telstate = TS_SB;
                         process_char = false;
                         break;
@@ -1549,6 +1715,7 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
             }
             case TS_WILL:
             {
+                process_char = false;
                 /* ignore invalid telopts */
                 if (c >= 240)
                 {
@@ -1594,6 +1761,8 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                 /* TTYPE */
                 if (policy == TELPOLICY_ACCEPT && c == TELOPT_TTYPE)
                 {
+                    d->ttype_count = 0;
+                    d->ttype_done = false;
                     const unsigned char do_ttype[] = { IAC, DO, TELOPT_TTYPE };
                     send_telnet(d, do_ttype, 3);
 
@@ -1631,15 +1800,8 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
 
                     TELLOG(d, "GMCP: enabled\r\n");
                 }                
-                if (policy == TELPOLICY_REJECT && c == TELOPT_LINEMODE)
-                {
-                    const unsigned char dont[] = { IAC, DONT, TELOPT_LINEMODE };
-                    send_telnet(d, dont, 3);
-
-                    TELLOG(d, "LINEMODE: rejected\r\n");
-                    break;
-                }
-                d->telopt_him[c] = 1;                
+                if (policy == TELPOLICY_ACCEPT)
+                    d->telopt_him[c] = 1;
                 d->telstate = TS_DATA;
                 process_char = false;
                 break;
@@ -1664,6 +1826,8 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                 }
 
                 d->telopt_him[c] = 0;
+                if (c == TELOPT_NAWS)
+                    d->naws_enabled = false;
                 d->telstate = TS_DATA;
                 process_char = false;
                 break;
@@ -1683,10 +1847,10 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                 if (d->telopt_us[c])
                 {
                     /* NEW: ensure GMCP state is correct even if already negotiated */
-                    if (c == TELOPT_GMCP)
+                    if (c == TELOPT_GMCP && !d->gmcp_enabled)
                     {
                         d->gmcp_enabled = true;
-                        gmcp_init_subscriptions(d);   /* NEW */
+                        gmcp_init_subscriptions(d);
                         TELLOG(d, "GMCP: enabled (dedupe path)\r\n"); /* NEW */
                     }
                     process_char = false; // This was not there before!
@@ -1712,10 +1876,12 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                 if (policy == TELPOLICY_ACCEPT && c == TELOPT_EOR)
                 {
                     d->telopt_us[c] = 1;
-
-                    const unsigned char will_eor[] = { IAC, WILL, TELOPT_EOR };
-                    send_telnet(d, will_eor, 3);
-
+                    if (!d->eor_offer_pending)
+                    {
+                        const unsigned char will_eor[] = { IAC, WILL, TELOPT_EOR };
+                        send_telnet(d, will_eor, sizeof(will_eor));
+                    }
+                    d->eor_offer_pending = false;
                     d->eor_enabled = true;
                 }
                 if (policy == TELPOLICY_ACCEPT && c == TELOPT_ECHO)
@@ -1760,16 +1926,16 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
 
 #ifdef MCCP
                 /* === POLICY CHANGE: gated MCCP === */
-                if (policy == TELPOLICY_ACCEPT && c == TELOPT_COMPRESS2)
+                if (policy == TELPOLICY_ACCEPT && (c == TELOPT_COMPRESS || c == TELOPT_COMPRESS2))
                 {
-                    TELLOG(d, "MCCP: client requested COMPRESS2 (DO)\r\n");
-
-                    const unsigned char will_comp[] = { IAC, WILL, TELOPT_COMPRESS2 };
-                    send_telnet(d, (const unsigned char *)will_comp, 3);
-                    d->telopt_us[c] = 1;
-                    d->mccp_pending = 1;
-
-                    TELLOG(d, "MCCP: pending set → waiting for CON_PLAYING\r\n");
+                    if (!d->out_compress)
+                    {
+                        const unsigned char will_comp[] = { IAC, WILL, c };
+                        send_telnet(d, will_comp, sizeof(will_comp));
+                        d->telopt_us[c] = 1;
+                        if (!d->mccp_pending || c == TELOPT_COMPRESS2)
+                            d->mccp_pending = c;
+                    }
                 }
 #endif
                 /* SGA */
@@ -1805,6 +1971,8 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                 }                
                 TELLOG_APPEND(d, "%s", telopt(c));
                 TELLOG_FLUSH(d, "RCV: ");               
+                if (c == TELOPT_EOR)
+                    d->eor_offer_pending = false;
                 /* === POLICY ADD === */
                 /* dedupe */
                 if (!d->telopt_us[c])
@@ -1828,10 +1996,13 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                 }
 #ifdef MCCP
                 /* === POLICY CHANGE: gated compression shutdown === */
-                if (policy == TELPOLICY_ACCEPT && c == TELOPT_COMPRESS2 &&
-                    d->compressing == TELOPT_COMPRESS2)
+                if (policy == TELPOLICY_ACCEPT && (c == TELOPT_COMPRESS || c == TELOPT_COMPRESS2))
                 {
-                    compressEnd(d);
+                    if (d->mccp_pending == c)
+                        d->mccp_pending = d->telopt_us[TELOPT_COMPRESS2] ? TELOPT_COMPRESS2
+                                        : d->telopt_us[TELOPT_COMPRESS] ? TELOPT_COMPRESS : 0;
+                    if (d->compressing == c)
+                        compressEnd(d);
                 }
 #endif
 
@@ -1841,16 +2012,9 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
             }
             case TS_SB:
             {
-                /* FIX: validate telopt before trusting */
-                if (!is_known_telopt(c))
-                {
-                    d->telstate = TS_DATA;
-                    process_char = false;
-                    break;
-                }
-
                 d->sb_option = c;
                 d->sb_len = 0;
+                d->sb_discard = c != TELOPT_NAWS && c != TELOPT_TTYPE && c != TELOPT_GMCP;
 
                 TELLOG_APPEND(d, "%s ", telopt(c)); 
 
@@ -1860,21 +2024,17 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
             }
             case TS_SB_DATA:
             {
+                process_char = false;
                 TELLOG_APPEND(d, "%d ", c);
                 if (c == IAC)
                 {
                     d->telstate = TS_SB_IAC;
-                    process_char = false;
                     break;
                 }
-
                 if (d->sb_len >= (int)sizeof(d->sb_buf))
-                {
-                    process_char = false;
-                    break;
-                }
-                d->sb_buf[d->sb_len++] = c;
-                process_char = false;
+                    d->sb_discard = true;
+                if (!d->sb_discard)
+                    d->sb_buf[d->sb_len++] = c;
                 break;
             }
             case TS_SB_IAC:
@@ -1883,7 +2043,14 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                 {            
                     TELLOG_APPEND(d, "IAC SE");
                     TELLOG_FLUSH(d, "RCV: ");                        
-                    if (d->sb_option == TELOPT_NAWS && d->sb_len == 4)
+                    d->telstate = TS_DATA;
+                    process_char = false;
+                    if (d->sb_discard)
+                    {
+                        d->sb_len = 0;
+                        break;
+                    }
+                    if (d->sb_option == TELOPT_NAWS && d->naws_enabled && d->sb_len == 4)
                     {
                         int width  = (d->sb_buf[0] << 8) | d->sb_buf[1];
                         int height = (d->sb_buf[2] << 8) | d->sb_buf[3];
@@ -1892,13 +2059,14 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                             width = 80;
 
                         d->term_width  = width;
-                        d->term_height = height;
+                        d->term_height = height == 0 ? 24 : std::clamp(height, 5, 500);
                     }
-                    else if (d->sb_option == TELOPT_TTYPE && d->sb_len >= 1)
+                    else if (d->sb_option == TELOPT_TTYPE && d->telopt_him[TELOPT_TTYPE]
+                             && !d->ttype_done && d->sb_len > 1)
                     {
                         if (d->sb_buf[0] == TELQUAL_IS)
                         {
-                            char tmp[128];
+                            char tmp[sizeof(d->last_ttype)];
 
                             int len = d->sb_len - 1;
                             if (len > (int)sizeof(tmp) - 1)
@@ -1906,6 +2074,15 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
 
                             memcpy(tmp, d->sb_buf + 1, len);
                             tmp[len] = '\0';
+
+                            if (d->ttype_count > 0 && (!str_cmp(tmp, d->last_ttype) || !str_cmp(tmp, d->client_name)))
+                            {
+                                if (d->terminal_type[0] == '\0')
+                                    snprintf(d->terminal_type, sizeof(d->terminal_type), "%s", tmp);
+                                d->ttype_done = true;
+                                d->sb_len = 0;
+                                break;
+                            }
 
                             TELLOG(d, "TTYPE IS[%d]: %s\r\n", d->ttype_count, tmp);
 
@@ -1964,9 +2141,10 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                             d->last_ttype[sizeof(d->last_ttype) - 1] = '\0';                                
 
                             d->ttype_count++;
+                            d->ttype_done = d->ttype_count >= 5;
 
                             /* Request next TTYPE (LIMITED) */
-                            if (d->ttype_count < 5)
+                            if (!d->ttype_done)
                             {
                                 const unsigned char ttype_send[] = {
                                     IAC, SB, TELOPT_TTYPE, TELQUAL_SEND, IAC, SE
@@ -1976,38 +2154,26 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
                         }
                     }    
                     /* GMCP HOOK */
-                    else if (d->sb_option == TELOPT_GMCP)
+                    else if (d->sb_option == TELOPT_GMCP && d->gmcp_enabled)
                     {
                         handle_gmcp(d, d->sb_buf, d->sb_len);
                     }                                
-                    else
-                    {
-                        /* hook for future protocols (GMCP, MSSP, etc.) */
-                        /* Example:
-                        if (d->sb_option == TELOPT_GMCP)
-                            handle_gmcp(d, d->sb_buf, d->sb_len);
-                        */
-                    }
-
-                    d->telstate = TS_DATA;
                     d->sb_len = 0;
                 }
                 else if (c == IAC)
                 {
-                    if (d->sb_len < (int)sizeof(d->sb_buf) - 1)
+                    if (d->sb_len >= (int)sizeof(d->sb_buf))
+                        d->sb_discard = true;
+                    if (!d->sb_discard)
                         d->sb_buf[d->sb_len++] = IAC;
 
                     d->telstate = TS_SB_DATA;
                 }
                 else
                 {
-                    /* PARTIAL SB — stay in SB mode, wait for more data */
+                    /* Drop malformed subnegotiation through its closing IAC SE. */
                     d->telstate = TS_SB_DATA;
-
-                    if (d->sb_len < (int)sizeof(d->sb_buf) - 1)
-                        d->sb_buf[d->sb_len++] = c;
-
-                    process_char = false;
+                    d->sb_discard = true;
                 }
 
                 process_char = false;
@@ -2018,32 +2184,19 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
         /* Emit only real data bytes */
         if (process_char && d->telstate == TS_DATA)
         {
-            if (c < 32 && c != '\n' && c != '\r' && c != '\b' && c != 127)
-                continue;            
             if (c == '\r')
             {
-                last_was_cr = true;
-                c = '\n'; 
-            }
-            else if (c == '\n')
-            {
-                if (last_was_cr)
-                {
-                    last_was_cr = false;
-                    continue; /* skip LF in CRLF */
-                }
-
-                /* lone LF → treat as newline */
+                d->last_was_cr = true;
                 c = '\n';
-            }
-            else if (c == '\0' && last_was_cr)
-            {
-                last_was_cr = false;
-                continue; /* skip NUL after CR */
             }
             else
             {
-                last_was_cr = false;
+                const bool after_cr = d->last_was_cr;
+                d->last_was_cr = false;
+                if (after_cr && (c == '\n' || c == '\0'))
+                    continue;
+                if (c < 32 && c != '\n' && c != '\b')
+                    continue;
             }
             if (out_len < out_max - 1)
             {
@@ -2054,6 +2207,12 @@ int telnet_process( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, uns
     if (out_len < out_max)
         out[out_len] = '\0';
     return out_len;
+}
+
+static int64_t comm_steady_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 bool read_from_descriptor( DESCRIPTOR_DATA *d )
@@ -2071,43 +2230,39 @@ bool read_from_descriptor( DESCRIPTOR_DATA *d )
         log_printf( "%s input overflow!", d->host );
         output_to_descriptor( d,
             "\n*** PUT A LID ON IT!!! ***\n");
-        flush_buffer(d, TRUE);
+        if ( !comm_desc_alive( d ) )
+            return FALSE;
+        flush_buffer(d, FALSE);
         return FALSE;
     }
 
     /*
-     * Per-second flood window reset
+     * Per-second flood window reset (monotonic 1000 ms)
      *
      * WHY:
      * - We track bytes/sec instead of strlen()
-     * - Reset counters once per second
+     * - Reset byte counter once >= 1000 ms have elapsed
      */
-    time_t now = current_time;
+    int64_t now_ms = comm_steady_ms();
 
-    if ( now != d->in_time )
+    if ( d->in_byte_time_ms == 0 || (now_ms - d->in_byte_time_ms) >= 1000 )
     {
-        d->in_time = now;
+        d->in_byte_time_ms = now_ms;
         d->in_bytes = 0;
-        d->in_commands = 0;
     }
 
     for ( ; ; )
     {
         int nRead;
+        char scratch[1024];
+        bool into_inbuf = ( iStart < sizeof(d->inbuf) - 10 );
 
-        nRead = read( d->descriptor, d->inbuf + iStart,
-            sizeof(d->inbuf) - 10 - iStart );
-// Debug
-/*
-        if (nRead <= 0)
-            break;
-        for (int x = 0; x < nRead; x++)
-        {
-            unsigned char c = (unsigned char)d->inbuf[iStart + x];
-            log_printf("RAW: %03d (0x%02X) %c",
-                c, c, isprint(c) ? c : '.');
-        }
-*/
+        if ( into_inbuf )
+            nRead = read( d->descriptor, d->inbuf + iStart,
+                sizeof(d->inbuf) - 10 - iStart );
+        else
+            nRead = read( d->descriptor, scratch, sizeof(scratch) );
+
         if ( nRead > 0 )
         {
             /*
@@ -2123,27 +2278,28 @@ bool read_from_descriptor( DESCRIPTOR_DATA *d )
                     d->in_bytes);
 
                 output_to_descriptor( d,
-                    "\n*** DISCONNECT: Input flood detected ***\n");
+                    "\n*** DISCONNECT: Input flood detected ***\n\r");
+                if ( !comm_desc_alive( d ) )
+                    return FALSE;
+                flush_buffer(d, FALSE);
 
                 return FALSE;
             }
 
-            for (int x = 0; x < nRead; x++)
+            if ( into_inbuf )
             {
-//              unsigned char c = (unsigned char)d->inbuf[iStart + x];
-//              bug("RAW BYTE (pre-anything): %d", c);
-            }            
-            iStart += nRead;
-            d->inbuf_len += nRead;
-//            if ( d->inbuf[iStart-1] == '\n' || d->inbuf[iStart-1] == '\r' )
-//                break;
+                iStart += nRead;
+                d->inbuf_len += nRead;
+            }
         }
         else if ( nRead == 0 )
         {
             log_string_plus( "EOF encountered on read.", LOG_COMM, d->game->get_sysdata()->log_level );
             return FALSE;
         }
-        else if ( errno == EWOULDBLOCK )
+        else if ( errno == EINTR )
+            continue;
+        else if ( errno == EWOULDBLOCK || errno == EAGAIN )
             break;
         else
         {
@@ -2151,13 +2307,6 @@ bool read_from_descriptor( DESCRIPTOR_DATA *d )
             return FALSE;
         }
     }
-
-//  bug("---- INBUF DUMP START ----");
-    for (unsigned int x = 0; x < iStart; x++)
-    {
-//      bug("INBUF[%d]=%d", x, (unsigned char)d->inbuf[x]);
-    }
-//  bug("---- INBUF DUMP END ----");
 
     d->inbuf[d->inbuf_len] = '\0';  // safe terminator AFTER binary data
 
@@ -2191,9 +2340,19 @@ void dump_bytes(const char *label, const unsigned char *buf, int len)
 void read_from_buffer( DESCRIPTOR_DATA *d )
 {
     int i;
+    bool was_alive = comm_desc_alive( d );
 
     if ( !d->incomm_str.empty() )
         return;
+
+    const int64_t now_ms = comm_steady_ms();
+    while ( d->in_commands > 0 && (now_ms - d->in_cmd_times[d->in_cmd_head]) >= 1000 )
+    {
+        d->in_cmd_head = (d->in_cmd_head + 1) % 20;
+        d->in_commands--;
+    }
+    if ( d->in_commands < 20 )
+        d->in_rate_limited = false;
 
     unsigned char clean[MAX_INBUF_SIZE];
 
@@ -2215,6 +2374,8 @@ void read_from_buffer( DESCRIPTOR_DATA *d )
             clean,
             sizeof(clean)
         );
+        if ( was_alive && !comm_desc_alive( d ) )
+            return;
     }
 
         /*
@@ -2224,12 +2385,25 @@ void read_from_buffer( DESCRIPTOR_DATA *d )
          */
         if ( clean_len > 0 )
         {
-            size_t space = MAX_INBUF_SIZE - d->intext_str.size() - 1;
+            const size_t max_intext = MAX_INBUF_SIZE - 1;
+            size_t space = ( d->intext_str.size() < max_intext )
+                         ? ( max_intext - d->intext_str.size() )
+                         : 0;
 
-            if ( (size_t)clean_len > space )
-                clean_len = (int)space;
+            if ( space == 0 && d->intext_str.find('\n') == std::string::npos )
+            {
+                output_to_descriptor( d, "Line too long.\n" );
+                if ( was_alive && !comm_desc_alive( d ) )
+                    return;
+                d->intext_str.clear();
+                space = max_intext;
+            }
 
-            d->intext_str.append(reinterpret_cast<const char*>(clean), clean_len);
+            if ( static_cast<size_t>(clean_len) > space )
+                clean_len = static_cast<int>(space);
+
+            if ( clean_len > 0 )
+                d->intext_str.append(reinterpret_cast<const char*>(clean), clean_len);
         }
 
      /*
@@ -2252,6 +2426,24 @@ void read_from_buffer( DESCRIPTOR_DATA *d )
 
     /*
      * ============================================================
+     * RATE LIMIT (check BEFORE populating incomm_str)
+     * ============================================================
+     */
+    if ( d->in_commands >= 20 )
+    {
+        if ( !d->in_rate_limited )
+        {
+            output_to_descriptor( d,
+                "\n*** SLOW DOWN ***\n" );
+            if ( was_alive && !comm_desc_alive( d ) )
+                return;
+            d->in_rate_limited = true;
+        }
+        return;
+    }
+
+    /*
+     * ============================================================
      * BUILD COMMAND FROM INTEXT
      * ============================================================
      */
@@ -2267,6 +2459,8 @@ void read_from_buffer( DESCRIPTOR_DATA *d )
         if ( d->incomm_str.size() >= 254 )
         {
             output_to_descriptor( d, "Line too long.\n" );
+            if ( was_alive && !comm_desc_alive( d ) )
+                return;
             break;
         }
 
@@ -2284,6 +2478,8 @@ void read_from_buffer( DESCRIPTOR_DATA *d )
             if ( d->incomm_str.size() + char_len >= 254 )
             {
                 output_to_descriptor( d, "Line too long.\n" );
+                if ( was_alive && !comm_desc_alive( d ) )
+                    return;
                 break;
             }
 
@@ -2302,19 +2498,9 @@ void read_from_buffer( DESCRIPTOR_DATA *d )
     if ( d->incomm_str.empty() )
         d->incomm_str = " ";
 
-    /*
-     * ============================================================
-     * RATE LIMIT
-     * ============================================================
-     */
+    int tail = (d->in_cmd_head + d->in_commands) % 20;
+    d->in_cmd_times[tail] = now_ms;
     d->in_commands++;
-
-    if ( d->in_commands > 20 )
-    {
-        output_to_descriptor( d,
-            "\n*** SLOW DOWN ***\n" );
-        return;
-    }
 
     /*
      * ============================================================
@@ -2326,8 +2512,12 @@ void read_from_buffer( DESCRIPTOR_DATA *d )
         if ( d->incomm_str[0] != '!' && d->incomm_str != d->inlast_str )
             d->repeat = 0;
         else if ( ++d->repeat >= 100 )
+        {
             output_to_descriptor( d,
                 "\n*** PUT A LID ON IT!!! ***\n" );
+            if ( was_alive && !comm_desc_alive( d ) )
+                return;
+        }
     }
 
     if ( !d->incomm_str.empty() && d->incomm_str[0] == '!' )
@@ -2353,11 +2543,18 @@ bool flush_buffer( DESCRIPTOR_DATA *d, bool fPrompt )
     char buf[MAX_INPUT_LENGTH];
     extern bool mud_down;
     CHAR_DATA *ch;
-    bool flushed_all = true;    
+    bool was_in_list = comm_desc_in_list( d );
+
+    if ( !d || d->write_failed || d->descriptor < 0 )
+        return FALSE;
     
     ch = d->original ? d->original : d->character;
-    if( ch && ch->fighting && ch->fighting->who )
+    if ( !d->closing && ch && ch->fighting && ch->fighting->who )
+    {
          show_condition( ch, ch->fighting->who );
+         if ( ( was_in_list && !comm_desc_in_list( d ) ) || d->closing || d->write_failed )
+             return FALSE;
+    }
 
 
     /*
@@ -2366,33 +2563,40 @@ bool flush_buffer( DESCRIPTOR_DATA *d, bool fPrompt )
     if ( fPrompt && !mud_down && d->connected == CON_PLAYING )
     {
 	ch = d->original ? d->original : d->character;
-	if ( BV_IS_SET(ch->act, PLR_BLANK) )
-	    output_to_descriptor( d, "\n" );
+	if ( ch )
+	{
+	    if ( BV_IS_SET(ch->act, PLR_BLANK) )
+	    {
+		output_to_descriptor( d, "\n" );
+		if ( !comm_desc_alive( d ) )
+		    return FALSE;
+	    }
 
-	if ( BV_IS_SET(ch->act, PLR_PROMPT) )
-	    display_prompt(d);
-	if ( BV_IS_SET(ch->act, PLR_TELNET_GA) )
-	    output_to_descriptor( d, (const char *) go_ahead_str );
+	    if ( BV_IS_SET(ch->act, PLR_PROMPT) )
+	    {
+		display_prompt(d);
+		if ( !comm_desc_alive( d ) )
+		    return FALSE;
+	    }
+	    if ( BV_IS_SET(ch->act, PLR_TELNET_GA) )
+	    {
+		send_telnet( d, go_ahead_str, sizeof(go_ahead_str) );
+		if ( !comm_desc_alive( d ) )
+		    return FALSE;
+	    }
+	}
     }
 
-    bool had_output = (d->outtop > 0);    
-
-//    TELLOG(d, "flush start: had_output=%d outtop=%ld fPrompt=%d\r\n",
-//       had_output, d->outtop, fPrompt);
-
-    /*
-     * Short-circuit if nothing to write.
-     */
-    if ( d->outtop == 0 )
-    	return TRUE;
+    if (d->outtop == 0)
+        return drain_wire_output(d);
 
     /*
      * Snoop-o-rama.
      */
-    if ( d->snoop_by )
+    if ( d->snoop_by && d->snoop_by != d )
     {
         /* without check, 'force mortal quit' while snooped caused crash, -h */
-        if ( d->character && d->character->name )
+        if ( !d->snoop_by->closing && !d->snoop_by->write_failed && d->character && d->character->name )
         {
             /* Show original snooped names. -- Altrag */
             if ( d->original && d->original->name )
@@ -2400,198 +2604,118 @@ bool flush_buffer( DESCRIPTOR_DATA *d, bool fPrompt )
             else
             SPRINTF( buf, "%s", d->character->name);
             output_to_descriptor( d->snoop_by, buf );
-        }
-        output_to_descriptor( d->snoop_by, "% " );
-        if (d->snoop_by != d)
-            output_to_descriptor(d->snoop_by, d->outbuf);
-    }   
-    #ifdef MCCP
-    /*
-     * === COMPRESSED PATH ===
-     */
-    if (d->out_compress)
-    {
-        unsigned char tmp[COMPRESS_BUF_SIZE];
-
-        size_t remaining = d->outtop;
-        size_t offset = 0;
-
-        while (remaining > 0)
-        {
-            size_t chunk = remaining;
-
-            if (chunk > sizeof(tmp))
-                chunk = sizeof(tmp);
-
-            memcpy(tmp, d->outbuf + offset, chunk);
-
-            d->out_compress->next_in  = tmp;
-            d->out_compress->avail_in = chunk;
-
-            /* Track input */
-            d->mccp_bytes_in += chunk;
-
-            while (d->out_compress->avail_in > 0)
-            {
-                d->out_compress->avail_out =
-                    COMPRESS_BUF_SIZE -
-                    (d->out_compress->next_out - d->out_compress_buf);
-
-                if (d->out_compress->avail_out == 0)
-                {
-                    if (!process_compressed(d))
-                        return FALSE;
-                    continue;
-                }
-
-                if (deflate(d->out_compress, Z_SYNC_FLUSH) != Z_OK)
-                    return FALSE;
-            }
-
-            offset += chunk;
-            remaining -= chunk;
-        }
-        // Track Input
-        d->mccp_bytes_in += d->outtop;        
-
-        d->outtop = 0;
-        if (d->out_compress->next_out > d->out_compress_buf)
-        {
-            if (!process_compressed(d))
+            if ( ( was_in_list && !comm_desc_in_list( d ) ) || d->write_failed )
                 return FALSE;
         }
-        if (d->eor_enabled && had_output)
+        if ( d->snoop_by && d->snoop_by != d && !d->snoop_by->closing && !d->snoop_by->write_failed )
         {
-            //TELLOG(d, "flush (MCCP): sending EOR\r\n");
-
-            static const unsigned char eor[] = { IAC, EOR };
-
-            d->out_compress->next_in  = (unsigned char *)eor;
-            d->out_compress->avail_in = 2;
-
-            while (d->out_compress->avail_in > 0)
-            {
-                d->out_compress->avail_out =
-                    COMPRESS_BUF_SIZE -
-                    (d->out_compress->next_out - d->out_compress_buf);
-
-                if (d->out_compress->avail_out == 0)
-                {
-                    if (!process_compressed(d))
-                        return FALSE;
-                    continue;
-                }
-
-                if (deflate(d->out_compress, Z_SYNC_FLUSH) != Z_OK)
-                    return FALSE;
-            }
-
-            /* ensure it actually goes out */
-            if (d->out_compress->next_out > d->out_compress_buf)
-            {
-                if (!process_compressed(d))
-                    return FALSE;
-            }
+            output_to_descriptor( d->snoop_by, "% " );
+            if ( ( was_in_list && !comm_desc_in_list( d ) ) || d->write_failed )
+                return FALSE;
         }
-        return TRUE;
-    }
-#endif
-
-    /*
-     * === NORMAL NON-BLOCKING WRITE ===
-     */
-    size_t max_chunk = 32768;
-
-    size_t total_written = 0;
-
-    while (d->outtop > 0)
+        if ( d->snoop_by && d->snoop_by != d && !d->snoop_by->closing && !d->snoop_by->write_failed )
+        {
+            output_to_descriptor(d->snoop_by, std::string(d->outbuf, d->outtop));
+            if ( ( was_in_list && !comm_desc_in_list( d ) ) || d->write_failed )
+                return FALSE;
+        }
+    }   
+    if (d->eor_enabled && !d->closing)
     {
-        size_t chunk = d->outtop > max_chunk ? max_chunk : d->outtop;
-
-        ssize_t n = write(d->descriptor, d->outbuf, chunk);
-
-        if (n > 0)
-        {
-            total_written += n;
-
-            if ((size_t)n < d->outtop)
-            {
-                memmove(d->outbuf, d->outbuf + n, d->outtop - n);
-            }
-
-            d->outtop -= n;
-        }
-        else if (n == 0)
-        {
-            return FALSE;
-        }
-        else
-        {
-            if (errno == EWOULDBLOCK || errno == EAGAIN)
-            {
-                flushed_all = false;
-                break;
-            }
-
-            return FALSE;
-        }
-    }
-
-    /*
-     * Slow client protection
-     */
-    if (d->outtop > 32000)
-    {
-        bug("flush_buffer: slow client overflow (%s)",
-            d->character ? d->character->name : d->host);
-        return FALSE;
-    }
-    if (d->eor_enabled && flushed_all && had_output)
-    {
-        TELLOG(d, "flush: had_output=%d outtop=%ld", had_output, d->outtop);        
         const unsigned char eor[] = { IAC, EOR };
-        send_telnet(d, eor, 2);
+        send_telnet(d, eor, sizeof(eor));
     }
-    return TRUE;
+
+    return !d->write_failed && queue_descriptor_output(d) && drain_wire_output(d);
 }
 
-static size_t utf8_safe_len(const char *buf, size_t len)
+// Return the byte length of a complete UTF-8 scalar, or zero for malformed input.
+static size_t utf8_unit_length(const char *p, const char *end)
 {
-    size_t i = 0;
+    const unsigned char lead = *p;
+    if (lead < 0x80)
+        return 1;
+    if (lead < 0xc2 || lead > 0xf4)
+        return 0;
+    const size_t length = lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
+    if (length > static_cast<size_t>(end - p))
+        return 0;
 
-    while (i < len)
-    {
-        unsigned char c = (unsigned char)buf[i];
-        size_t char_len = 1;
+    const unsigned char second = p[1];
+    if ((lead == 0xe0 && second < 0xa0) || (lead == 0xed && second >= 0xa0)
+        || (lead == 0xf0 && second < 0x90) || (lead == 0xf4 && second >= 0x90))
+        return 0;
 
-        if (c < 0x80)
-            char_len = 1;
-        else if ((c & 0xE0) == 0xC0)
-            char_len = 2;
-        else if ((c & 0xF0) == 0xE0)
-            char_len = 3;
-        else if ((c & 0xF8) == 0xF0)
-            char_len = 4;
-        else
-            break; /* invalid start byte */
-
-        /* Not enough bytes left → stop BEFORE partial char */
-        if (i + char_len > len)
-            break;
-
-        /* Validate continuation bytes */
-        for (size_t j = 1; j < char_len; j++)
-        {
-            if ((buf[i + j] & 0xC0) != 0x80)
-                return i; /* invalid sequence */
-        }
-
-        i += char_len;
-    }
-
-    return i;
+    for (size_t i = 1; i < length; ++i)
+        if ((static_cast<unsigned char>(p[i]) & 0xc0) != 0x80)
+            return 0;
+    return length;
 }
 
+static size_t ansi_csi_length(const char *p, const char *end)
+{
+    if (end - p < 3 || p[0] != '\033' || p[1] != '[')
+        return 0;
+
+    const char *next = p + 2;
+    while (next < end && *next >= 0x20 && *next <= 0x3f)
+        ++next;
+
+    return next < end && *next >= 0x40 && *next <= 0x7e ? next - p + 1 : 0;
+}
+
+std::string prompt_text_prefix(const std::string &text)
+{
+    constexpr size_t max_prompt_bytes = 128;
+    const char *begin = text.data();
+    const char *end = begin + text.size();
+    const char *p = begin;
+    while (p < end)
+    {
+        size_t length = 0;
+        if (*p == '%' || *p == '&' || *p == '^')
+        {
+            if (end - p < 2 || p[1] == '\0' || static_cast<unsigned char>(p[1]) >= 0x80)
+                break;
+            length = 2;
+        }
+        else if (*p == '\033' && end - p >= 2 && p[1] == '[')
+            length = ansi_csi_length(p, end);
+        else
+            length = utf8_unit_length(p, end);
+
+        if (!length || static_cast<size_t>(p - begin) + length > max_prompt_bytes)
+            break;
+        p += length;
+    }
+    return text.substr(0, p - begin);
+}
+
+struct DisplayUnit
+{
+    size_t bytes;
+    int columns;
+};
+
+static DisplayUnit display_unit(const char *p, const char *end, int flags)
+{
+    if (!(flags & WRAP_NO_COLOR))
+    {
+        if (const size_t csi = ansi_csi_length(p, end))
+            return {csi, 0};
+
+        if ((*p == '&' || *p == '^') && end - p >= 2)
+        {
+            if (p[1] == *p)
+                return {2, 1};
+            if (isalnum(static_cast<unsigned char>(p[1])) || (*p == '&' && p[1] == '-'))
+                return {2, 0};
+        }
+    }
+
+    const size_t len = utf8_unit_length(p, end);
+    return {len ? len : 1, 1};
+}
 
 void write_to_buffer_str(DESCRIPTOR_DATA *d,  const std::string& txt)
 {
@@ -2603,7 +2727,7 @@ void output_to_descriptor(DESCRIPTOR_DATA *d, const std::string& txt)
 {
     std::string wrapped;
 
-    if (!d || txt.empty())
+    if (!d || d->closing || d->write_failed || txt.empty())
         return;
 
     wrapped = wrap_text_smart((txt), d->term_width);
@@ -2629,75 +2753,38 @@ void write_to_buffer_str(DESCRIPTOR_DATA *d, const char *txt)
 }
 
 
-void write_to_buffer_raw(DESCRIPTOR_DATA *d, const unsigned char *data, int length)
+static bool append_descriptor_bytes(DESCRIPTOR_DATA *d, const char *data, size_t length)
 {
-    if (!d)
+    if (length > descriptor_output_limit || d->outtop > descriptor_output_limit - length)
     {
-        bug("write_to_buffer_raw: NULL descriptor");
-        return;
+        bug("Descriptor output limit exceeded for socket %d.", d->descriptor);
+        d->write_failed = true;
+        return false;
     }
 
-     if (!d->outbuf || !data || length == 0)
-        return;
-
-    /*
-     * HARD CAP
-     */
-    if (d->outtop + length > d->outsize * 2)
+    const size_t required = d->outtop + length + 1;
+    if (required > d->outsize)
     {
-            fprintf(stderr, "write_to_buffer_raw: overflow (%s) [%ld bytes queued]\r\n",
-                d->character ? d->character->name : d->host,
-                d->outtop);
-            close_socket(d, TRUE);
-        return;
-    }
-
-    /* early flush */
-    if (d->outtop + length > d->outsize)
-    {
-        if (!flush_buffer(d, FALSE))
-            return;
-    }
-
-    /*
-     * Expand buffer as needed (same logic)
-     */
-    while (d->outtop + (size_t)length + 1 >= d->outsize)
-    {
-        if (d->outsize > 262144)
-        {
-            d->outtop = 0;
-            bug("write_to_buffer_raw: max buffer exceeded (%s)",
-                d->character ? d->character->name : "???");
-            close_socket(d, TRUE);
-            return;
-        }
-
-        d->outsize *= 2;
-        char *newbuf = new char[d->outsize](); // value-initialize
-
+        const size_t capacity = std::max(required, 2 * static_cast<size_t>(d->outsize));
+        char *replacement = new char[capacity];
         if (d->outbuf)
         {
-            memcpy(newbuf, d->outbuf, d->outtop);
+            memcpy(replacement, d->outbuf, d->outtop);
             delete[] d->outbuf;
         }
-
-        d->outbuf = newbuf;
+        d->outbuf = replacement;
+        d->outsize = capacity;
     }
-
-    /*
-     * RAW COPY (no processing)
-     */
     memcpy(d->outbuf + d->outtop, data, length);
     d->outtop += length;
-
-    /*
-     * DO NOT null-terminate binary stream
-     * (but harmless if you want for debugging)
-     */
     d->outbuf[d->outtop] = '\0';
+    return true;
+}
 
-    return;
+void write_to_buffer_raw(DESCRIPTOR_DATA *d, const unsigned char *data, int length)
+{
+    if (d && !d->closing && !d->write_failed && d->outbuf && data && length > 0)
+        append_descriptor_bytes(d, reinterpret_cast<const char *>(data), length);
 }
 
 void write_to_buffer_raw(DESCRIPTOR_DATA *d, const std::string& txt)
@@ -2797,43 +2884,20 @@ int build_ansi_from_state( unsigned char prev, unsigned char cl, std::string &bu
 
 static void flush_color( DESCRIPTOR_DATA *d )
 {
-    if ( !d->has_rendercolor )
+    if ( !d || d->closing || d->write_failed || !d->has_rendercolor )
         return;
 
-    unsigned char prev   = d->last_sent_color;
-    unsigned char target = d->rendercolor;
+    const unsigned char target = d->rendercolor;
+    const unsigned char previous = d->color_initialized ? d->last_sent_color : 0x07;
+    std::string changes;
+    build_ansi_from_state(previous, target, changes);
+    if (!d->color_initialized)
+        changes.insert(0, "\033[0m");
 
-    if ( prev > 0x8F )
-        prev = 0x07;
-    if ( target > 0x8F )
-        target = 0x07;
-
-    if ( target != prev )
+    if (!changes.empty() && append_descriptor_bytes(d, changes.data(), changes.size()))
     {
-        std::string colbuf;
-        int ln = build_ansi_from_state( prev, target, colbuf );
-
-        if ( ln > 0 )
-        {
-            while ( d->outtop + static_cast<size_t>( ln ) >= d->outsize )
-            {
-                d->outsize *= 2;
-                char *newbuf = new char[d->outsize];
-
-                if ( d->outbuf )
-                {
-                    memcpy( newbuf, d->outbuf, d->outtop ); // copy valid data
-                    delete[] d->outbuf;
-                }
-
-                d->outbuf = newbuf;
-            }
-
-            memcpy( d->outbuf + d->outtop, colbuf.data(), static_cast<size_t>( ln ) );
-            d->outtop += static_cast<size_t>( ln );
-        }
-
         d->last_sent_color = target;
+        d->color_initialized = true;
     }
 
     d->has_rendercolor = false;
@@ -2862,8 +2926,10 @@ unsigned char parse_color_code(unsigned char current, char type, char code)
         {
             case 'r': newcolor &= ~0x08; newcolor |= 1; break;
             case 'g': newcolor &= ~0x08; newcolor |= 2; break;
+            case 'O':
             case 'y': newcolor &= ~0x08; newcolor |= 3; break;
             case 'b': newcolor &= ~0x08; newcolor |= 4; break;
+            case 'p':
             case 'm': newcolor &= ~0x08; newcolor |= 5; break;
             case 'c': newcolor &= ~0x08; newcolor |= 6; break;
             case 'w': newcolor &= ~0x08; newcolor |= 7; break;
@@ -2872,10 +2938,12 @@ unsigned char parse_color_code(unsigned char current, char type, char code)
             case 'G': newcolor |= 2; newcolor |= 0x08; break;
             case 'Y': newcolor |= 3; newcolor |= 0x08; break;
             case 'B': newcolor |= 4; newcolor |= 0x08; break;
+            case 'P':
             case 'M': newcolor |= 5; newcolor |= 0x08; break;
             case 'C': newcolor |= 6; newcolor |= 0x08; break;
             case 'W': newcolor |= 7; newcolor |= 0x08; break;
 
+            case 'z': newcolor |= 0x08; break; /* bright black */
             case 'D': newcolor &= ~0x07; break; /* dark/black */
 
             default:
@@ -2894,8 +2962,10 @@ unsigned char parse_color_code(unsigned char current, char type, char code)
         {
             case 'r': newcolor |= (1 << 4); break;
             case 'g': newcolor |= (2 << 4); break;
+            case 'O':
             case 'y': newcolor |= (3 << 4); break;
             case 'b': newcolor |= (4 << 4); break;
+            case 'p':
             case 'm': newcolor |= (5 << 4); break;
             case 'c': newcolor |= (6 << 4); break;
             case 'w': newcolor |= (7 << 4); break;
@@ -2928,6 +2998,13 @@ int make_color_sequence( const std::string &col, std::string &buf,
     if ( consumed )
         *consumed = 2;
 
+    if ( !d )
+    {
+        if ( consumed )
+            *consumed = 0;
+        return -1;
+    }
+
     if ( col.empty() )
     {
         if ( consumed )
@@ -2938,7 +3015,7 @@ int make_color_sequence( const std::string &col, std::string &buf,
     char ctype = col[0];
 
     och = ( d->original ? d->original : d->character );
-    ansi = ( !IS_NPC( och ) && BV_IS_SET( och->act, PLR_ANSI ) );
+    ansi = ( och != nullptr && !IS_NPC( och ) && BV_IS_SET( och->act, PLR_ANSI ) );
 
     if ( col.size() < 2 )
         return -1;
@@ -2969,11 +3046,8 @@ int make_color_sequence( const std::string &col, std::string &buf,
     unsigned char current = d->rendercolor;
     unsigned char target  = parse_color_code( current, ctype, code );
 
-    if ( target == current )
+    if ( target == current && d->color_initialized )
         return 0;
-
-    if ( target > 0x8F )
-        target = 0x07;
 
     /* Update deferred state ONLY */
     d->rendercolor = target;
@@ -2983,73 +3057,38 @@ int make_color_sequence( const std::string &col, std::string &buf,
 }
 
 
-static void copy_with_newlines(DESCRIPTOR_DATA *d,
-                               const char *src,
-                               size_t len)
+static void copy_with_newlines(DESCRIPTOR_DATA *d, const char *src, size_t len)
 {
-    const char *p   = src;
+    if (d->write_failed || len == 0)
+        return;
+
     const char *end = src + len;
-
-    while (p < end)
+    std::string normalized;
+    normalized.reserve(len);
+    while (src < end)
     {
-        /* precise reserve instead of magic 64 */
-        size_t needed = 2 /* CRLF */ + 32 /* ANSI worst case */;
-        if (d->outtop + needed >= d->outsize)
+        if (*src == '\r' || *src == '\n')
         {
-            d->outsize *= 2;
-            char *newbuf = new char[d->outsize];
-
-            if (d->outbuf)
-            {
-                memcpy(newbuf, d->outbuf, d->outtop); // copy valid data
-                delete[] d->outbuf;
-            }
-
-            d->outbuf = newbuf;            
-        }
-
-        /* unified CR/LF handling */
-        if (*p == '\r' || *p == '\n')
-        {
-            if (*p == '\r' && (p + 1 < end) && p[1] == '\n')
-                p++;
-            else if (*p == '\n' && (p + 1 < end) && p[1] == '\r')
-                p++;
-
-            d->outbuf[d->outtop++] = '\r';
-            d->outbuf[d->outtop++] = '\n';
-
-            p++;
+            const char newline = *src++;
+            if (src < end && *src != newline && (*src == '\r' || *src == '\n'))
+                ++src;
+            normalized += "\r\n";
             continue;
         }
 
-        /* normal character */
-        size_t char_len = utf8_char_len((unsigned char)*p);
-
-        /* Clamp if malformed or truncated */
-        if (p + char_len > end)
-            char_len = 1;
-
-        /* Ensure buffer space */
-        if (d->outtop + char_len >= d->outsize)
+        const size_t length = utf8_unit_length(src, end);
+        if (length == 0)
         {
-            d->outsize *= 2;
-            char *newbuf = new char[d->outsize];
-
-            if (d->outbuf)
-            {
-                memcpy(newbuf, d->outbuf, d->outtop); // copy valid data
-                delete[] d->outbuf;
-            }
-
-            d->outbuf = newbuf;
+            normalized += "\xef\xbf\xbd";
+            ++src;
         }
-
-        /* Copy full character */
-        memcpy(d->outbuf + d->outtop, p, char_len);
-        d->outtop += char_len;
-        p += char_len;
+        else
+        {
+            normalized.append(src, length);
+            src += length;
+        }
     }
+    append_descriptor_bytes(d, normalized.data(), normalized.size());
 }
 
 static void copy_with_newlines( DESCRIPTOR_DATA *d, const std::string &src )
@@ -3062,7 +3101,7 @@ static void copy_with_newlines( DESCRIPTOR_DATA *d, const std::string &src )
  */
 void write_to_buffer( DESCRIPTOR_DATA *d, const char *txt, int length )
 {
-    static int count = 0;
+    static bool in_overflow = false;
 
     if ( !d )
     {
@@ -3070,10 +3109,16 @@ void write_to_buffer( DESCRIPTOR_DATA *d, const char *txt, int length )
         return;
     }
 
+    if ( d->closing || d->write_failed )
+        return;
+
+    if ( !d->outbuf )
+        return;
+
     if ( d->has_rendercolor )
         flush_color( d );
 
-    if ( !d->outbuf )
+    if ( d->write_failed )
         return;
 
     /* Find length in case caller didn't. */
@@ -3101,17 +3146,23 @@ void write_to_buffer( DESCRIPTOR_DATA *d, const char *txt, int length )
      * - Prevent infinite growth if client isn't reading
      * - Protects server from output flooding
      */
-    if ( d->outtop + length + 4 > 50000 )
+    if ( d->outtop + static_cast<size_t>( length ) + 4 > 50000 )
     {
-        if ( count == 0 )
+        char who[MAX_INPUT_LENGTH];
+        snprintf( who, sizeof( who ), "%s",
+            ( d->character && d->character->name ) ? d->character->name
+            : ( d->host ? d->host : "(unknown)" ) );
+        size_t queued = d->outtop;
+
+        d->outtop = 0;
+        d->write_failed = true;
+
+        if ( !in_overflow )
         {
-            bug( "write_to_buffer: overflow (%s) [%d bytes queued]",
-                d->character ? d->character->name : d->host,
-                d->outtop );
-            count++;
-            close_socket( d, TRUE );
+            in_overflow = true;
+            bug( "write_to_buffer: overflow (%s) [%zu bytes queued]", who, queued );
+            in_overflow = false;
         }
-        count = 0;
         return;
     }
 
@@ -3120,11 +3171,21 @@ void write_to_buffer( DESCRIPTOR_DATA *d, const char *txt, int length )
     {
         if ( d->outsize > 65536 )
         {
+            char who[MAX_INPUT_LENGTH];
+            snprintf( who, sizeof( who ), "%s",
+                ( d->character && d->character->name ) ? d->character->name
+                : ( d->host ? d->host : "(unknown)" ) );
+
             /* empty buffer */
             d->outtop = 0;
-            bug( "write_to_buffer: max buffer exceeded (%s)",
-                d->character ? d->character->name : "???" );
-            close_socket( d, TRUE );
+            d->write_failed = true;
+
+            if ( !in_overflow )
+            {
+                in_overflow = true;
+                bug( "write_to_buffer: max buffer exceeded (%s)", who );
+                in_overflow = false;
+            }
             return;
         }
 
@@ -3168,13 +3229,12 @@ void write_to_buffer( DESCRIPTOR_DATA *d, const char *txt, int length )
         if ( seglen > 0 )
         {
             flush_color( d );
-            size_t safe = utf8_safe_len( ptr, seglen );
-            copy_with_newlines( d, ptr, safe );
+            copy_with_newlines( d, ptr, seglen );
         }
 
         if ( colstr + 1 >= end )
         {
-            ptr = end;
+            ptr = colstr;
             break;
         }
 
@@ -3212,8 +3272,7 @@ void write_to_buffer( DESCRIPTOR_DATA *d, const char *txt, int length )
         if ( textlen > 0 )
         {
             flush_color( d );
-            size_t safe = utf8_safe_len( ptr, textlen );
-            copy_with_newlines( d, ptr, safe );
+            copy_with_newlines( d, ptr, textlen );
         }
 
         ptr = next;
@@ -3226,8 +3285,7 @@ void write_to_buffer( DESCRIPTOR_DATA *d, const char *txt, int length )
     {
         size_t rem = (size_t)( end - ptr );
         flush_color( d );
-        size_t safe = utf8_safe_len( ptr, rem );
-        copy_with_newlines( d, ptr, safe );
+        copy_with_newlines( d, ptr, rem );
     }
 
     flush_color( d );
@@ -3429,6 +3487,9 @@ static void nanny_get_name( DESCRIPTOR_DATA *d, const std::string& argumentin )
             "Denying access to %s@%s.", argument.c_str(), d->host );
         if ( d->newstate != 0 )
         {
+            d->character->desc = NULL;
+            free_char( d->character );
+            d->character = NULL;
             output_to_descriptor( d, "That name is already taken.  Please choose another: " );
             d->connected = CON_GET_NAME;
             return;
@@ -3461,14 +3522,17 @@ static void nanny_get_name( DESCRIPTOR_DATA *d, const std::string& argumentin )
     {
         if ( d->newstate != 0 )
         {
+            d->character->desc = NULL;
+            free_char( d->character );
+            d->character = NULL;
             output_to_descriptor( d, "That name is already taken.  Please choose another: " );
             d->connected = CON_GET_NAME;
             return;
         }
 
         /* Old player */
+        send_telnet( d, echo_off_str, sizeof(echo_off_str) );
         output_to_descriptor( d, "Password: " );
-        output_to_descriptor( d, (const char *)echo_off_str );
         d->connected = CON_GET_OLD_PASSWORD;
         return;
     }
@@ -3476,6 +3540,9 @@ static void nanny_get_name( DESCRIPTOR_DATA *d, const std::string& argumentin )
     {
         if ( check_bad_name( ch->name ) )
         {
+            d->character->desc = NULL;
+            free_char( d->character );
+            d->character = NULL;
             output_to_descriptor( d, "\nThat name is unacceptable, please choose another.\n" );
             output_to_descriptor( d, "Name: " );
             d->connected = CON_GET_NAME;
@@ -3487,6 +3554,37 @@ static void nanny_get_name( DESCRIPTOR_DATA *d, const std::string& argumentin )
             str_printf("Did I get that right, %s (Y/N)? ", argument.c_str()) );
         d->connected = CON_CONFIRM_NEW_NAME;
         return;
+    }
+}
+
+static bool matches_legacy_password( const std::string& password, const char *stored )
+{
+#ifndef _WIN32
+    constexpr size_t des_hash_length = 13;
+    if ( !stored || strlen(stored) != des_hash_length
+         || strspn(stored, "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") != des_hash_length )
+        return false;
+
+    struct crypt_data state = {};
+    const char *digest = crypt_r( password.c_str(), stored, &state );
+    return digest && strlen(digest) == des_hash_length
+           && CRYPTO_memcmp( digest, stored, des_hash_length ) == 0;
+#else
+    return false;
+#endif
+}
+
+static void upgrade_legacy_password( CHAR_DATA *ch, const std::string& password, const char *digest,
+                                     long password_offset )
+{
+    if ( !ch || !ch->pcdata || NOT_AUTHED(ch)
+         || !matches_legacy_password( password, ch->pcdata->pwd ) )
+        return;
+
+    if ( replace_player_password( ch, password_offset, digest ) )
+    {
+        STR_DISPOSE( ch->pcdata->pwd );
+        ch->pcdata->pwd = str_dup( digest );
     }
 }
 
@@ -3502,10 +3600,13 @@ static void nanny_get_old_password( DESCRIPTOR_DATA *d, const std::string& argum
 
     output_to_descriptor( d, "\n" );
 
-    /* New SHA-256 password checking - AI/DV 3-12-26 */
     sha256_hash( argument.c_str(), pwdhash );
 
-    if ( strcmp( pwdhash, ch->pcdata->pwd ) )
+    const char *stored = ch->pcdata->pwd;
+    const bool matches_sha256 = stored && strlen(stored) == sizeof(pwdhash) - 1
+                                && CRYPTO_memcmp( pwdhash, stored, sizeof(pwdhash) - 1 ) == 0;
+    const bool matches_des = !matches_sha256 && matches_legacy_password( argument, stored );
+    if ( !matches_sha256 && !matches_des )
     {
         output_to_descriptor( d, "Wrong password.\n" );
         /* clear descriptor pointer to get rid of bug message in log */
@@ -3514,9 +3615,17 @@ static void nanny_get_old_password( DESCRIPTOR_DATA *d, const std::string& argum
         return;
     }
 
-    output_to_descriptor( d, (const char*) echo_on_str );
+    send_telnet( d, echo_on_str, sizeof(echo_on_str) );
 
-    if ( check_playing( d, ch->name, TRUE ) )
+    short play_chk = check_playing( d, ch->name, TRUE );
+    if ( play_chk == BERR )
+    {
+        if ( d->character )
+            d->character->desc = NULL;
+        close_socket( d, FALSE );
+        return;
+    }
+    if ( play_chk == TRUE )
         return;
 
     chk = check_reconnect( d, ch->name, TRUE );
@@ -3532,18 +3641,35 @@ static void nanny_get_old_password( DESCRIPTOR_DATA *d, const std::string& argum
 
     if ( check_multi( d, ch->name ) )
     {
-        close_socket( d, FALSE );
+        if ( comm_desc_in_list( d ) && !d->closing )
+            close_socket( d, d->write_failed ? TRUE : FALSE );
         return;
     }
 
     name = ch->name;
     d->character->desc = NULL;
     free_char( d->character );
-    fOld = load_char_obj( d, str_printf("%s", name.c_str()), FALSE );
-   if( !fOld )
-      bug( "%s: failed to load_char_obj for %s.", __func__, name.c_str() );
+    d->character = NULL;
+    long password_offset = -1;
+    fOld = load_char_obj( d, name, FALSE, matches_des ? &password_offset : nullptr );
+    if ( !fOld || !d->character )
+    {
+        bug( "%s: failed to load_char_obj for %s.", __func__, name.c_str() );
+        output_to_descriptor( d, "Your playerfile could not be loaded. Please notify the admins.\n" );
+        if ( d->character )
+        {
+            d->character->desc = NULL;
+            free_char( d->character );
+            d->character = NULL;
+        }
+        close_socket( d, FALSE );
+        return;
+    }
 
     ch = d->character;
+
+    if ( matches_des && password_offset >= 0 )
+        upgrade_legacy_password( ch, argument, pwdhash, password_offset );
 
     if ( ch->top_level < LEVEL_DEMI )
         log_printf_plus( LOG_COMM, d->game->get_sysdata()->log_level,
@@ -3567,10 +3693,11 @@ static void nanny_confirm_new_name( DESCRIPTOR_DATA *d, const std::string& argum
     {
         case 'y':
         case 'Y':
-            output_to_descriptor( d, 
-                    str_printf( "\nMake sure to use a password that won't be easily guessed by someone else."          
-                        "\nPick a good password for %s: %s",
-                        ch->name, echo_off_str ));
+            send_telnet( d, echo_off_str, sizeof(echo_off_str) );
+            output_to_descriptor( d,
+                    str_printf( "\nMake sure to use a password that won't be easily guessed by someone else."
+                        "\nPick a good password for %s: ",
+                        ch->name ));
             d->connected = CON_GET_NEW_PASSWORD;
             break;
 
@@ -3593,15 +3720,13 @@ static void nanny_confirm_new_name( DESCRIPTOR_DATA *d, const std::string& argum
 static void nanny_get_new_password( DESCRIPTOR_DATA *d, const std::string& argument )
 {
     CHAR_DATA *ch;
-    char *pwdnew;
-    char *p;
     char pwdnewhash[65];
 
     ch = d->character;
 
     output_to_descriptor( d, "\n" );
 
-    if ( visible_length( argument ) < 5 )
+    if ( argument.size() < 5 )
     {
         output_to_descriptor( d,
             "Password must be at least five characters long.\nPassword: " );
@@ -3610,20 +3735,8 @@ static void nanny_get_new_password( DESCRIPTOR_DATA *d, const std::string& argum
 
     /* New SHA-256 password hashing - AI/DV 3-12-26 */
     sha256_hash( argument.c_str(), pwdnewhash );
-    pwdnew = pwdnewhash;
-
-    for ( p = pwdnew; *p != '\0'; p++ )
-    {
-        if ( *p == '~' )
-        {
-            output_to_descriptor( d,
-                "New password not acceptable, try again.\nPassword: " );
-            return;
-        }
-    }
-
     STR_DISPOSE( ch->pcdata->pwd );
-    ch->pcdata->pwd = str_dup( pwdnew );
+    ch->pcdata->pwd = str_dup( pwdnewhash );
     output_to_descriptor( d, "\nPlease retype the password to confirm: " );
     d->connected = CON_CONFIRM_NEW_PASSWORD;
 }
@@ -3631,7 +3744,6 @@ static void nanny_get_new_password( DESCRIPTOR_DATA *d, const std::string& argum
 static void nanny_confirm_new_password( DESCRIPTOR_DATA *d, const std::string& argument )
 {
     CHAR_DATA *ch;
-    char *p;
     char pwdnewhash[65];
 
     ch = d->character;
@@ -3639,17 +3751,6 @@ static void nanny_confirm_new_password( DESCRIPTOR_DATA *d, const std::string& a
     output_to_descriptor( d, "\n" );
 
     sha256_hash( argument.c_str(), pwdnewhash );
-
-    for ( p = pwdnewhash; *p != '\0'; p++ )
-    {
-        if ( *p == '~' )
-        {
-            output_to_descriptor( d,
-                "New password not acceptable, try again.\nPassword: " );
-            d->connected = CON_GET_NEW_PASSWORD;
-            return;
-        }
-    }
 
     if ( strcmp( pwdnewhash, ch->pcdata->pwd ) != 0 )
     {
@@ -3659,7 +3760,7 @@ static void nanny_confirm_new_password( DESCRIPTOR_DATA *d, const std::string& a
         return;
     }
 
-    output_to_descriptor( d, (const char*) echo_on_str );
+    send_telnet( d, echo_on_str, sizeof(echo_on_str) );
     output_to_descriptor( d, "\nWhat is your sex (M/F/N)? " );
     d->connected = CON_GET_NEW_SEX;
 }
@@ -3698,24 +3799,17 @@ static void nanny_get_new_sex( DESCRIPTOR_DATA *d, const std::string& argument )
 
     halfmax = ( MAX_RACE / 3 ) + 1;
 
-    for ( iRace = 0; iRace < halfmax; iRace++ )
+    for (iRace = 0; iRace < halfmax; ++iRace)
     {
-        if ( iRace == RACE_GOD )
-            continue;
-
-        if ( race_table[iRace].race_name[0] != '\0' )
+        std::string line;
+        for (int column = 0; column < 3; ++column)
         {
-            std::string line;
-
-            line += str_printf( "%-20s", race_table[iRace].race_name );
-            line += str_printf( "%-20s", race_table[iRace + halfmax].race_name );
-
-            if ( iRace + ( halfmax * 2 ) < MAX_RACE )
-                line += str_printf( "%s", race_table[iRace + ( halfmax * 2 )].race_name );
-
-            line += "\n";
-            output_to_descriptor( d, line );
+            const int index = iRace + column * halfmax;
+            const char *name = index < MAX_RACE && index != RACE_GOD
+                ? race_table[index].race_name : "";
+            line += column < 2 ? str_printf("%-20s", name) : name;
         }
+        output_to_descriptor(d, line + "\n");
     }
 
     output_to_descriptor( d, ": " );
@@ -3736,8 +3830,8 @@ static void nanny_get_new_race( DESCRIPTOR_DATA *d, const std::string& argumenti
     if ( !str_cmp( arg, "help" ) )
     {
         if (argument.empty())
-            do_help( ch, "race" );
-        do_help( ch, (char*)argument.c_str() );
+            argument = "race";
+        do_help(ch, &argument[0]);
         output_to_descriptor( d, "Please choose a race: " );
         return;
     }
@@ -3750,12 +3844,9 @@ static void nanny_get_new_race( DESCRIPTOR_DATA *d, const std::string& argumenti
 
     for ( iRace = 0; iRace < MAX_RACE; iRace++ )
     {
-        if ( toupper( arg[0] ) == toupper( race_table[iRace].race_name[0] )
-        && !str_prefix( arg, race_table[iRace].race_name ) )
-        {
-            ch->race = iRace;
+        if ( !arg.empty() && (!str_prefix(arg, race_table[iRace].race_name)
+            || (iRace == RACE_PROTOCAL_DROID && !str_prefix(arg, "Protocal Droid"))) )
             break;
-        }
     }
 
     if ( iRace == RACE_ASSASSIN_DROID || iRace == RACE_YEVETHA || iRace == RACE_TOGARIAN )
@@ -3772,6 +3863,7 @@ static void nanny_get_new_race( DESCRIPTOR_DATA *d, const std::string& argumenti
         return;
     }
 
+    ch->race = iRace;
     output_to_descriptor( d,
         "\nPlease choose a main ability from the folowing classes:\n" );
     halfmax = ( MAX_ABILITY / 2 ) + 1;
@@ -3812,16 +3904,17 @@ static void nanny_get_new_class( DESCRIPTOR_DATA *d, const std::string& argument
     argument = one_argument( argument, arg );
     if ( !str_cmp( arg, "help" ) )
     {
-        if ( argument.empty())
-            do_help( ch, "classes" );
-        do_help( ch, (char*)argument.c_str() );
+        if (argument.empty())
+            argument = "classes";
+        do_help(ch, &argument[0]);
         output_to_descriptor( d, "Please choose an ability class: " );
         return;
     }
 
     for ( iClass = 0; iClass < MAX_ABILITY; iClass++ )
     {
-        if ( toupper( arg[0] ) == toupper( ability_name[iClass][0] )
+        if ( !arg.empty() && ability_name[iClass]
+        && toupper( static_cast<unsigned char>(arg[0]) ) == toupper( ability_name[iClass][0] )
         && !str_prefix( arg, ability_name[iClass] ) )
         {
             ch->main_ability = iClass;
@@ -4271,6 +4364,7 @@ static void nanny_load_player_home_storage( DESCRIPTOR_DATA *d, CHAR_DATA *ch )
         return;
 
     rset_supermob( storeroom );
+    ObjectNest nest{};
 
     for ( ; ; )
     {
@@ -4286,20 +4380,20 @@ static void nanny_load_player_home_storage( DESCRIPTOR_DATA *d, CHAR_DATA *ch )
 
         if ( letter != '#' )
         {
-            bug( "Load_plr_home: # not found.", 0 );
-            bug( ch->name, 0 );
+            bug( "Load_plr_home: # not found." );
+            bug( "%s", ch->name );
             break;
         }
 
         word = fread_word( fph );
         if ( !str_cmp( word, "OBJECT" ) )
-            fread_obj( d->game, supermob, fph, OS_CARRY );
+            fread_obj(d->game, supermob, fph, OS_CARRY, nest);
         else if ( !str_cmp( word, "END" ) )
             break;
         else
         {
-            bug( "Load_plr_home: bad section.", 0 );
-            bug( ch->name, 0 );
+            bug( "Load_plr_home: bad section." );
+            bug( "%s", ch->name );
             break;
         }
     }
@@ -4390,7 +4484,7 @@ bool check_parse_name( const std::string& name )
 	fIll = TRUE;
 	for ( pc = name.c_str(); *pc != '\0'; pc++ )
 	{
-	    if ( !isalpha(*pc) )
+	    if ( !isalpha(static_cast<unsigned char>(*pc)) )
 		    return FALSE;
 	    if ( LOWER(*pc) != 'i' && LOWER(*pc) != 'l' )
 		fIll = FALSE;
@@ -4451,6 +4545,8 @@ short check_reconnect( DESCRIPTOR_DATA *d, const std::string& name, bool fConn )
 		d->character = ch;
 		ch->desc	 = d;
 		ch->timer	 = 0;
+		if ( ch->editor )
+		  stop_editing( ch );
 		send_to_char( "Reconnecting.\n", ch );
 		act( AT_ACTION, "$n has reconnected.", ch, NULL, NULL, TO_ROOM );
 		log_printf_plus( LOG_COMM, UMAX( d->game->get_sysdata()->log_level, ch->top_level ), "%s@%s(%s) reconnected.", ch->name, d->host, d->user );
@@ -4472,11 +4568,13 @@ short check_reconnect( DESCRIPTOR_DATA *d, const std::string& name, bool fConn )
  
 bool check_multi( DESCRIPTOR_DATA *d , const std::string& name )
 {
-        DESCRIPTOR_DATA *dold;
+        DESCRIPTOR_DATA *dold, *dold_next;
         
-    for ( dold = first_descriptor; dold; dold = dold->next )
+    for ( dold = first_descriptor; dold; dold = dold_next )
     {
+	dold_next = dold->next;
 	if ( dold != d
+	&& !dold->closing
 	&& (  dold->character || dold->original )
 	&&   str_cmp( name, dold->original
 		 ? dold->original->name : dold->character->name ) 
@@ -4506,10 +4604,18 @@ bool check_multi( DESCRIPTOR_DATA *d , const std::string& name )
 	           return FALSE;
 */
 		output_to_descriptor( d, "Sorry multi-playing is not allowed ... have you other character quit first.\n" );
+		if ( !comm_desc_in_list( d ) || d->closing )
+		    return TRUE;
 		log_printf_plus( LOG_COMM, d->game->get_sysdata()->log_level, "%s attempting to multiplay with %s.", dold->original ? dold->original->name : dold->character->name , d->character->name );
+		if ( !comm_desc_in_list( d ) || d->closing )
+		    return TRUE;
 
-	        d->character = NULL;
-	        free_char( d->character );
+	        if ( d->character )
+	        {
+	            d->character->desc = NULL;
+	            free_char( d->character );
+	            d->character = NULL;
+	        }
 	        return TRUE;
 	}
     }
@@ -4522,12 +4628,14 @@ short check_playing( DESCRIPTOR_DATA *d, const std::string& name, bool kick )
 {
     CHAR_DATA *ch;
 
-    DESCRIPTOR_DATA *dold;
+    DESCRIPTOR_DATA *dold, *dold_next;
     int	cstate;
 
-    for ( dold = first_descriptor; dold; dold = dold->next )
+    for ( dold = first_descriptor; dold; dold = dold_next )
     {
+	dold_next = dold->next;
 	if ( dold != d
+	&& !dold->closing
 	&& (  dold->character || dold->original )
 	&&   !str_cmp( name, dold->original
 		 ? dold->original->name : dold->character->name ) )
@@ -4544,11 +4652,19 @@ short check_playing( DESCRIPTOR_DATA *d, const std::string& name, bool kick )
 	    if ( !kick )
 	      return TRUE;
 	    output_to_descriptor( d, "Already playing... Kicking off old connection.\n" );
+	    if ( !comm_desc_alive( d ) )
+	        return BERR;
 	    output_to_descriptor( dold, "Kicking off old connection... bye!\n" );
-	    close_socket( dold, FALSE );
+	    if ( comm_desc_in_list( dold ) && !dold->closing )
+	        close_socket( dold, dold->write_failed ? TRUE : FALSE );
+	    if ( !comm_desc_alive( d ) )
+	        return BERR;
 	    /* clear descriptor pointer to get rid of bug message in log */
-	    d->character->desc = NULL;
-	    free_char( d->character );
+	    if ( d->character )
+	    {
+	        d->character->desc = NULL;
+	        free_char( d->character );
+	    }
 	    d->character = ch;
 	    ch->desc	 = d;
 	    ch->timer	 = 0;
@@ -4560,7 +4676,10 @@ short check_playing( DESCRIPTOR_DATA *d, const std::string& name, bool kick )
 	         ch, NULL, NULL, TO_ROOM );
 	    log_printf_plus( LOG_COMM, UMAX( d->game->get_sysdata()->log_level, ch->top_level ), "%s@%s reconnected, kicking off old link.",
 	             ch->name, d->host );
-	    d->connected = cstate;
+	    if ( cstate == CON_EDITING && ( !ch->editor || ch->substate == SUB_NONE ) )
+	      d->connected = CON_PLAYING;
+	    else
+	      d->connected = cstate;
 	    return TRUE;
 	}
     }
@@ -4625,18 +4744,33 @@ void write_to_pager( DESCRIPTOR_DATA *d, const char *txt, int length )
     if ( d->pagebuf.empty() && !d->fcommand )
         d->pagebuf.push_back( '\n' );
 
-    /*
-     * HARD CAP
-     */
-    if ( d->pagebuf.size() + static_cast<size_t>( length ) + 1 >= 32000 )
+    static constexpr size_t pagebuf_max = 32000;
+    static const std::string truncation = "\n[Output truncated]\n";
+    const size_t size = d->pagebuf.size();
+    if (size >= truncation.size()
+        && d->pagebuf.compare(size - truncation.size(), truncation.size(), truncation) == 0)
+        return;
+
+    const size_t content_limit = pagebuf_max - truncation.size();
+    const size_t remaining = size < content_limit ? content_limit - size : 0;
+    const size_t requested = static_cast<size_t>(length);
+    if (requested <= remaining)
     {
-        bug( "Pager overflow. Ignoring.\n" );
-        d->pagebuf.clear();
-        d->pagepoint = PAGEPOINT_NULL;
+        d->pagebuf.append(txt, requested);
         return;
     }
 
-    d->pagebuf.append( txt, static_cast<size_t>( length ) );
+    const char *end = txt + requested;
+    size_t prefix = 0;
+    while (prefix < remaining)
+    {
+        const size_t unit = display_unit(txt + prefix, end, WRAP_NONE).bytes;
+        if (unit > remaining - prefix)
+            break;
+        prefix += unit;
+    }
+    d->pagebuf.append(txt, prefix);
+    d->pagebuf += truncation;
 }
 
 int build_ansi_from_atype(sh_int AType, char *buf)
@@ -5325,21 +5459,23 @@ void do_name( CHAR_DATA *ch, char *argument )
   CHAR_DATA *tmp;
   std::string buf;
 
+  if (!ch)
+    return;
   if ( !NOT_AUTHED(ch) || ch->pcdata->auth_state != 2)
   {
     send_to_char("Huh?\n", ch);
     return;
   }
 
-  argument[0] = UPPER(argument[0]);
-
-  if (!check_parse_name(argument))
+  std::string name = argument ? argument : "";
+  if (name.empty() || !check_parse_name(name))
   {
     send_to_char("Illegal name, try another.\n", ch);
     return;
   }
+  name.front() = UPPER(name.front());
 
-  if (!str_cmp(ch->name, argument))
+  if (!str_cmp(ch->name, name))
   {
     send_to_char("That's already your name!\n", ch);
     return;
@@ -5347,7 +5483,7 @@ void do_name( CHAR_DATA *ch, char *argument )
 
   for ( tmp = first_char; tmp; tmp = tmp->next )
   {
-    if (!str_cmp(argument, tmp->name))
+    if (!str_cmp(name, tmp->name))
     break;
   }
 
@@ -5357,8 +5493,8 @@ void do_name( CHAR_DATA *ch, char *argument )
     return;
   }
 
-  SPRINTF( fname, "%s%c/%s", PLAYER_DIR, tolower(argument[0]),
-                        capitalize( argument ).c_str() );
+  SPRINTF( fname, "%s%c/%s", PLAYER_DIR, LOWER(name.front()),
+                        capitalize(name).c_str() );
   if ( stat( fname, &fst ) != -1 )
   {
     send_to_char("That name is already taken.  Please choose another.\n", ch);
@@ -5366,7 +5502,7 @@ void do_name( CHAR_DATA *ch, char *argument )
   }
 
   STRFREE( ch->name );
-  ch->name = STRALLOC( argument );
+  ch->name = STRALLOC(name);
   buf = str_printf("%s the %s",ch->name,
     race_table[ch->race].race_name );
   set_title( ch, buf );
@@ -5427,6 +5563,9 @@ static std::string get_prompt_status_flags( CHAR_DATA *ch, CHAR_DATA *och )
 
     if ( !ch )
         return flags;
+
+    if ( !och )
+        return "";
 
     if ( ( !IS_NPC( ch ) && BV_IS_SET( ch->act, PLR_WIZINVIS ) )
     ||   ( IS_NPC( ch ) && BV_IS_SET( ch->act, ACT_MOBINVIS ) ) )
@@ -5639,8 +5778,11 @@ static std::string get_prompt_combat_block( CHAR_DATA *ch )
 
 static std::string get_prompt_token_value( DESCRIPTOR_DATA *d, CHAR_DATA *ch, CHAR_DATA *och, char token )
 {
+    if ( !ch )
+        return "";
+
     CHAR_DATA *victim = ch->fighting ? who_fighting( ch ) : nullptr;
-    SHIP_DATA *ship = ship_from_room( ch->game, ch->in_room->vnum );
+    SHIP_DATA *ship = ( ch->in_room && ch->game ) ? ship_from_room( ch->game, ch->in_room->vnum ) : nullptr;
     switch ( token )
     {
         case '%':
@@ -5696,7 +5838,7 @@ static std::string get_prompt_token_value( DESCRIPTOR_DATA *d, CHAR_DATA *ch, CH
             return str_printf( "%d", num_descriptors );
 
         case 'U':
-            return str_printf( "%d", d->game->get_sysdata()->maxplayers );
+            return ( d && d->game ) ? str_printf( "%d", d->game->get_sysdata()->maxplayers ) : "0";
 
         case 'v':
             return str_printf( "%d", ch->move );
@@ -5708,17 +5850,17 @@ static std::string get_prompt_token_value( DESCRIPTOR_DATA *d, CHAR_DATA *ch, CH
             return str_printf( "%d", ch->gold );
 
         case 'r':
-            if ( IS_IMMORTAL( och ) && ch->in_room )
+            if ( och && IS_IMMORTAL( och ) && ch->in_room )
                 return str_printf( "%d", ch->in_room->vnum );
             return "";
 
         case 'R':
-            if ( BV_IS_SET( och->act, PLR_ROOMVNUM ) && ch->in_room )
+            if ( och && BV_IS_SET( och->act, PLR_ROOMVNUM ) && ch->in_room )
                 return str_printf( "<#%d> ", ch->in_room->vnum );
             return "";
 
         case 'i':
-            if ( ( !IS_NPC( ch ) && BV_IS_SET( ch->act, PLR_WIZINVIS ) )
+            if ( ( !IS_NPC( ch ) && ch->pcdata && BV_IS_SET( ch->act, PLR_WIZINVIS ) )
             ||   ( IS_NPC( ch ) && BV_IS_SET( ch->act, ACT_MOBINVIS ) ) )
             {
                 return str_printf(
@@ -5736,7 +5878,7 @@ static std::string get_prompt_token_value( DESCRIPTOR_DATA *d, CHAR_DATA *ch, CH
                 "%d",
                 ( IS_NPC( ch )
                     ? ( BV_IS_SET( ch->act, ACT_MOBINVIS ) ? ch->mobinvis : 0 )
-                    : ( BV_IS_SET( ch->act, PLR_WIZINVIS ) ? ch->pcdata->wizinvis : 0 ) ) );
+                    : ( ( ch->pcdata && BV_IS_SET( ch->act, PLR_WIZINVIS ) ) ? ch->pcdata->wizinvis : 0 ) ) );
 
         case 'e':
             if ( victim )
@@ -5822,9 +5964,12 @@ static std::string get_prompt_token_value( DESCRIPTOR_DATA *d, CHAR_DATA *ch, CH
 
 void display_prompt( DESCRIPTOR_DATA *d )
 {
+    if ( !d )
+        return;
+
     CHAR_DATA *ch = d->character;
     CHAR_DATA *och = ( d->original ? d->original : d->character );
-    bool ansi = ( !IS_NPC( och ) && BV_IS_SET( och->act, PLR_ANSI ) );
+    bool ansi = ( och && !IS_NPC( och ) && BV_IS_SET( och->act, PLR_ANSI ) );
     const char *prompt;
 
     if ( !ch )
@@ -5888,6 +6033,8 @@ void display_prompt( DESCRIPTOR_DATA *d )
     }
 
     gmcp_flush( d );
+    if ( !comm_desc_alive( d ) )
+        return;
     output_to_descriptor( d, out );
 }
 
@@ -5918,7 +6065,8 @@ bool pager_output( DESCRIPTOR_DATA *d )
     else
         term_lines = 24;                  /* sane fallback */
 
-    pclines = UMAX( ch->pcdata->pagerlen, 5 );
+    int pager_setting = ( ch && !IS_NPC( ch ) && ch->pcdata ) ? ch->pcdata->pagerlen : 24;
+    pclines = UMAX( pager_setting, 5 );
 
     /* Use the smaller of user setting vs terminal size */
     if ( term_lines > 0 )
@@ -5943,7 +6091,8 @@ bool pager_output( DESCRIPTOR_DATA *d )
         case 'q':
             d->pagebuf.clear();
             d->pagepoint = PAGEPOINT_NULL;
-            flush_buffer( d, TRUE );
+            if ( !flush_buffer( d, TRUE ) )
+                return FALSE;
             return TRUE;
     }
 
@@ -5995,6 +6144,8 @@ bool pager_output( DESCRIPTOR_DATA *d )
         output_to_descriptor(
             d,
             d->pagebuf.substr( d->pagepoint, line_end - d->pagepoint ) );
+        if ( !comm_desc_alive( d ) )
+            return FALSE;
 
         d->pagepoint = line_end;
     }
@@ -6008,26 +6159,35 @@ bool pager_output( DESCRIPTOR_DATA *d )
     {
         d->pagebuf.clear();
         d->pagepoint = PAGEPOINT_NULL;
-        flush_buffer( d, TRUE );
+        if ( !flush_buffer( d, TRUE ) )
+            return FALSE;
         return TRUE;
     }
 
     d->pagecmd = -1;
     d->pagecolor = d->rendercolor;
 
-    if ( BV_IS_SET( ch->act, PLR_ANSI ) )
+    bool use_ansi = ( ch && !IS_NPC( ch ) && BV_IS_SET( ch->act, PLR_ANSI ) );
+    if ( use_ansi )
         set_char_color( AT_LBLUE, ch );
 
-    send_to_char( "(C)ontinue, (R)efresh, (B)ack, (Q)uit: [C] ", ch );
+    if ( ch )
+        send_to_char( "(C)ontinue, (R)efresh, (B)ack, (Q)uit: [C] ", ch );
+    else
+        output_to_descriptor( d, "(C)ontinue, (R)efresh, (B)ack, (Q)uit: [C] " );
 
-    if ( BV_IS_SET( ch->act, PLR_ANSI ) )
+    if ( !comm_desc_alive( d ) )
+        return FALSE;
+
+    if ( use_ansi )
     {
         d->rendercolor = d->pagecolor;
         d->has_rendercolor = true;
     }
 
     flush_color( d );
-    flush_buffer( d, FALSE );
+    if ( !flush_buffer( d, FALSE ) )
+        return FALSE;
     return TRUE;
 }
 
@@ -6040,6 +6200,7 @@ void whocount(struct tm tmdata)
   int count = 0;
   DESCRIPTOR_DATA *d;
 
+  player_count = 0;
   count = 0;
   SPRINTF(datebuf,"%d/%d/%d",
 	      tmdata.tm_mon+1, tmdata.tm_mday, 1900+tmdata.tm_year);
@@ -6055,8 +6216,8 @@ void whocount(struct tm tmdata)
   }
   snprintf(countbuf, sizeof(countbuf),"%d %d %d",player_count,imm_count,count);
   if (fork() == 0) { 
-    execl("../bin/scripts/whocount.pl","../bin/scripts/whocount.pl",datebuf,timebuf,countbuf,NULL);
-    exit(0);
+    execl("../bin/scripts/whocount.pl","../bin/scripts/whocount.pl",datebuf,timebuf,countbuf,(char *)NULL);
+    _exit(0);
   }
 }
 
@@ -6086,7 +6247,7 @@ void cron()
 #ifndef _WIN32    
     //clean up dead children every 5 minutes
     if (thisTM.tm_min % 5 == 0) {
-      while(waitpid(-1,&status,WNOHANG) >= 0);
+      while(waitpid(-1,&status,WNOHANG) > 0);
     }
 #endif  
   }
@@ -6104,8 +6265,8 @@ void cron()
   
     //Do this stuff every day
     if (fork() == 0) {
-      execl("../bin/scripts/daily.sh","../bin/scripts/daily.sh",NULL);
-      exit(0);
+      execl("../bin/scripts/daily.sh","../bin/scripts/daily.sh",(char *)NULL);
+      _exit(0);
     }
 
   }
@@ -6176,140 +6337,60 @@ void zlib_free(void *opaque, void *address)
     STR_DISPOSE(address);
 }
 
-bool process_compressed(DESCRIPTOR_DATA *d)
-{
-    int iStart = 0, nBlock, nWrite, len;
-
-    if (!d->out_compress)
-        return TRUE;
-
-    // Try to write out some data..
-    len = d->out_compress->next_out - d->out_compress_buf;
-
-    if (len > 0)
-    {
-        // we have some data to write
-        for (iStart = 0; iStart < len; iStart += nWrite)
-        {
-            nBlock = len - iStart;
-            if ((nWrite = write(d->descriptor, d->out_compress_buf + iStart, nBlock)) < 0)
-            {
-                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOSR)
-                    break;
-
-                return FALSE;
-            }
-            if (nWrite > 0)
-            {
-                d->mccp_bytes_out += nWrite;
-            }                
-            if (!nWrite)
-                break;
-        }
-
-        if (iStart)
-        {
-            // We wrote "iStart" bytes
-            if (iStart < len)
-                memmove(d->out_compress_buf, d->out_compress_buf+iStart, len - iStart);
-
-            d->out_compress->next_out = d->out_compress_buf + len - iStart;
-        }
-    }
-
-    return TRUE;
-}
-
-char enable_compress[] =
-{
-    (char)IAC, (char)SB, (char)TELOPT_COMPRESS, (char)WILL, (char)SE, 0
-};
-char enable_compress2[] =
-{
-    (char)IAC, (char)SB, (char)TELOPT_COMPRESS2, (char)IAC, (char)SE, 0
-};
+static bool append_wire_output(DESCRIPTOR_DATA *d, const unsigned char *data, size_t len);
+static bool deflate_to_wire(DESCRIPTOR_DATA *d, const unsigned char *data, size_t len, int mode);
 
 bool compressStart(DESCRIPTOR_DATA *d, unsigned char telopt)
 {
-    z_stream *s;
-
+    if (!d || d->descriptor < 0 || d->closing || d->write_failed)
+        return false;
     if (d->out_compress)
-        return TRUE;
+        return d->compressing == telopt;
+    if (telopt != TELOPT_COMPRESS && telopt != TELOPT_COMPRESS2)
+        return false;
 
-    bug("Starting compression for descriptor %d", d->descriptor);
-    TELLOG(d, "MCCP: START (COMPRESS%d)", telopt == TELOPT_COMPRESS2 ? 2 : 1);  
+    z_stream *stream;
+    CREATE(stream, z_stream, 1);
+    stream->zalloc = zlib_alloc;
+    stream->zfree = zlib_free;
+    if (deflateInit(stream, 9) != Z_OK)
+    {
+        DISPOSE(stream);
+        return false;
+    }
 
-    CREATE(s, z_stream, 1);
+    // Queue pending text in plaintext, then the plaintext start marker.
+    const unsigned char start[] = { IAC, SB, telopt, static_cast<unsigned char>(telopt == TELOPT_COMPRESS ? WILL : IAC), SE };
+    if (!queue_descriptor_output(d) || !append_wire_output(d, start, sizeof(start)))
+    {
+        deflateEnd(stream);
+        DISPOSE(stream);
+        return false;
+    }
+
     CREATE_ARRAY(d->out_compress_buf, unsigned char, COMPRESS_BUF_SIZE);
-
-    s->next_in = NULL;
-    s->avail_in = 0;
-
-    s->next_out = d->out_compress_buf;
-    s->avail_out = COMPRESS_BUF_SIZE;
-
-    s->zalloc = zlib_alloc;
-    s->zfree  = zlib_free;
-    s->opaque = NULL;
-
-    d->mccp_bytes_in  = 0;
-    d->mccp_bytes_out = 0;
-
-    if (deflateInit(s, 9) != Z_OK)
-    {
-        STR_DISPOSE(d->out_compress_buf);
-        DISPOSE(s);
-        return FALSE;
-    }
-
-    {
-        static const unsigned char start[] =
-        {
-            IAC, SB, TELOPT_COMPRESS2, IAC, SE
-        };
-
-        send_telnet(d, start, sizeof(start));
-    }
-
+    d->out_compress = stream;
     d->compressing = telopt;
-    d->out_compress = s;
-
-    return TRUE;
+    d->mccp_bytes_in = 0;
+    d->mccp_bytes_out = 0;
+    TELLOG(d, "MCCP: START (COMPRESS%d)", telopt == TELOPT_COMPRESS2 ? 2 : 1);
+    return true;
 }
 
 bool compressEnd(DESCRIPTOR_DATA *d)
 {
-    unsigned char dummy[1];
+    if (!d || !d->out_compress)
+        return true;
 
-    if (!d->out_compress)
-        return TRUE;
-
-    bug("Stopping compression for descriptor %d", d->descriptor);
-    TELLOG(d, "MCCP: END");
-    if (d->mccp_bytes_in > 0)
-    {
-        double ratio = 100.0 *
-            (1.0 - ((double)d->mccp_bytes_out / (double)d->mccp_bytes_in));
-
-        bug("MCCP stats for descriptor %d: in=%zu, out=%zu, saved=%.2f%%",
-            d->descriptor,
-            d->mccp_bytes_in,
-            d->mccp_bytes_out,
-            ratio);
-    }
-
-    d->out_compress->avail_in = 0;
-    d->out_compress->next_in = dummy;
-
-    if (deflate(d->out_compress, Z_FINISH) == Z_STREAM_END)
-      process_compressed(d); /* try to send any residual data */
-
+    const bool finished = queue_descriptor_output(d) && deflate_to_wire(d, nullptr, 0, Z_FINISH);
     deflateEnd(d->out_compress);
     DISPOSE_ARRAY(d->out_compress_buf);
     DISPOSE(d->out_compress);
     d->compressing = 0;
-
-    return TRUE;
+    TELLOG(d, "MCCP: END");
+    if (finished && d->closing)
+        return drain_wire_output(d);
+    return finished;
 }
 
 void do_compress( CHAR_DATA *ch, char *argument )
@@ -6321,8 +6402,8 @@ void do_compress( CHAR_DATA *ch, char *argument )
 
     if (!ch->desc->out_compress) {
         send_to_char("Initiating compression.\n", ch);
-        output_to_descriptor( ch->desc, (const char *)compress2_on_str );
-        output_to_descriptor( ch->desc, (const char *)compress_on_str );
+        send_telnet( ch->desc, compress2_on_str, sizeof(compress2_on_str) );
+        send_telnet( ch->desc, compress_on_str, sizeof(compress_on_str) );
     } else {
         send_to_char("Terminating compression.\n", ch);
         compressEnd(ch->desc);
@@ -6379,463 +6460,104 @@ static std::string format_divider_line( const std::string& src, int width )
     return out;
 }
 
-std::string wrap_text_ex( const std::string& txt, int width, int flags, int indent )
+std::string wrap_text_ex(const std::string &txt, int width, int flags, int indent)
 {
-    if ( txt.empty() )
-        return std::string();
-
-    if ( width <= 0 || ( flags & WRAP_NO_WRAP ) )
+    if (txt.empty() || width <= 0 || (flags & WRAP_NO_WRAP))
         return txt;
 
-    if ( indent >= width )
-        indent = ( width > 0 ) ? width - 1 : 0;
-
-    const int len = static_cast<int>( txt.size() );
-
+    indent = std::clamp(indent, 0, width - 1);
     std::string out;
-    out.reserve( txt.size() * 4 + 1 );
+    out.reserve(txt.size());
+    int column = 0;
 
-    int col = 0;
-    int line = 0;
-    int wrapped_line = 0;
-
-#define WORD_MAX 4096
-#define VIS_MAX 4096
-
-    char word[WORD_MAX];
-    int wlen = 0;
-    int wcol = 0; /* visible width */
-    int vis_to_raw[VIS_MAX];
-    memset( vis_to_raw, 0, sizeof( vis_to_raw ) );
-
-    auto append_char = [&]( char c )
+    auto indent_line = [&](bool wrapped)
     {
-        out.push_back( c );
+        column = (flags & WRAP_INDENT) || (wrapped && (flags & WRAP_HANGING_INDENT)) ? indent : 0;
+        out.append(column, ' ');
     };
-
-    auto append_bytes = [&]( const char *src, int n )
+    auto next_line = [&](bool wrapped)
     {
-        if ( n > 0 )
-            out.append( src, static_cast<size_t>( n ) );
+        out += '\n';
+        indent_line(wrapped);
     };
+    indent_line(false);
 
-    auto apply_indent = [&]()
+    const char *p = txt.data();
+    const char *end = p + txt.size();
+    while (p < end)
     {
-        if ( ( flags & WRAP_INDENT )
-        || ( ( flags & WRAP_HANGING_INDENT ) && wrapped_line ) )
+        if (*p == '\n' || *p == '\r')
         {
-            for ( int k = 0; k < indent; ++k )
-            {
-                out.push_back( ' ' );
-                col++;
-            }
-        }
-    };
-
-    auto flush_word = [&]()
-    {
-        if ( wlen > 0 )
-        {
-            append_bytes( word, wlen );
-            col += wcol;
-
-            wlen = 0;
-            wcol = 0;
-            memset( vis_to_raw, 0, sizeof( vis_to_raw ) );
-        }
-    };
-
-    apply_indent();
-
-    for ( int i = 0; i < len; i++ )
-    {
-        char c = txt[i];
-
-        /* =========== PRESERVE LINES =========== */
-        if ( flags & WRAP_PRESERVE_LINES )
-        {
-            if ( c == '\r' )
-                continue;
-
-            if ( c == '\n' )
-            {
-                append_char( '\n' );
-                col = 0;
-                line++;
-                wrapped_line = 0;
-                apply_indent();
-                continue;
-            }
-
-            /* otherwise fall through and allow wrapping */
-        }
-
-        /* ================= ANSI ================= */
-        if ( !( flags & WRAP_NO_COLOR ) && c == '\x1b' )
-        {
-            if ( wlen >= WORD_MAX - 2 )
-                goto flush_word_label;
-
-            word[wlen++] = c;
-            i++;
-
-            int ansi_len = 0;
-            while ( i < len && ansi_len < 32 )
-            {
-                if ( wlen < WORD_MAX - 1 )
-                    word[wlen++] = txt[i];
-
-                if ( txt[i++] == 'm' )
-                    break;
-
-                ansi_len++;
-            }
-
-            i--;
+            const char newline = *p++;
+            if (p < end && *p != newline && (*p == '\n' || *p == '\r'))
+                ++p;
+            next_line(false);
             continue;
         }
 
-        /* ================= SMAUG COLOR ================= */
-        if ( !( flags & WRAP_NO_COLOR ) && c == '&' && i + 1 < len )
+        if (*p == ' ' || *p == '\t')
         {
-            if ( txt[i + 1] == '&' )
+            int spaces = *p++ == '\t' ? 4 - column % 4 : 1;
+            while (spaces-- > 0)
             {
-                if ( wlen < WORD_MAX - 2 && wcol < VIS_MAX )
-                {
-                    /* store BOTH characters */
-                    word[wlen++] = '&';
-                    word[wlen++] = '&';
-
-                    /* but count as ONE visible char */
-                    vis_to_raw[wcol] = wlen - 1;
-                    wcol++;
-                }
+                if (column == width)
+                    next_line(true);
                 else
-                    goto flush_word_label;
-
-                i++; /* skip second '&' */
-                continue;
-            }
-
-            if ( wlen < WORD_MAX - 2 )
-            {
-                word[wlen++] = txt[i++];
-                word[wlen++] = txt[i];
-            }
-            continue;
-        }
-
-        /* ================= NEWLINE ================= */
-        if ( c == '\n' || c == '\r' )
-        {
-flush_word_label:
-            flush_word();
-
-            if ( c == '\n' )
-            {
-                append_char( '\n' );
-                col = 0;
-                line++;
-                wrapped_line = 0;
-                apply_indent();
-            }
-            continue;
-        }
-
-        /* ================= TAB ================= */
-        if ( c == '\t' )
-        {
-            int spaces = 4 - ( col % 4 );
-
-            for ( int s = 0; s < spaces; s++ )
-            {
-                if ( wlen < WORD_MAX - 1 && wcol < VIS_MAX )
                 {
-                    word[wlen++] = ' ';
-                    vis_to_raw[wcol] = wlen - 1;
-                    wcol++;
-                }
-                else
-                    goto flush_word_label;
-            }
-            continue;
-        }
-
-        /* ================= SPACE ================= */
-        if ( c == ' ' )
-        {
-            /* flush word first */
-            if ( wlen > 0 )
-            {
-                if ( col + wcol > width )
-                {
-                    append_char( '\n' );
-                    col = 0;
-                    line++;
-                    wrapped_line = 1;
-                    apply_indent();
-                }
-
-                flush_word();
-            }
-
-            /* then add space */
-            if ( col + 1 > width )
-            {
-                append_char( '\n' );
-                col = 0;
-                line++;
-                wrapped_line = 1;
-                apply_indent();
-            }
-            else
-            {
-                append_char( ' ' );
-                col++;
-            }
-
-            continue;
-        }
-
-        /* ================= NORMAL CHAR ================= */
-        if ( wlen >= WORD_MAX - 4 || wcol >= VIS_MAX )
-            goto flush_word_label;
-
-        unsigned char uc = (unsigned char)c;
-        int char_len = utf8_char_len( uc );
-
-        if ( i + char_len > len )
-            char_len = 1;
-
-        for ( int j = 0; j < char_len; j++ )
-            word[wlen++] = txt[i + j];
-
-        vis_to_raw[wcol] = wlen - 1;   /* map visible → last byte */
-        wcol++;
-
-        i += char_len - 1;
-
-        /* ============= LONG WORD HANDLING ============== */
-        while ( wcol > width )
-        {
-            int split_vis = ( col == 0 ) ? width : ( width - col );
-
-            if ( split_vis <= 0 )
-            {
-                append_char( '\n' );
-                col = 0;
-                line++;
-                wrapped_line = 1;
-                apply_indent();
-                split_vis = width;
-            }
-
-            int split_raw;
-            if ( wcol == 0 || split_vis - 1 < 0 )
-            {
-                split_raw = wlen;
-            }
-            else
-            {
-                split_raw = vis_to_raw[split_vis - 1] + 1;
-
-                /* prevent splitting inside ANSI */
-                int check = split_raw - 1;
-
-                while ( check >= 0 )
-                {
-                    if ( word[check] == 'm' )
-                        break;
-
-                    if ( word[check] == '\x1b' )
-                    {
-                        int fwd = split_raw;
-                        while ( fwd < wlen && word[fwd] != 'm' )
-                            fwd++;
-
-                        if ( fwd < wlen )
-                            split_raw = fwd + 1;
-                        else
-                            split_raw = wlen;
-
-                        break;
-                    }
-
-                    check--;
+                    out += ' ';
+                    ++column;
                 }
             }
+            continue;
+        }
 
-            append_bytes( word, split_raw );
+        const char *word_end = p;
+        int columns = 0;
+        while (word_end < end && *word_end != ' ' && *word_end != '\t'
+               && *word_end != '\r' && *word_end != '\n')
+        {
+            const auto unit = display_unit(word_end, end, flags);
+            columns += unit.columns;
+            word_end += unit.bytes;
+        }
 
-            memmove( word, word + split_raw, static_cast<size_t>( wlen - split_raw ) );
+        if (columns > 0 && column > 0 && columns > width - column
+            && columns <= width - ((flags & (WRAP_INDENT | WRAP_HANGING_INDENT)) ? indent : 0))
+            next_line(true);
 
-            int new_wlen = wlen - split_raw;
-            int new_wcol = wcol - split_vis;
-
-            for ( int k = 0; k < new_wcol; k++ )
-                vis_to_raw[k] = vis_to_raw[k + split_vis] - split_raw;
-
-            wlen = new_wlen;
-            wcol = new_wcol;
-
-            col += split_vis;
-
-            if ( col >= width )
-            {
-                append_char( '\n' );
-                col = 0;
-                line++;
-                wrapped_line = 1;
-                apply_indent();
-            }
+        while (p < word_end)
+        {
+            const auto unit = display_unit(p, word_end, flags);
+            if (unit.columns && column == width)
+                next_line(true);
+            out.append(p, unit.bytes);
+            column += unit.columns;
+            p += unit.bytes;
         }
     }
-
-    /* final word flush */
-    if ( wlen > 0 )
-    {
-        if ( col + wcol > width )
-        {
-            append_char( '\n' );
-            col = 0;
-            line++;
-            wrapped_line = 1;
-            apply_indent();
-        }
-
-        append_bytes( word, wlen );
-    }
-
     return out;
-}
-
-static inline bool is_smaug_color(char c)
-{
-    return isalnum((unsigned char)c);
-}
-
-size_t visible_length(const std::string&txt)
-{
-    return visible_length(txt.c_str());
-}
-
-size_t visible_length(const char *txt)
-{
-    if (!txt)
-        return 0;
-
-    size_t len = 0;
-
-    for (int i = 0; txt[i] != '\0';)
-    {
-        /* =========================
-         * ANSI escape sequence
-         * ========================= */
-        if (txt[i] == '\x1b')
-        {
-            i++; /* skip ESC */
-
-            /* Skip until 'm' (end of SGR sequence) */
-            while (txt[i] && txt[i] != 'm')
-                i++;
-
-            if (txt[i] == 'm')
-                i++;
-
-            /* reached end of string safely */
-            break;
-        }
-        /* =========================
-         * SMAUG color codes (&x, ^x)
-         * ========================= */
-        if ((txt[i] == '&' || txt[i] == '^'))
-        {
-            if (txt[i + 1] != '\0' && is_smaug_color(txt[i + 1]))
-            {
-                i += 2;  // skip color code
-                continue;
-            }
-        }
-
-        /* =========================
-         * UTF-8 handling
-         * ========================= */
-        unsigned char c = (unsigned char)txt[i];
-        int char_len = utf8_char_len(c);
-
-        /* Prevent overrunning string on malformed UTF-8 */
-        for (int j = 1; j < char_len; j++)
-        {
-            if (txt[i + j] == '\0')
-            {
-                char_len = 1;
-                break;
-            }
-        }
-
-        i += char_len;   /* advance full UTF-8 char */
-        len++;           /* visible width = 1 */
-    }
-
-    return len;
 }
 
 size_t visible_length_range(const char *start, const char *end, int flags)
 {
-    size_t len = 0;
-    const char *p = start;
-
-    while (p < end && *p)
+    size_t length = 0;
+    for (const char *p = start; p < end && *p;)
     {
-        /* =========================
-         * ANSI escape sequence
-         * ========================= */
-        if (!(flags & WRAP_NO_COLOR) && *p == '\x1b')
-        {
-            p++; /* skip ESC */
-
-            while (p < end && *p != 'm')
-                p++;
-
-            if (p < end)
-                p++; /* consume 'm' */
-
-            continue;
-        }
-
-        /* =========================
-         * SMAUG color codes
-         * ========================= */
-        if (!(flags & WRAP_NO_COLOR) && (*p == '&' || *p == '^'))
-        {
-            if ((p + 1) < end && is_smaug_color(*(p + 1)))
-            {
-                p += 2;
-                continue;
-            }
-        }
-
-        /* =========================
-         * UTF-8 handling
-         * ========================= */
-        unsigned char c = (unsigned char)*p;
-        int char_len = utf8_char_len(c);
-
-        /* Clamp to end to prevent overflow */
-        for (int j = 1; j < char_len; j++)
-        {
-            if ((p + j) >= end || *(p + j) == '\0')
-            {
-                char_len = 1;
-                break;
-            }
-        }
-
-        p += char_len;
-        len++;
+        const auto unit = display_unit(p, end, flags);
+        length += unit.columns;
+        p += unit.bytes;
     }
+    return length;
+}
 
-    return len;
+size_t visible_length(const std::string &txt)
+{
+    return visible_length_range(txt.data(), txt.data() + txt.size(), WRAP_NONE);
+}
+
+size_t visible_length(const char *txt)
+{
+    return txt ? visible_length_range(txt, txt + strlen(txt), WRAP_NONE) : 0;
 }
 
 bool looks_preformatted( const std::string& txt )
@@ -6962,6 +6684,9 @@ std::string wrap_text_smart( const std::string& txt, int width )
     if ( txt.empty() )
         return std::string();
 
+    if ( width <= 0 )
+        return txt;
+
     if ( visible_length( txt ) == 0 )
         return txt;
 
@@ -6983,6 +6708,7 @@ std::string wrap_text_smart( const std::string& txt, int width )
          */
         const char *start = p;
         const char *end = nullptr;
+        size_t delim_len = 0;
 
         const char *scan = p;
         while ( *scan )
@@ -6990,12 +6716,14 @@ std::string wrap_text_smart( const std::string& txt, int width )
             if ( scan[0] == '\n' && scan[1] == '\n' )
             {
                 end = scan;
+                delim_len = 2;
                 break;
             }
             if ( scan[0] == '\n' && scan[1] == '\r'
               && scan[2] == '\n' && scan[3] == '\r' )
             {
                 end = scan;
+                delim_len = 4;
                 break;
             }
             ++scan;
@@ -7011,10 +6739,10 @@ std::string wrap_text_smart( const std::string& txt, int width )
          */
         if ( plen == 0 )
         {
-            if ( end[0] == '\n' && end[1] == '\n' )
-                p = end + 2;
+            if ( delim_len > 0 )
+                p = end + delim_len;
             else
-                p = end;  /* fallback safety */
+                break;
 
             continue;
         }
@@ -7071,15 +6799,10 @@ std::string wrap_text_smart( const std::string& txt, int width )
          * STEP 5: Preserve paragraph spacing
          * ============================================
          */
-        if ( *end )
+        if ( *end && delim_len > 0 )
         {
             out += "\n\n";
-
-            /* Advance pointer past delimiter */
-            if ( end[0] == '\r' )
-                p = end + 4;  // \r\n\r\n
-            else
-                p = end + 2;  // \n\n
+            p = end + delim_len;
         }
         else
         {
@@ -7092,140 +6815,174 @@ std::string wrap_text_smart( const std::string& txt, int width )
 
 void send_telnet(DESCRIPTOR_DATA *d, const unsigned char *data, size_t len)
 {
-    if (!d || d->descriptor < 0 || !data || len == 0)
+    if (!d || d->descriptor < 0 || d->closing || d->write_failed || !data || len == 0)
         return;
 
     if (d->debug_telnet && len >= 2 && data[0] == IAC)
     {
         char buf[256];
         int pos = 0;
+        const int cap = static_cast<int>(sizeof(buf));
+        int n = snprintf(buf + pos, static_cast<size_t>(cap - pos), "IAC ");
+        if (n > 0)
+            pos = (n >= cap - pos) ? (cap - 1) : (pos + n);
 
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "IAC ");
-
-        for (size_t i = 1; i < len && pos < (int)sizeof(buf) - 10; i++)
+        for (size_t i = 1; i < len && pos < cap - 10; i++)
         {
             unsigned char c = data[i];
             if (c == IAC)
-                pos += snprintf(buf + pos, sizeof(buf) - pos, "IAC ");
+                n = snprintf(buf + pos, static_cast<size_t>(cap - pos), "IAC ");
             else if (c == SB || c == SE || c == DO || c == WILL || c == WONT || c == DONT)
-                pos += snprintf(buf + pos, sizeof(buf) - pos, "%s ", telcmd(c));
+                n = snprintf(buf + pos, static_cast<size_t>(cap - pos), "%s ", telcmd(c));
             else
-                pos += snprintf(buf + pos, sizeof(buf) - pos, "%s ", telopt(c));
+                n = snprintf(buf + pos, static_cast<size_t>(cap - pos), "%s ", telopt(c));
+
+            if (n < 0)
+                break;
+            if (n >= cap - pos)
+            {
+                pos = cap - 1;
+                break;
+            }
+            pos += n;
         }
 
+        buf[pos] = '\0';
         fprintf(stderr, "[TELNET] SEND: %s\r\n", buf);
     }
 
-    /* 🔥 Single call is enough */
-    net_write(d, data, len);
+    if (len <= descriptor_output_limit)
+        write_to_buffer_raw(d, data, static_cast<int>(len));
 }
 
-ssize_t net_write_raw(DESCRIPTOR_DATA *d, const unsigned char *data, size_t len)
+static bool append_wire_output(DESCRIPTOR_DATA *d, const unsigned char *data, size_t len)
 {
-    ssize_t total = 0;
+    if (len == 0)
+        return true;
 
-    while (total < (ssize_t)len)
+    std::string &pending = wire_output[d];
+    if (len > wire_output_limit || pending.size() > wire_output_limit - len)
     {
-        ssize_t n = write(d->descriptor, data + total, len - total);
-
-        if (n <= 0)
-        {
-            if (errno == EINTR)
-                continue;
-
-            if (errno == EWOULDBLOCK || errno == EAGAIN)
-                break;
-
-            perror("net_write_raw");
-            close_socket(d, TRUE);
-            return -1;
-        }
-
-        total += n;
+        bug("Socket %d is not draining its output.", d->descriptor);
+        d->write_failed = true;
+        return false;
     }
 
-    return total;
+    pending.append(reinterpret_cast<const char *>(data), len);
+    return true;
 }
 
-ssize_t net_write(DESCRIPTOR_DATA *d, const unsigned char *data, size_t len)
+static bool drain_wire_output(DESCRIPTOR_DATA *d)
 {
+    if (d->write_failed || d->descriptor < 0)
+        return false;
+    const auto queued = wire_output.find(d);
+    if (queued == wire_output.end())
+        return true;
+
+    std::string &pending = queued->second;
+    size_t sent = 0;
+    while (sent < pending.size())
+    {
+        const ssize_t count = write(d->descriptor, pending.data() + sent, pending.size() - sent);
+        if (count > 0)
+            sent += count;
+        else if (count < 0 && errno == EINTR)
+            continue;
+        else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOSR))
+            break;
+        else
+        {
+            d->write_failed = true;
+            return false;
+        }
+    }
+    if (sent == pending.size())
+        wire_output.erase(queued);
+    else
+        pending.erase(0, sent);
+    return true;
+}
+
 #ifdef MCCP
-    if (d->compressing == TELOPT_COMPRESS2)
+static bool deflate_to_wire(DESCRIPTOR_DATA *d, const unsigned char *data, size_t len, int mode)
+{
+    z_stream *stream = d->out_compress;
+    stream->next_in = const_cast<unsigned char *>(data);
+    stream->avail_in = static_cast<uInt>(len);
+
+    for (;;)
     {
-        z_stream *s = d->out_compress;
-
-        s->next_in  = (unsigned char *)data;
-        s->avail_in = len;
-
-        size_t total_out = 0;
-
-        while (s->avail_in > 0)
+        stream->next_out = d->out_compress_buf;
+        stream->avail_out = COMPRESS_BUF_SIZE;
+        const int result = deflate(stream, mode);
+        const size_t produced = COMPRESS_BUF_SIZE - stream->avail_out;
+        if ((result != Z_OK && result != Z_BUF_ERROR && result != Z_STREAM_END)
+            || !append_wire_output(d, d->out_compress_buf, produced))
         {
-            /* === FIX: use persistent buffer instead of stack === */
-            s->next_out  = d->out_compress_buf;        // ✅ WAS: stack buffer
-            s->avail_out = COMPRESS_BUF_SIZE;
-
-            if (deflate(s, Z_SYNC_FLUSH) != Z_OK)
-                return -1;
-
-            size_t have = COMPRESS_BUF_SIZE - s->avail_out;
-
-            if (have > 0)
-            {
-                if (net_write_raw(d, d->out_compress_buf, have) < 0)
-                    return -1;
-
-                total_out += have;
-            }
+            d->write_failed = true;
+            return false;
         }
-
-        return total_out; /* approximate */
+        d->mccp_bytes_out += produced;
+        if (result == Z_STREAM_END || (mode == Z_SYNC_FLUSH && stream->avail_in == 0 && stream->avail_out > 0))
+            break;
+        if (result == Z_BUF_ERROR)
+        {
+            d->write_failed = true;
+            return false;
+        }
     }
+
+    d->mccp_bytes_in += len;
+    return true;
+}
 #endif
 
-    return net_write_raw(d, data, len);
+static bool queue_descriptor_output(DESCRIPTOR_DATA *d)
+{
+    if (d->write_failed)
+        return false;
+    if (d->outtop == 0)
+        return true;
+
+    const auto *data = reinterpret_cast<const unsigned char *>(d->outbuf);
+    bool queued;
+#ifdef MCCP
+    if (d->out_compress)
+        queued = deflate_to_wire(d, data, d->outtop, Z_SYNC_FLUSH);
+    else
+#endif
+        queued = append_wire_output(d, data, d->outtop);
+
+    if (queued)
+    {
+        d->outtop = 0;
+        d->outbuf[0] = '\0';
+    }
+    return queued;
 }
 
 void send_gmcp(DESCRIPTOR_DATA *d, const std::string &msg)
 {
-    unsigned char buf[2048];
-    int len = 0;
+    if (!d || d->closing || d->write_failed || d->descriptor < 0)
+        return;
 
-    int msg_len = msg.size();
+    if (msg.size() > descriptor_output_limit - 5)
+        return;
 
-    if (msg_len > (int)sizeof(buf) - 6)
-        msg_len = sizeof(buf) - 6;
-
-    buf[len++] = IAC;
-    buf[len++] = SB;
-    buf[len++] = TELOPT_GMCP;
-
-    for (int i = 0; i < msg_len && len < (int)sizeof(buf) - 2; i++)
+    const char header[] = { static_cast<char>(IAC), static_cast<char>(SB), static_cast<char>(TELOPT_GMCP) };
+    std::string frame(header, sizeof(header));
+    for (unsigned char byte : msg)
     {
-        unsigned char c = (unsigned char)msg[i];
-
-        if (c == IAC)
-        {
-            if (len < (int)sizeof(buf) - 3)
-            {
-                buf[len++] = IAC;
-                buf[len++] = IAC;
-            }
-            else
-            {
-                break;
-            }
-        }
-        else
-        {
-            buf[len++] = c;
-        }
+        frame += static_cast<char>(byte);
+        if (byte == IAC)
+            frame += static_cast<char>(IAC);
     }
+    frame += static_cast<char>(IAC);
+    frame += static_cast<char>(SE);
 
-    buf[len++] = IAC;
-    buf[len++] = SE;
-
-    write_to_buffer_raw(d, buf, len);
+    if (frame.size() <= descriptor_output_limit)
+        write_to_buffer_raw(d, frame);
 }
 
 #define MSSP_VAR 1
@@ -7237,25 +6994,41 @@ extern int			top_mob_index;
 extern int			top_obj_index;
 extern int			top_room;
 
+static void mssp_add(unsigned char *buf, size_t cap, int *len, const char *name, const char *value)
+{
+    if (!buf || !len || !name || !value)
+        return;
+    if (*len < 0 || static_cast<size_t>(*len) >= cap)
+        return;
+
+    size_t nlen = strlen(name);
+    size_t vlen = strlen(value);
+    size_t needed = 2 + nlen + vlen;
+    if (needed > cap - static_cast<size_t>(*len))
+        return;
+
+    buf[(*len)++] = MSSP_VAR;
+    memcpy(buf + *len, name, nlen);
+    *len += static_cast<int>(nlen);
+    buf[(*len)++] = MSSP_VAL;
+    memcpy(buf + *len, value, vlen);
+    *len += static_cast<int>(vlen);
+}
 
 void send_mssp(DESCRIPTOR_DATA *d)
 {
     unsigned char buf[2048];
     int len = 0;
-    if (!d)
+    const size_t data_cap = sizeof(buf) - 2; /* reserve 2 bytes for IAC SE */
+
+    if (!d || d->closing || d->write_failed || d->descriptor < 0)
         return;
 
     buf[len++] = IAC;
     buf[len++] = SB;
     buf[len++] = TELOPT_MSSP;
 
-#define ADD(name, value) \
-    do { \
-        buf[len++] = MSSP_VAR; \
-        len += snprintf((char *)buf + len, sizeof(buf) - len, "%s", name); \
-        buf[len++] = MSSP_VAL; \
-        len += snprintf((char *)buf + len, sizeof(buf) - len, "%s", value); \
-    } while (0)
+#define ADD(name, value) mssp_add(buf, data_cap, &len, (name), (value))
 
     char players[16], uptime[32], port[16];
     char areas[16], rooms[16], mobs[16], objs[16];
@@ -7264,7 +7037,7 @@ void send_mssp(DESCRIPTOR_DATA *d)
 
     snprintf(players, sizeof(players), "%d", player_count);
     snprintf(uptime, sizeof(uptime), "%ld", (long)boot_time);
-    snprintf(port, sizeof(uptime), "%d", control);
+    snprintf(port, sizeof(port), "%d", s_mud_port);
     snprintf(areas, sizeof(areas), "%d", top_area);
     snprintf(rooms, sizeof(rooms), "%d", top_room);
     snprintf(mobs, sizeof(mobs), "%d", top_mob_index);

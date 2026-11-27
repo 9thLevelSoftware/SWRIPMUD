@@ -143,14 +143,13 @@ D9
 ~
 0 -1 19
 > speech_prog turkey~
-mpoload 21016
-drop turkey
-mpecho A turkey steps in, and is suddenly vaporized into a delicious meal.
+mpoload 10313
+drop ration
+mpecho A packaged ration drops from a dispenser.
 ~
 > speech_prog Gerard MacManus~
 if name($n) == Den
-mpechoat $n You are taken to the Officer's Lounge.
-mptransfer $n 9493
+mpechoat $n The Officer's Lounge is unavailable.
 endif
 ~
 > speech_prog Newbie Academy~
@@ -336,7 +335,7 @@ D2
 D3
 ~
 ~
-1 9599 118
+1 -1 118
 S
 #110
 The Omnipresent Mail Room~
@@ -513,8 +512,7 @@ mpecho a panel and clean up the blood, while a large prison droid drags
 mpecho another ewok out and straps him to the table.
 ~
 > speech_prog goober123goober ~
-mpat gilito mpoload 22501 
-mpat gilito drop glitterstim 
+break
 ~
 |
 S

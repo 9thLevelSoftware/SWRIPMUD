@@ -86,7 +86,7 @@ const	struct	race_type	race_table	[MAX_RACE]	=
 	"Chadra-Fan",	FLAGSET(AFF_INFRARED),	-3,	+3,	0,	+2,	-1,	0,	0,	0,	-85,	0,	FLAGSET_EMPTY,	FLAGSET_EMPTY,	0,	     LANG_CHADRA_FAN
     },
     {
-	"Quarren",	FLAGSET(AFF_AQUA_BREATH,AFF_INFRARED),	-1,	+1,	0,	+1,	-1,	0,	0,	0,	-10,	0,	FLAGSET_EMPTY,	FLAGSET_EMPTY,	0,	     LANG_MON_CALAMARI
+	"Quarren",	FLAGSET(AFF_AQUA_BREATH,AFF_INFRARED),	-1,	+1,	0,	+1,	-1,	0,	0,	0,	-10,	0,	FLAGSET_EMPTY,	FLAGSET_EMPTY,	0,	     LANG_QUARREN
     },
     {
 	"Sullustan",	FLAGSET_EMPTY,		 -2,	0,	+2,	+5,	0,	+1,	0,	0,	0,	0,	FLAGSET_EMPTY,	FLAGSET_EMPTY,	0,	     LANG_SULLUSTAN
@@ -115,7 +115,7 @@ const	struct	race_type	race_table	[MAX_RACE]	=
 	"Barabel",		FLAGSET_EMPTY,	+5,	-1,	-1,	1,	+5,	-4,	0,	0,	+220,	0,	FLAGSET_EMPTY,	FLAGSET_EMPTY,	0,	     LANG_BARABEL
     },//++cmbt, -dip/lead
     {
-	"Bothan",	FLAGSET(AFF_SNEAK,AFF_SCRYING),	0,	+3,	-3,	+4,	-4,	+4,	0,	0,	0,	0,	FLAGSET_EMPTY,	FLAGSET_EMPTY,	0,	     LANG_BOTHAN + LANG_COMMON
+	"Bothan",	FLAGSET(AFF_SNEAK,AFF_SCRYING),	0,	+3,	-3,	+4,	-4,	+4,	0,	0,	0,	0,	FLAGSET_EMPTY,	FLAGSET_EMPTY,	0,	     LANG_BOTHAN
     },//++lead/dip, -eng
     {
 	"Togorian",	FLAGSET(AFF_DETECT_HIDDEN,AFF_SNEAK),	+4,	+4,	0,	0,	-2,	-11,	0,	0,	+40,	0,	FLAGSET_EMPTY,	FLAGSET_EMPTY,	0,	     LANG_TOGORIAN
@@ -145,7 +145,7 @@ const	struct	race_type	race_table	[MAX_RACE]	=
 	"Coynite",	FLAGSET(AFF_SNEAK),	+4,	+2,	+1,	0,	+1,	-3,	0,	0,	+30,	0,	FLAGSET_EMPTY,	FLAGSET_EMPTY,	0,	     LANG_COYNITE
     },//++combat/lead, +bh, -piloting/dip
     {
-	"Protocal Droid",	FLAGSET(AFF_AQUA_BREATH,AFF_INFRARED),	-5,	-5,	+5,	+5,	0,	+5,	0,	0,	0,	0,	FLAGSET_EMPTY,	FLAGSET(RIS_SLEEP,RIS_ELECTRICITY),	0,	     LANG_BINARY
+	"Protocol Droid",	FLAGSET(AFF_AQUA_BREATH,AFF_INFRARED),	-5,	-5,	+5,	+5,	0,	+5,	0,	0,	0,	0,	FLAGSET_EMPTY,	FLAGSET(RIS_SLEEP,RIS_ELECTRICITY),	0,	     LANG_BINARY
     },//(+)dip
 	{
 	"Assassin Droid",	FLAGSET(AFF_AQUA_BREATH,AFF_INFRARED),	+4,	+5,	-10,	+2,	+3,	-9,	0,	0,	100,	0,	FLAGSET(RIS_NONMAGIC),	FLAGSET_EMPTY,	0,	     LANG_BINARY
@@ -171,7 +171,6 @@ const	struct	race_type	race_table	[MAX_RACE]	=
 
 const flag_name obj_flag_table[] =
 {
-    { PIPE_FIRST,     "Pipe_First" },
     { PIPE_TAMPED,     "Pipe_Tamped" },
     { PIPE_LIT,        "Pipe_Lit" },
     { PIPE_HOT,        "Pipe_Hot" },
@@ -180,8 +179,6 @@ const flag_name obj_flag_table[] =
     { PIPE_GOINGOUT,    "Pipe_Goingout"},
     { PIPE_BURNT,		"Pipe_Burnt"},
     { PIPE_FULLOFASH,	"Pipe_FullofAsh"},
-    { PIPE_MAX,          "Pipe_Max"},
-    { WEAPON_FIRST,     "Weapon_First"},
     { WEAPON_VIBRO_AXE, "VibroAxe"},
     { WEAPON_VIBRO_BLADE, "VibroBlade"},
     { WEAPON_LIGHTSABER, "Lightsaber"},
@@ -189,11 +186,10 @@ const flag_name obj_flag_table[] =
     { WEAPON_CLAW, "Claw"},
     { WEAPON_BLASTER, "Blaster"},
     { WEAPON_POLE, "Pole"}, 
-    { WEAPON_BLUDGEON, "Budgeon"},
+    { WEAPON_BLUDGEON, "Bludgeon"},
     { WEAPON_BOWCASTER, "Bowcaster"},
     { WEAPON_BLADE, "Blade"},       
     { WEAPON_FORCE_PIKE, "ForcePike"},
-    { WEAPON_MAX, "Weapon_Max"},
     { ITEM_GLOW, "Glow"},
     { ITEM_HUM, "Hum"},
     { ITEM_DARK, "Dark"},
@@ -233,10 +229,11 @@ const flag_name obj_flag_table[] =
     { ITEM_HASTE, "Haste"},
     { ITEM_DRAIN, "Drain"},
     { ITEM_LIGHTNING_BLADE, "LightningBlade"},
-    { ITEM_MAX, "Item_Max"},
 
     { (size_t)-1, nullptr } // terminator
 };
+
+const size_t obj_flag_table_count = FLAG_TABLE_COUNT(obj_flag_table);
 
 const flag_name command_groups[] =
 {
@@ -250,7 +247,6 @@ const flag_name command_groups[] =
     { CGROUP_HEAD_ADMIN,   "[Head Administrator]" },
     { CGROUP_ADMIN,        "[Administrator]" },
     { CGROUP_QUEST_MASTER, "[Quest Master]" },
-    { MAX_COMMAND_GROUP,   "CGROUP_MAX"},
     { (size_t)-1, nullptr } // terminator
 };
 
@@ -290,6 +286,7 @@ const flag_name npc_race[] =
     { RACE_GAND,                "Gand" },
     { RACE_DUROS,               "Duros" },
     { RACE_COYNITE,             "Coynite" },
+    { RACE_PROTOCAL_DROID,      "Protocol Droid" },
     { RACE_PROTOCAL_DROID,      "Protocal Droid" },
     { RACE_ASSASSIN_DROID,      "Assassin Droid" },
     { RACE_GLADIATOR_DROID,     "Gladiator Droid" },
@@ -300,7 +297,7 @@ const flag_name npc_race[] =
 
     { 41, "Saurin" },
     { 42, "Snivvian" },
-    { 43, "Gand" },
+    { 43, "Gand-NPC" },
     { 44, "Gungan" },
     { 45, "Weequay" },
     { 46, "Bith" },
@@ -316,7 +313,7 @@ const flag_name npc_race[] =
     { 56, "Dewback" },
     { 57, "Rancor" },
     { 58, "Ronto" },
-    { 59, "Noghri" },
+    { 59, "Noghri-NPC" },
 
     { 60, "r60" },
     { 61, "r61" },
@@ -349,11 +346,10 @@ const flag_name npc_race[] =
     { 88, "r88" },
     { 89, "r89" },
     { 90, "r90" },    
-    { 91, "max_npc_race" },    
     { (size_t)-1, nullptr } // terminator
 };
 
-char *	const	ability_name	[MAX_ABILITY] =
+const char *	const	ability_name	[MAX_ABILITY] =
 {
 "combat", "piloting", "engineering", "bounty hunting", "smuggling", "diplomacy", 
 "leadership", "force", "commando"
@@ -679,7 +675,6 @@ const flag_name obj_attack_table[] =
     { WEAPON_BOWCASTER, "shot"},
     { WEAPON_BLADE, "stab"},           
     { WEAPON_FORCE_PIKE, "pierce"}, 
-    { WEAPON_MAX, "Weapon_Max"},
 
     { (size_t)-1, nullptr } // terminator
 };

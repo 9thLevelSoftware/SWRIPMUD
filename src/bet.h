@@ -17,7 +17,12 @@
 * ------------------------------------------------------------------------ *
 *			Auction bid parsing routines			   *
 ****************************************************************************/
+#ifndef BET_H
+#define BET_H
+
 #include <ctype.h>
+#include <climits>
+#include <string>
 
 
 /*
@@ -59,26 +64,48 @@
   once.
 */
 
-int advatoi(const std::string& s)
+inline int advatoi(const std::string& s)
 {
-    int number = 0;       /* number to be returned */
+    long long number = 0; /* number to be returned, checked against INT_MAX */
     int multiplier = 0;   /* multiplier used to get the extra digits right */
     size_t pos = 0;
+
+    if (s.empty() || !isdigit(static_cast<unsigned char>(s[0])))
+        return 0;
 
     /*
      * as long as the current character is a digit add to current number
      */
     while (pos < s.size() && isdigit(static_cast<unsigned char>(s[pos])))
-        number = (number * 10) + (s[pos++] - '0');
-
-    char c = (pos < s.size()) ? UPPER(s[pos]) : '\0';
-
-    switch (c)
     {
-        case 'K': number *= (multiplier = 1000);    ++pos; break;
-        case 'M': number *= (multiplier = 1000000); ++pos; break;
-        case '\0': break;
-        default: return 0; /* not k nor m nor NULL - return 0! */
+        int digit = s[pos++] - '0';
+        if (number > (static_cast<long long>(INT_MAX) - digit) / 10LL)
+            return 0;
+        number = (number * 10LL) + digit;
+    }
+
+    if (pos < s.size())
+    {
+        char c = static_cast<char>(toupper(static_cast<unsigned char>(s[pos])));
+        switch (c)
+        {
+            case 'K':
+                multiplier = 1000;
+                if (number > static_cast<long long>(INT_MAX) / multiplier)
+                    return 0;
+                number *= multiplier;
+                ++pos;
+                break;
+            case 'M':
+                multiplier = 1000000;
+                if (number > static_cast<long long>(INT_MAX) / multiplier)
+                    return 0;
+                number *= multiplier;
+                ++pos;
+                break;
+            default:
+                return 0; /* not k nor m nor end - return 0! */
+        }
     }
 
     /* if any digits follow k/m, add those too */
@@ -88,15 +115,48 @@ int advatoi(const std::string& s)
     {
         /* the further we get to right, the less the digit 'worth' */
         multiplier /= 10;
-        number = number + ((s[pos++] - '0') * multiplier);
+        long long add = static_cast<long long>(s[pos++] - '0') * multiplier;
+        if (number > static_cast<long long>(INT_MAX) - add)
+            return 0;
+        number += add;
     }
 
-    /* return 0 if non-digit character was found, other than NULL */
-    if (pos < s.size() && !isdigit(static_cast<unsigned char>(s[pos])))
+    /* return 0 if any remaining character is non-digit (e.g., "14k1234x") */
+    while (pos < s.size())
+    {
+        if (!isdigit(static_cast<unsigned char>(s[pos])))
+            return 0;
+        ++pos;
+    }
+
+    if (number < 0 || number > INT_MAX)
         return 0;
 
     /* anything left is likely extra digits (ie: 14k4443 -> 3 is extra) */
-    return number;
+    return static_cast<int>(number);
+}
+
+
+/*
+  Parse strict non-negative integer suffix for parsebet relative modifiers.
+*/
+inline bool parsebet_uint(const std::string& s, size_t start, long long& out)
+{
+    if (start >= s.size())
+        return false;
+
+    long long val = 0;
+    for (size_t i = start; i < s.size(); ++i)
+    {
+        if (!isdigit(static_cast<unsigned char>(s[i])))
+            return false;
+        int digit = s[i] - '0';
+        if (val > (static_cast<long long>(INT_MAX) - digit) / 10LL)
+            return false;
+        val = (val * 10LL) + digit;
+    }
+    out = val;
+    return true;
 }
 
 
@@ -122,29 +182,52 @@ int advatoi(const std::string& s)
   gives 10,000 etc.
 
 */
-int parsebet(const int currentbet, const std::string& s)
+inline int parsebet(const int currentbet, const std::string& s)
 {
     /* check to make sure it's not blank */
-    if (!s.empty())
+    if (s.empty())
+        return 0;
+
+    /* if first char is a digit, use advatoi */
+    if (isdigit(static_cast<unsigned char>(s[0])))
+        return advatoi(s);
+
+    if (currentbet <= 0)
+        return 0;
+
+    if (s[0] == '+')      /* add percent (default 25%) */
     {
-        /* if first char is a digit, use advatoi */
-        if (isdigit(static_cast<unsigned char>(s[0])))
-            return advatoi(s);
+        long long pct = 25;
+        if (s.size() > 1 && !parsebet_uint(s, 1, pct))
+            return 0;
 
-        if (s[0] == '+')      /* add percent (default 25%) */
-        {
-            if (s.size() == 1)
-                return (currentbet * 125) / 100;
-            return (currentbet * (100 + atoi(s.c_str() + 1))) / 100;
-        }
+        long long factor = 100LL + pct;
+        long long res = (static_cast<long long>(currentbet) * factor) / 100LL;
+        if (res <= 0 || res > INT_MAX)
+            return 0;
+        return static_cast<int>(res);
+    }
 
-        if (s[0] == '*' || s[0] == 'x') /* multiply (default is by 2) */
-        {
-            if (s.size() == 1)
-                return (currentbet * 2);
-            return (currentbet * atoi(s.c_str() + 1));
-        }
+    if (s[0] == '*' || s[0] == 'x') /* multiply (default is by 2) */
+    {
+        long long mult = 2;
+        if (s.size() > 1 && !parsebet_uint(s, 1, mult))
+            return 0;
+
+        if (mult <= 0)
+            return 0;
+
+        long long cur = static_cast<long long>(currentbet);
+        if (cur > static_cast<long long>(INT_MAX) / mult)
+            return 0;
+
+        long long res = cur * mult;
+        if (res <= 0 || res > INT_MAX)
+            return 0;
+        return static_cast<int>(res);
     }
 
     return 0;
 }
+
+#endif /* BET_H */

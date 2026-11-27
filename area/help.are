@@ -1,3 +1,5 @@
+#AREA   Help Index~
+
 #HELPS
 
 0 !~
@@ -2323,7 +2325,6 @@ Military Ranks you may access via &WHELP IMPRANKS &R&w
 &Yclans&c....... shows a list of organizations. this command is IC.&n
 &Ydonate &c...... donates money to the clan funds. 
 &Ywithdraw &c.... withdraws money from the clan funds. 
-&Ynewclan &c..... allows crimelords to start a new crime clan
 &Yappoint &c..... allows leader to appoint a number1 and number2
 &Ydemote &c...... takes away members status in the clan. 
 &Yempower &c..... gives member special powers (ie. withdraw or induct)
@@ -4764,7 +4765,7 @@ SHOUT message &cmessage is only heard by people who are awake
 &Y
 YELL message &cmessage is only heard by people in the area 
 &Y
-CLANTALK, ORDERTALK, AND GUILDTALK &cchannels for clans, guilds, and orders
+CLANTALK &cchannel for members of your clan
 &Y
 &RAlso see&W:&P LANGUAGES, NOTES, and MAIL 
 ~
@@ -5195,14 +5196,14 @@ See HSET, PCOLORS.
 | northwest southeast southwest sleep  |--------------------------------------|
 | rest sit wake stand somewhere unlock |               INFORMATION            |
 | lock open close scan scry look leave | death CR reimb rules damage commands |
-| up down enter climb where fly float  | areas experience score title weather |
+| up down enter climb where float      | areas experience score title weather |
 |--------------------------------------| channels description experience note |
 |              CONFIG OPTIONS          | who wizlist story tick MOTD news bug |
 | autoloot autogold telnetga autoexit  | mail time password slist report typo |
 | nice flee norecall blank combine rip | powers skills weapons languages idea |
 | nointro prompt ansi autosac shovedrag|--------------------------------------|
 |--------------------------------------|               COMMUNICATION          |
-|                 OBJECTS              | social quest clan ordertalk guildtalk|
+|                 OBJECTS              | social quest clan clantalk           |
 |  get put  drop give  sacrifice hold  | say tell chat question answer auction|
 |  wield  wear remove  inventory value | avatar shout yell counciltalk newbie |
 |  appraise list  buy sell  equipment  |--------------------------------------|
@@ -7274,12 +7275,6 @@ your recovery, and wish to continue adventuring, type WAKE or STAND.
 FLY DRIVE 
 ~
 
-101 MPADVANCE~
-Syntax: MPADVANCE <name> <level>
-
-Advances the level of a player (not functional in prototype programs).
-~
-
 101 MPAPPLY MPAPPLYB~
 Syntax:  mpapply <victim>
 Syntax:  mpapplyb <victim>
@@ -7315,11 +7310,10 @@ MPASOUND        <phrase>              MPJUNK         <name/var>
 MPECHOAROUND    <name/var> <phrase>   MPECHOAT       <name/var> <phrase>
 MPECHO          <phrase>              MPMLOAD        <mob vnum>
 MPOLOAD         <object vnum>         MPPURGE        <object/mobile name>
-MPADVANCE       <player name> <level> MPTRANSFER     <name/all>
+                                     MPTRANSFER     <name/all>
 MPFORCE         <name/all> <actions>  MPSLAY         <victim>
 MPDREAM         <name> <phrase>       MPDAMAGE       <name> <#hps> 
 MPCLOSEPASSAGE  <room> <direction>    MPOPENPASSAGE  <origin> <dest> <dir>
-** MPPRACTICE   <victim> (skill|power) (max_percent)
 Mobs only:
 MPKILL           <name>                 MPGOTO <vnum>
 MPAT             <vnum> <command>
@@ -7465,30 +7459,6 @@ Closes a passage to a room (does not affect pre-existing doors that were
 not created with mpopenpassage)
 ~
 
-101 MPPKSET~
-Syntax:  mppkset <victim> yes/no
- 
-This command tells the mob to set the victim to either deadly or
-non-deadly status.
- 
-Mppkset yes will set the victim to deadly status.
- 
-Mppkset no will set the victim to non-deadly status.
- 
-~
-
-101 MPPRACTICE~
-Syntax:  mppractice <victim> <skill/power/language> <amount>
- 
-This command will set the victim's percentage of proficiency in the
-specified skill/power/language to the specified amount.
- 
-It cannot train a character in a skill/power/language the character does
-not have as a part of its class and that it does not already have as a
-result of its level.  In other words, it canot train a warrior in
-fireball, or a level 1 thief in gouge.
-~
-
 101 MPPURGE~
 Syntax: MPPURGE <object/mobile>
 
@@ -7522,12 +7492,6 @@ See MPEDIT, TRIGGER, MPTRIGGERS, MPCOMMANDS, IFCHECKS, IFCHECKS2, VARIABLES
 Syntax: MPTRANSFER <name/all>
 
 Transfers one or all in the room to a specified location.
-~
-
-101 MRANGE ORANGE~
-These functions, when complete, will function similarly to 'rat', but
-will be used to manipulate ranges of mobiles and objects instead of
-rooms.
 ~
 
 101 MSET RSET~
@@ -11677,13 +11641,6 @@ where to upgrade.
 &RSEE ALSO&W: &Pshow_module, install_module, 
               remove_module, ordership&R&W 
               &Pmodules&R&w
-~
-
-1 UPGRADESHIP~
-&CSyntax &W:&Y upgradeship <ship name> <part to upgrade> <amount>
- 
-&RAlso see&W:&P UPGRADES, MILITARY UPGRADES, MILITARYUPG2, CIVILIAN
-UPGRADES, CIVILIANUPG2 
 ~
 
 1 USE ACTIVATE~

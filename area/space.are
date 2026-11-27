@@ -2905,7 +2905,7 @@ All of the ships in this part of the shipyard are ready for flight.
 Many of them are owned by the rebel alliance but there are often several
 private ones docked here as well as some available to rent
 ~
-0 536870912 1
+0 536870928 1
 D0
 ~
 ~
@@ -4077,7 +4077,7 @@ surface. Along the perimiters of the station shield protected
 openings allow spacecraft to leave the shipyard into the surrounding
 starsystem.
 ~
-0 536870912 1
+0 536870928 1
 D2
 ~
 ~
@@ -4242,7 +4242,7 @@ surface. Along the perimiters of the station shield protected
 openings allow spacecraft to leave the shipyard into the surrounding
 starsystem.
 ~
-0 536870912 1
+0 536870928 1
 D0
 ~
 ~
@@ -6864,7 +6864,7 @@ D0
 D2
 ~
 ~
-2049 4744 32224
+2049 -1 32224
 S
 #32224
 Passenger Lounge~
@@ -6879,7 +6879,7 @@ more difused light for social rides.
 D0
 ~
 ~
-1 4744 32223
+1 -1 32223
 S
 #32225
 Shuttle Cockpit~
@@ -9770,7 +9770,7 @@ M 1 32112 10 32023
 E 1 53 1 16
 M 1 32036 1 32035
 E 1 53 1 16
-E 1 53 1 16
+* Duplicate wield reset: E 1 53 1 16
 M 1 32037 2 32037
 M 1 32037 2 32037
 E 1 53 1 16

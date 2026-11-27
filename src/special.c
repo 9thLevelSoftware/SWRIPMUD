@@ -52,6 +52,7 @@ bool  remove_obj      args( ( CHAR_DATA *ch, int iWear, bool fReplace ) );
  * The following special functions are available for mobiles.
  */
 DECLARE_SPEC_FUN(	spec_jedi		);
+DECLARE_SPEC_FUN( spec_jedi_healer );
 DECLARE_SPEC_FUN(	spec_dark_jedi       	);
 DECLARE_SPEC_FUN(	spec_fido		);
 DECLARE_SPEC_FUN(	spec_guardian		);
@@ -80,6 +81,7 @@ DECLARE_SPEC_FUN(       spec_questmaster         );
 SPEC_FUN *spec_lookup( const std::string& name )
 {
     if ( !str_cmp( name, "spec_jedi"	  ) ) return spec_jedi;
+    if ( !str_cmp( name, "spec_jedi_healer" ) ) return spec_jedi_healer;
     if ( !str_cmp( name, "spec_dark_jedi"	  ) ) return spec_dark_jedi;
     if ( !str_cmp( name, "spec_fido"		  ) ) return spec_fido;
     if ( !str_cmp( name, "spec_guardian"	  ) ) return spec_guardian;
@@ -110,6 +112,7 @@ SPEC_FUN *spec_lookup( const std::string& name )
 char *lookup_spec( SPEC_FUN *special )
 {
     if ( special == spec_jedi	        )	return "spec_jedi";
+    if ( special == spec_jedi_healer ) return "spec_jedi_healer";
     if ( special == spec_dark_jedi	)	return "spec_dark_jedi";
     if ( special == spec_fido		)	return "spec_fido";
     if ( special == spec_guardian	)	return "spec_guardian";
@@ -141,165 +144,151 @@ bool spec_questmaster( CHAR_DATA *ch )
 
 bool spec_newbie_pilot( CHAR_DATA *ch )
 {
-    int           home = 32149;
-    CHAR_DATA   * victim;
-    CHAR_DATA   * v_next;
-    OBJ_DATA    * obj;
-    char          buf[MAX_STRING_LENGTH]; // Needed for do_fun command
-    bool          diploma = FALSE;
-    
-    for ( victim = ch->in_room->first_person; victim; victim = v_next )
-    {
-	v_next = victim->next_in_room;
-	
-    	if ( IS_NPC(victim) || victim->position == POS_FIGHTING )
-	   continue;
+    if ( !ch || !ch->in_room )
+        return FALSE;
 
-        for ( obj = victim->last_carrying; obj; obj = obj->prev_content )
-	    if ( obj->pIndexData->vnum == OBJ_VNUM_SCHOOL_DIPLOMA )
-	       diploma = TRUE;
-     
+    constexpr int pluogus = 32149;
+    ROOM_INDEX_DATA *shuttle = ch->in_room;
+    CHAR_DATA *v_next;
+    for ( CHAR_DATA *victim = shuttle->first_person; victim; victim = v_next )
+    {
+        v_next = victim->next_in_room;
+        if ( IS_NPC(victim) || victim->position == POS_FIGHTING )
+            continue;
+
+        bool diploma = false;
+        for ( OBJ_DATA *obj = victim->last_carrying; obj; obj = obj->prev_content )
+        {
+            if ( obj->pIndexData && obj->pIndexData->vnum == OBJ_VNUM_SCHOOL_DIPLOMA )
+            {
+                diploma = true;
+                break;
+            }
+        }
         if ( !diploma )
-             continue;
-              
+            continue;
+
+        int home = pluogus;
+        const char *arrival = "After a brief journey the shuttle docks with the Serin Pluogus.\n\n";
         switch ( victim->race )
         {
-           case RACE_MON_CALAMARI:
-                 home = 21100;
-                 echo_to_room( AT_ACTION , ch->in_room, "After a brief journey you arrive on Mon Calamari.\n\n" );
-                 break;
-           
-           case RACE_QUARREN:
-                 home = 6904;
-                 echo_to_room( AT_ACTION , ch->in_room, "After a brief journey you arrive on Mon Calamari.\n\n" );
-                 break;
-
-           case RACE_GAMORREAN:
-                 home = 28038;
-                 echo_to_room( AT_ACTION , ch->in_room, "After a brief journey you arrive on Gamorr.\n\n" );
-                 break;
-
-           case RACE_ADARIAN:
-                 home = 29006;
-                 echo_to_room( AT_ACTION , ch->in_room, "After a brief journey you arrive on Adari.\n\n" );
-                 break;
-           
-           case RACE_JAWA:
-                 home = 31821;
-                 echo_to_room( AT_ACTION , ch->in_room, "After a brief journey you arrive on Tatooine.\n\n" );
-                 break;
-
-           case RACE_WOOKIEE:
-                 home = 28600;
-                 echo_to_room( AT_ACTION , ch->in_room, "After a brief journey you arrive on Kashyyyk.\n\n" );
-                 break;
-           
-           case RACE_HUMAN:
-                 home = 201;
-                 echo_to_room( AT_ACTION , ch->in_room, "After a brief journey you arrive at Coruscants Menari Spaceport.\n\n" );
-                 break;
-
-/*           
-           case RACE_NOGHRI:
-                 home = 1001;
-                 echo_to_room( AT_ACTION , ch->in_room, "After a brief journey you arrive at Honoghr's Nystao Spaceport.\n\n" );
-                 break;
-*/
-           default:
-                 SPRINTF ( buf , "Hmm, a %s." , race_table[victim->race].race_name );
-                 do_look ( ch, victim->name );
-                 do_say ( ch, buf );
-                 do_say ( ch, "You're home planet is a little hard to get to right now." );
-                 do_say ( ch, "I'll take you to the Pluogus instead." );
-                 echo_to_room( AT_ACTION , ch->in_room, "After a brief journey the shuttle docks with the Serin Pluogus.\n\n" );
-                 break;
+            case RACE_MON_CALAMARI:
+                home = ROOM_START_MON_CALAMARIAN;
+                arrival = "After a brief journey you arrive on Mon Calamari.\n\n";
+                break;
+            case RACE_QUARREN:
+                home = ROOM_START_QUARREN;
+                arrival = "After a brief journey you arrive on Mon Calamari.\n\n";
+                break;
+            case RACE_JAWA:
+                home = ROOM_START_JAWA;
+                arrival = "After a brief journey you arrive on Tatooine.\n\n";
+                break;
+            case RACE_WOOKIEE:
+                home = ROOM_START_WOOKIEE;
+                arrival = "After a brief journey you arrive on Kashyyyk.\n\n";
+                break;
+            case RACE_NOGHRI:
+                home = 1001; /* Nystao Spaceport */
+                arrival = "After a brief journey you arrive at Nystao Spaceport on Honoghr.\n\n";
+                break;
+            case RACE_HUMAN:
+                home = ROOM_START_HUMAN;
+                arrival = "After a brief journey you arrive at the Manarai Spaceport entrance on Coruscant.\n\n";
+                break;
         }
-        
-        char_from_room ( victim );
-        char_to_room ( victim , get_room_index ( home ) );
-        
-        do_look ( victim , "" );
-        
-        echo_to_room( AT_ACTION , ch->in_room, str_printf("%s steps out and the shuttle quickly returns to the academy.\n" , victim->name) );
-    }
 
-   return FALSE;
+        ROOM_INDEX_DATA *destination = get_room_index( home );
+        if ( !destination && home != pluogus )
+        {
+            destination = get_room_index( pluogus );
+            arrival = "After a brief journey the shuttle docks with the Serin Pluogus.\n\n";
+        }
+        if ( !destination )
+        {
+            destination = get_room_index( ROOM_VNUM_ALTAR );
+            arrival = "After a brief journey the shuttle reaches a safe destination.\n\n";
+        }
+        if ( !destination )
+            continue;
+
+        if ( home == pluogus && destination->vnum == pluogus )
+        {
+            char buf[MAX_STRING_LENGTH];
+            if ( victim->race >= 0 && victim->race < MAX_RACE )
+            {
+                SPRINTF( buf, "Hmm, a %s.", race_table[victim->race].race_name );
+                do_look( ch, victim->name );
+                if ( char_died(ch) || ch->in_room != shuttle )
+                    return FALSE;
+                do_say( ch, buf );
+                if ( char_died(ch) || ch->in_room != shuttle )
+                    return FALSE;
+            }
+            do_say( ch, "You're home planet is a little hard to get to right now." );
+            if ( char_died(ch) || ch->in_room != shuttle )
+                return FALSE;
+            do_say( ch, "I'll take you to the Pluogus instead." );
+            if ( char_died(ch) || ch->in_room != shuttle )
+                return FALSE;
+            if ( char_died(victim) || victim->in_room != shuttle )
+                continue;
+        }
+
+        echo_to_room( AT_ACTION, shuttle, arrival );
+        const std::string departure = str_printf(
+            "%s steps out and the shuttle quickly returns to the academy.\n", victim->name );
+        char_from_room( victim );
+        char_to_room( victim, destination );
+        do_look( victim, "" );
+
+        if ( char_died(ch) || ch->in_room != shuttle )
+            return FALSE;
+        echo_to_room( AT_ACTION, shuttle, departure );
+    }
+    return FALSE;
+}
+
+static SPELL_FUN *find_special_spell(const char *name, int &sn)
+{
+    sn = skill_lookup(name);
+    return IS_VALID_SN(sn) ? skill_table[sn]->spell_fun : nullptr;
 }
 
 bool spec_jedi( CHAR_DATA *ch )
 {
-    CHAR_DATA *victim;
-    CHAR_DATA *v_next;
-
-    if ( !IS_AWAKE(ch) || ch->fighting )
+    if ( !ch || !ch->in_room || !IS_AWAKE(ch) || ch->fighting )
         return FALSE;
 
-    for ( victim = ch->in_room->first_person; victim; victim = v_next )
-    {
-	v_next = victim->next_in_room;
-	if ( victim != ch && can_see( ch, victim ) && number_bits( 1 ) == 0 )
-	    break;
-    }
+    CHAR_DATA *victim;
+    for ( victim = ch->in_room->first_person; victim; victim = victim->next_in_room )
+        if ( victim != ch && can_see(ch, victim) && number_bits(1) == 0 )
+            break;
 
     if ( !victim )
-	return FALSE;
+        return FALSE;
 
-    switch ( number_bits( 3 ) )
-    {
-    case 0:
-//    act( AT_MAGIC, "$n utters the word 'ciroht'.", ch, NULL, NULL, TO_ROOM );
-	spell_smaug( skill_lookup( "armor" ), ch->top_level, ch, victim );
-	return TRUE;
+    static const char *const spells[] = {
+        "armor", "alertness", "cure blindness", "cure light",
+        "cure poison", "refresh", "cure serious", "beauty"
+    };
+    int sn;
+    SPELL_FUN *cast = find_special_spell(spells[number_bits(3)], sn);
+    if ( !cast )
+        return FALSE;
 
-    case 1:
-//    act( AT_MAGIC, "$n utters the word 'sunimod'.", ch, NULL, NULL, TO_ROOM );
-	spell_smaug( skill_lookup( "alertness" ), ch->top_level, ch, victim );
-	return TRUE;
-
-    case 2:
-//    act( AT_MAGIC, "$n utters the word 'suah'.", ch, NULL, NULL, TO_ROOM );
-	spell_cure_blindness( skill_lookup( "cure blindness" ),
-	    ch->top_level, ch, victim );
-	return TRUE;
-
-    case 3:
-//    act( AT_MAGIC, "$n utters the word 'nran'.", ch, NULL, NULL, TO_ROOM );
-	spell_smaug( skill_lookup( "cure light" ),
-	    ch->top_level, ch, victim );
-	return TRUE;
-
-    case 4:
-//    act( AT_MAGIC, "$n utters the word 'nyrcs'.", ch, NULL, NULL, TO_ROOM );
-	spell_cure_poison( skill_lookup( "cure poison" ),
-	    ch->top_level, ch, victim );
-	return TRUE;
-
-    case 5:
-//    act( AT_MAGIC, "$n utters the word 'gartla'.", ch, NULL, NULL, TO_ROOM );
-	spell_smaug( skill_lookup( "refresh" ), ch->top_level, ch, victim );
-	return TRUE;
-
-    case 6:
-//    act( AT_MAGIC, "$n utters the word 'naimad'.", ch, NULL, NULL, TO_ROOM );
-        spell_smaug( skill_lookup( "cure serious" ), ch->top_level, ch, victim );
-        return TRUE;
-
-    case 7:
-//    act( AT_MAGIC, "$n utters the word 'gorog'.", ch, NULL, NULL, TO_ROOM );
-        spell_smaug( skill_lookup( "beauty" ), ch->top_level, ch, victim );
-        return TRUE;
-
-    }
-
-    return FALSE;
+    cast(sn, ch->top_level, ch, victim);
+    return TRUE;
 }
 
 bool spec_clan_guard( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     CLAN_DATA *clan;
-    bool found = FALSE;
     
     if ( !IS_AWAKE(ch) || ch->fighting )
 	return FALSE;
@@ -318,9 +307,6 @@ bool spec_clan_guard( CHAR_DATA *ch )
                && ( !victim->pcdata->clan->mainclan || clan != victim->pcdata->clan->mainclan )
                && ( !clan->mainclan || clan->mainclan != victim->pcdata->clan ) )
           { 
-            if(found)
-              continue;
-                    
 	    do_yell( ch, "Hey your not allowed in here!" );
             multi_hit( ch, victim, TYPE_UNDEFINED );
             return TRUE;         
@@ -332,6 +318,9 @@ bool spec_clan_guard( CHAR_DATA *ch )
 
 bool spec_customs_smut( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     OBJ_DATA  *obj;
@@ -377,6 +366,7 @@ bool spec_customs_smut( CHAR_DATA *ch )
        
 	          act( AT_ACTION, "$n looks at $N suspiciously.", ch, NULL, victim, TO_NOTVICT );
     		  act( AT_ACTION, "$n look at you suspiciously.",   ch, NULL, victim, TO_VICT  );
+		  separate_obj( obj );
     		  BV_SET_BIT( obj->objflags , ITEM_CONTRABAND);
 	          
 	          return TRUE;
@@ -387,6 +377,7 @@ bool spec_customs_smut( CHAR_DATA *ch )
                   ch_printf( victim, "You receive %ld experience for smuggling %s.\n " , ch_exp, obj->short_descr );
                   gain_exp( victim, ch_exp , SMUGGLING_ABILITY );
        
+	          separate_obj( obj );
 	          BV_SET_BIT( obj->objflags , ITEM_CONTRABAND);
 	          return TRUE;
 	       }
@@ -417,6 +408,9 @@ bool spec_customs_smut( CHAR_DATA *ch )
 
 bool spec_customs_weapons( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     OBJ_DATA  *obj;
@@ -465,6 +459,7 @@ bool spec_customs_weapons( CHAR_DATA *ch )
        
 	         act( AT_ACTION, "$n looks at $N suspiciously.", ch, NULL, victim, TO_NOTVICT );
     		  act( AT_ACTION, "$n look at you suspiciously.",   ch, NULL, victim, TO_VICT  );
+		  separate_obj( obj );
     		  BV_SET_BIT( obj->objflags , ITEM_CONTRABAND);
 	          return TRUE;
 	       }
@@ -474,6 +469,7 @@ bool spec_customs_weapons( CHAR_DATA *ch )
                   ch_printf( victim, "You receive %ld experience for smuggling %s.\n " , ch_exp , obj->short_descr);
                   gain_exp( victim, ch_exp , SMUGGLING_ABILITY);
        
+	          separate_obj( obj );
 	          BV_SET_BIT( obj->objflags , ITEM_CONTRABAND);
 	          return TRUE;
 	       }
@@ -525,7 +521,8 @@ bool spec_customs_alcohol( CHAR_DATA *ch )
 	{
 	    if (obj->pIndexData->item_type == ITEM_DRINK_CON)
 	    { 
-	     if ( ( liquid = obj->value[2] ) >= LIQ_MAX )
+	     liquid = obj->value[2];
+	     if ( liquid < 0 || liquid >= LIQ_MAX )
 	        liquid = obj->value[2] = 0;
 	     
 	     if ( liq_table[ liquid ].liq_affect[COND_DRUNK] > 0 )
@@ -585,7 +582,8 @@ bool spec_customs_alcohol( CHAR_DATA *ch )
 	            if (content->pIndexData->item_type == ITEM_DRINK_CON
 	            && !BV_IS_SET( content->objflags , ITEM_CONTRABAND ) )
 	            {
-	               if ( ( liquid = obj->value[2] ) >= LIQ_MAX )
+	               liquid = content->value[2];
+	               if ( liquid < 0 || liquid >= LIQ_MAX )
 	                    liquid = obj->value[2] = 0;
 	               if ( liq_table[ liquid ].liq_affect[COND_DRUNK] <= 0 )
 	                    continue;
@@ -609,6 +607,9 @@ bool spec_customs_alcohol( CHAR_DATA *ch )
 
 bool spec_customs_spice( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     OBJ_DATA  *obj;
@@ -654,6 +655,7 @@ bool spec_customs_spice( CHAR_DATA *ch )
        
 	          act( AT_ACTION, "$n looks at $N suspiciously.", ch, NULL, victim, TO_NOTVICT );
     		  act( AT_ACTION, "$n look at you suspiciously.",   ch, NULL, victim, TO_VICT  );
+		  separate_obj( obj );
     		  BV_SET_BIT( obj->objflags , ITEM_CONTRABAND);
 	          return TRUE;
 	       }
@@ -663,6 +665,7 @@ bool spec_customs_spice( CHAR_DATA *ch )
                   ch_printf( victim, "You receive %ld experience for smuggling %s. \n" , ch_exp , obj->short_descr);
                   gain_exp( victim, ch_exp , SMUGGLING_ABILITY);
        
+	          separate_obj( obj );
 	          BV_SET_BIT( obj->objflags , ITEM_CONTRABAND);
 	          return TRUE;
 	       }
@@ -672,7 +675,7 @@ bool spec_customs_spice( CHAR_DATA *ch )
 	        OBJ_DATA *content;
 	        for ( content = obj->first_content; content; content = content->next_content )
 	        {
-	            if (content->pIndexData->item_type == ITEM_SPICE
+	            if ((content->item_type == ITEM_SPICE || content->item_type == ITEM_RAWSPICE)
 	            && !BV_IS_SET( content->objflags , ITEM_CONTRABAND ) )
 	            {
 	               ch_exp = UMIN( content->cost*10 , ( exp_level( victim->skill_level[SMUGGLING_ABILITY]+1) - exp_level( victim->skill_level[SMUGGLING_ABILITY])  )   );
@@ -693,6 +696,9 @@ bool spec_customs_spice( CHAR_DATA *ch )
 
 bool spec_police( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     char buf[MAX_STRING_LENGTH]; // needed for do_fun command
@@ -765,6 +771,9 @@ bool spec_police( CHAR_DATA *ch )
 
 bool spec_police_attack( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     char buf[MAX_STRING_LENGTH]; // needed for do_fun command
@@ -799,6 +808,9 @@ bool spec_police_attack( CHAR_DATA *ch )
 
 bool spec_police_undercover( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     char buf[MAX_STRING_LENGTH]; // needed for do_fun command
@@ -833,6 +845,9 @@ bool spec_police_undercover( CHAR_DATA *ch )
 
 bool spec_police_fine( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     char buf[MAX_STRING_LENGTH]; // needed for do_fun command
@@ -871,149 +886,115 @@ bool spec_police_fine( CHAR_DATA *ch )
 
 bool spec_police_jail( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room || !IS_AWAKE(ch) || ch->fighting )
+        return FALSE;
 
-    ROOM_INDEX_DATA *jail = NULL;
-    CHAR_DATA *victim;
+    ROOM_INDEX_DATA *patrol_room = ch->in_room;
     CHAR_DATA *v_next;
-    char buf[MAX_STRING_LENGTH]; // Needed for do_fun command
-
-    if ( !IS_AWAKE(ch) || ch->fighting )
-	return FALSE;
-
-    for ( victim = ch->in_room->first_person; victim; victim = v_next )
+    for ( CHAR_DATA *victim = patrol_room->first_person; victim; victim = v_next )
     {
-	v_next = victim->next_in_room;
-	if ( IS_NPC(victim) )
-	   continue;
-        if ( !can_see( ch, victim ) )
-	   continue;
-        if ( number_bits ( 1 ) == 0 ) 
-	   continue;
-	for ( size_t vip = 0 ; vip < PLANET_MAX ; vip++ )
-          if ( BV_IS_SET ( ch->vip_flags , vip ) &&  BV_IS_SET( victim->pcdata->wanted_flags , vip) ) 
-          {
-              SPRINTF( buf , "Hey you're wanted on %s!", get_flag_name(planet_flags, vip, PLANET_MAX) );
-                  do_say( ch , buf );                 
-              
-              if( vip == PLANET_ADARI )
-                     jail = get_room_index( ROOM_JAIL_ADARI );
-              else if( vip == PLANET_MON_CALAMARI )
-                switch ( number_range(1,4) )
+        v_next = victim->next_in_room;
+        if ( IS_NPC(victim) || !can_see( ch, victim ) || number_bits(1) == 0 )
+            continue;
+
+        for ( size_t vip = 0; vip < PLANET_MAX; ++vip )
+        {
+            if ( !BV_IS_SET(ch->vip_flags, vip) || !BV_IS_SET(victim->pcdata->wanted_flags, vip) )
+                continue;
+
+            ROOM_INDEX_DATA *jail = nullptr;
+            switch ( vip )
+            {
+                case PLANET_ADARI:
+                    jail = get_room_index( ROOM_JAIL_ADARI );
+                    break;
+                case PLANET_CORUSCANT:
+                    jail = get_room_index( ROOM_JAIL_CORUSCANT );
+                    break;
+                case PLANET_MON_CALAMARI:
                 {
-                  case 1:
-                   jail = get_room_index( ROOM_JAIL_MON_CALAMARI_1 );
-                   break;
-                  case 2:
-                   jail = get_room_index( ROOM_JAIL_MON_CALAMARI_2 );
-                   break;
-                  case 3:
-                   jail = get_room_index( ROOM_JAIL_QUARREN_1 );
-                   break;
-                  case 4:
-                   jail = get_room_index( ROOM_JAIL_QUARREN_2 );
-                   break;
+                    constexpr int jail_vnums[] = {
+                        ROOM_JAIL_MON_CALAMARI_1, ROOM_JAIL_MON_CALAMARI_2,
+                        ROOM_JAIL_QUARREN_1, ROOM_JAIL_QUARREN_2
+                    };
+                    ROOM_INDEX_DATA *loaded_jails[sizeof(jail_vnums) / sizeof(jail_vnums[0])];
+                    int count = 0;
+                    for ( int vnum : jail_vnums )
+                    {
+                        if ( ROOM_INDEX_DATA *room = get_room_index( vnum ) )
+                            loaded_jails[count++] = room;
+                    }
+                    if ( count > 0 )
+                        jail = loaded_jails[number_range(0, count - 1)];
+                    break;
                 }
+            }
+            if ( !jail )
+                continue;
 
-              if ( jail )
-              {
-                BV_REMOVE_BIT( victim->pcdata->wanted_flags , vip ); 	                     
-                act( AT_ACTION, "$n ushers $N off to jail.", ch, NULL, victim, TO_NOTVICT );
-    	        act( AT_ACTION, "$n escorts you to jail.",   ch, NULL, victim, TO_VICT    );
-    	        char_from_room( victim );
-    	        char_to_room( victim , jail );
-    	      }
-    	      return TRUE;         
-          }
-    
+            char buf[MAX_STRING_LENGTH];
+            SPRINTF( buf, "Hey you're wanted on %s!", get_flag_name(planet_flags, vip, PLANET_MAX) );
+            do_say( ch, buf );
+            if ( char_died(ch) || ch->in_room != patrol_room
+                 || char_died(victim) || victim->in_room != patrol_room )
+                return TRUE;
+
+            BV_REMOVE_BIT( victim->pcdata->wanted_flags, vip );
+            act( AT_ACTION, "$n ushers $N off to jail.", ch, NULL, victim, TO_NOTVICT );
+            act( AT_ACTION, "$n escorts you to jail.", ch, NULL, victim, TO_VICT );
+            char_from_room( victim );
+            char_to_room( victim, jail );
+            return TRUE;
+        }
     }
-
     return FALSE;
-
-    /*
-            VIP_CORUSCANT           BV00
-             VIP_KASHYYYK            BV01
-             VIP_RYLOTH              BV02
-             VIP_RODIA               BV03
-             VIP_NAL_HUTTA           BV04
-             VIP_MON_CALAMARI        BV05
-             VIP_HONOGHR             BV06
-             VIP_GAMORR              BV07
-             VIP_TATOOINE            BV08
-             VIP_ADARI               BV09
-             VIP_BYSS                BV10
-             VIP_ENDOR               BV11
-             VIP_ROCHE               BV12
-             VIP_AF_EL               BV13
-             VIP_TRANDOSH            BV14
-             VIP_CHAD                BV15
-     */
-     
-    jail = get_room_index( ROOM_JAIL_CORUSCANT );
-    
 }
 
 bool spec_jedi_healer( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room || !IS_AWAKE(ch) )
+        return FALSE;
+
     CHAR_DATA *victim;
-    CHAR_DATA *v_next;
-
-    if ( !IS_AWAKE(ch) )
-	return FALSE;
-
-    for ( victim = ch->in_room->first_person; victim; victim = v_next )
-    {
-	v_next = victim->next_in_room;
-	if ( victim != ch && can_see( ch, victim ) && number_bits( 1 ) == 0 )
-	    break;
-    }
+    for ( victim = ch->in_room->first_person; victim; victim = victim->next_in_room )
+        if ( victim != ch && can_see( ch, victim ) && number_bits( 1 ) == 0 )
+            break;
 
     if ( !victim )
-	return FALSE;
+        return FALSE;
 
-    switch ( number_bits( 12 ) )
+    static const struct
     {
-    case 0:
+        const char *name;
+        SPELL_FUN *cast;
+    } spells[] = {
+        { "armor", spell_smaug },
+        { "good fortune", spell_smaug },
+        { "cure blindness", spell_cure_blindness },
+        { "cure light", spell_smaug },
+        { "cure poison", spell_cure_poison },
+        { "refresh", spell_smaug }
+    };
+
+    const unsigned choice = number_bits( 4 );
+    if ( choice >= sizeof(spells) / sizeof(spells[0]) )
+        return FALSE;
+
+    const int sn = skill_lookup( spells[choice].name );
+    if ( !IS_VALID_SN( sn ) )
+        return FALSE;
+
     act( AT_MAGIC, "$n pauses and concentrates for a moment.", ch, NULL, NULL, TO_ROOM );
-	spell_smaug( skill_lookup( "armor" ), ch->top_level, ch, victim );
-	return TRUE;
-
-    case 1:
-    act( AT_MAGIC, "$n pauses and concentrates for a moment.", ch, NULL, NULL, TO_ROOM );
-	spell_smaug( skill_lookup( "good fortune" ), ch->top_level, ch, victim );
-	return TRUE;
-
-    case 2:
-    act( AT_MAGIC, "$n pauses and concentrates for a moment.", ch, NULL, NULL, TO_ROOM );
-	spell_cure_blindness( skill_lookup( "cure blindness" ),
-	    ch->top_level, ch, victim );
-	return TRUE;
-
-    case 3:
-    act( AT_MAGIC, "$n pauses and concentrates for a moment.", ch, NULL, NULL, TO_ROOM );
-	spell_smaug( skill_lookup( "cure light" ),
-	    ch->top_level, ch, victim );
-	return TRUE;
-
-    case 4:
-    act( AT_MAGIC, "$n pauses and concentrates for a moment.", ch, NULL, NULL, TO_ROOM );
-	spell_cure_poison( skill_lookup( "cure poison" ),
-	    ch->top_level, ch, victim );
-	return TRUE;
-
-    case 5:
-    act( AT_MAGIC, "$n pauses and concentrates for a moment.", ch, NULL, NULL, TO_ROOM );
-	spell_smaug( skill_lookup( "refresh" ), ch->top_level, ch, victim );
-	return TRUE;
-
-    }
-
-    return FALSE;
+    spells[choice].cast( sn, ch->top_level, ch, victim );
+    return TRUE;
 }
-
 
 
 bool spec_dark_jedi( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     char *spell;
@@ -1056,9 +1037,10 @@ bool spec_dark_jedi( CHAR_DATA *ch )
 	    break;
     }
 
-    if ( ( sn = skill_lookup( spell ) ) < 0 )
-	return FALSE;
-    (*skill_table[sn]->spell_fun) ( sn, ch->top_level, ch, victim );
+    SPELL_FUN *cast = find_special_spell(spell, sn);
+    if ( !cast )
+        return FALSE;
+    cast(sn, ch->top_level, ch, victim);
     return TRUE;
 }
 
@@ -1066,6 +1048,9 @@ bool spec_dark_jedi( CHAR_DATA *ch )
 
 bool spec_fido( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     OBJ_DATA *corpse;
     OBJ_DATA *c_next;
     OBJ_DATA *obj;
@@ -1096,6 +1081,9 @@ bool spec_fido( CHAR_DATA *ch )
 
 bool spec_stormtrooper( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
 
@@ -1127,6 +1115,9 @@ bool spec_stormtrooper( CHAR_DATA *ch )
 
 bool spec_rebel_trooper( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
 
@@ -1159,11 +1150,12 @@ bool spec_rebel_trooper( CHAR_DATA *ch )
 
 bool spec_guardian( CHAR_DATA *ch )
 {
-    char buf[MAX_STRING_LENGTH]; // Needed for do_fun command
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     CHAR_DATA *ech;
-    char *crime;
     int max_evil;
 
     if ( !IS_AWAKE(ch) || ch->fighting )
@@ -1171,7 +1163,6 @@ bool spec_guardian( CHAR_DATA *ch )
 
     max_evil = 300;
     ech      = NULL;
-    crime    = "";
 
     for ( victim = ch->in_room->first_person; victim; victim = v_next )
     {
@@ -1185,24 +1176,7 @@ bool spec_guardian( CHAR_DATA *ch )
 	}
     }
 
-    if ( victim && BV_IS_SET( ch->in_room->room_flags, ROOM_SAFE ) )
-    {
-	SPRINTF( buf, "%s is a %s!  As well as a COWARD!",
-		victim->name, crime );
-	do_yell( ch, buf );
-	return TRUE;
-    }
-
-    if ( victim )
-    {
-	SPRINTF( buf, "%s is a %s!  PROTECT THE INNOCENT!!",
-		victim->name, crime );
-	do_shout( ch, buf );
-	multi_hit( ch, victim, TYPE_UNDEFINED );
-	return TRUE;
-    }
-
-    if ( ech )
+    if ( ech && !BV_IS_SET(ch->in_room->room_flags, ROOM_SAFE) )
     {
     act( AT_YELL, "$n screams 'PROTECT THE INNOCENT!!",
 	    ch, NULL, NULL, TO_ROOM );
@@ -1217,6 +1191,9 @@ bool spec_guardian( CHAR_DATA *ch )
 
 bool spec_janitor( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     OBJ_DATA *trash;
     OBJ_DATA *trash_next;
 
@@ -1252,6 +1229,9 @@ bool spec_janitor( CHAR_DATA *ch )
 
 bool spec_poison( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
 
     if ( ch->position != POS_FIGHTING
@@ -1270,6 +1250,9 @@ bool spec_poison( CHAR_DATA *ch )
 
 bool spec_thief( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     int gold, maxgold;
@@ -1281,7 +1264,7 @@ bool spec_thief( CHAR_DATA *ch )
     {
 	v_next = victim->next_in_room;
 
-	if ( get_trust(victim) >= LEVEL_IMMORTAL
+	if ( victim == ch || get_trust(victim) >= LEVEL_IMMORTAL
 	||   number_bits( 2 ) != 0
 	||   !can_see( ch, victim ) )	/* Thx Glop */
 	    continue;
@@ -1315,6 +1298,9 @@ bool spec_thief( CHAR_DATA *ch )
 
 bool spec_auth( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     CHAR_DATA *victim;
     CHAR_DATA *v_next;
     char buf[MAX_STRING_LENGTH]; // Needed for do_fun command
@@ -1364,6 +1350,9 @@ bool spec_auth( CHAR_DATA *ch )
 /*
 bool spec_random_pop( CHAR_DATA *ch )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
 
   int ran_array[MAX_RAN_POP] = { 309, 205, 10510, 28209, 29087, 26000, 1030, 5555,
   		      3026, 6230, 7340, 11215, 21050, 540, 28100, 28612,

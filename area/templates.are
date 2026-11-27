@@ -1,0 +1,222 @@
+#AREA   Starship Interior Templates~
+
+#ROOMS
+#2701
+Pilot Station~
+Flight controls and navigation displays surround a single pilot seat.
+~
+0 8 0
+S
+#2702
+Entry Airlock~
+A pressure door and status panel guard the boarding ramp.
+~
+0 8 0
+S
+#2703
+Copilot Station~
+A second flight station mirrors the main controls.
+~
+0 8 0
+S
+#2704
+Engine Room~
+Service rails give the crew access to the drive and power systems.
+~
+0 8 0
+S
+#2705
+Navigation Station~
+A star chart fills the navigation console.
+~
+0 8 0
+S
+#2706
+Gunnery Station~
+Targeting displays line the console at this station.
+~
+0 8 0
+S
+#2707
+Hangar Deck~
+Tie-down points and deck markings outline the berths.
+~
+0 8 0
+S
+#2708
+Cockpit~
+Flight, navigation, and communications controls share a compact console.
+~
+0 8 0
+S
+#2709
+Deck Junction~
+Handholds line a junction between the ship's compartments.
+~
+0 8 0
+S
+#2710
+Passenger Lounge~
+Seats face the center aisle, with storage recessed into the bulkheads.
+~
+0 8 0
+S
+#2711
+Crew Cabin~
+Foldaway bunks and lockers take up most of the cabin.
+~
+0 8 0
+S
+#2712
+Bridge~
+Command stations overlook a wide bank of flight instruments.
+~
+0 8 0
+S
+#2713
+Service Compartment~
+Removable panels give access to the ship's wiring and utilities.
+~
+0 8 0
+S
+#2714
+Aft Passage~
+A reinforced passage runs between the aft compartments.
+~
+0 8 0
+S
+#2715
+Equipment Store~
+Tie-down racks keep tools and equipment secure in flight.
+~
+0 8 0
+S
+#2716
+Crew Compartment~
+A narrow bench and utility lockers furnish this compartment.
+~
+0 8 0
+S
+#2717
+Access Corridor~
+Low guide lights mark the edges of this corridor.
+~
+0 8 0
+S
+#2718
+Troop Compartment~
+Folding seats are bolted to both sides of the central aisle.
+~
+0 8 0
+S
+#2719
+Operations Compartment~
+Workstations monitor the ship's internal systems.
+~
+0 8 0
+S
+#2720
+Port Passage~
+Numbered access panels run along the port bulkhead.
+~
+0 8 0
+S
+#2721
+Starboard Passage~
+Vent grilles and handrails line the starboard bulkhead.
+~
+0 8 0
+S
+#2722
+Main Corridor~
+An illuminated strip marks the main route through the ship.
+~
+0 8 0
+S
+#2723
+Port Compartment~
+A utility panel and recessed storage line the port side.
+~
+0 8 0
+S
+#2724
+Auxiliary Compartment~
+A compact service console stands beside an access hatch.
+~
+0 8 0
+S
+#2725
+Crew Quarters~
+Curtained bunks offer the crew a place to rest.
+~
+0 8 0
+S
+#2726
+Service Passage~
+Conduits run above a passage between equipment compartments.
+~
+0 8 0
+S
+#2727
+Cargo Access~
+Scuffed deck plates lead through a wide cargo doorway.
+~
+0 8 0
+S
+#2728
+Cargo Hold~
+Heavy deck rings anchor cargo straps and removable partitions.
+~
+0 8 0
+S
+#2729
+Aft Compartment~
+A service panel monitors power and ventilation at the stern.
+~
+0 8 0
+S
+#2730
+Maintenance Bay~
+Work surfaces and a tool rack flank an open maintenance bay.
+~
+0 8 0
+S
+#2731
+Lower Corridor~
+A narrow lower-deck passage links the surrounding compartments.
+~
+0 8 0
+S
+#2732
+Auxiliary Bay~
+This bay has room for spare equipment and maintenance work.
+~
+0 8 0
+S
+#2751
+Boarding Corridor~
+Pressure indicators mark the approach to the boarding airlock.
+~
+0 8 0
+S
+#2752
+Hangar Access~
+A wide passage provides access to the hangar and service decks.
+~
+0 8 0
+S
+#2761
+Main Boarding Airlock~
+Framed pressure doors separate the ship from its boarding ramp.
+~
+0 8 0
+S
+#2762
+Airlock Antechamber~
+A clear aisle leads past emergency equipment and pressure gauges.
+~
+0 8 0
+S
+#0
+
+#$

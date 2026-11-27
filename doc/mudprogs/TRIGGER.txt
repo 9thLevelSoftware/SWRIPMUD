@@ -1,17 +1,59 @@
-	This file explains how to add a new trigger to the MOBProgram
-system.
+SWRIPMUD Trigger Catalog
+=======================
 
-	All you have to do is to follow these simple steps...
+Online editor names
+-------------------
 
-1.  Add the appropriate global prototypes to merc.h
-2.  Add the appropriate #define XXXXX_PROG to merc.h
-3.  Write a trigger procedure at the end of mob_prog.c
-4.  Add the new case in *mprog_type_to_name(...) in mob_commands.c
-5.  Add a new if statement in mprog_name_to_type(..) in db.c
+get_mpflag in src/build.c accepts these short names for mpedit, opedit,
+and rpedit.
 
-There you have it, a new trigger for your MOBProgram system.
+    act speech rand fight death hitprcnt entry greet allgreet give bribe
+    hour time wear remove sac look exa zap get drop damage repair randiw
+    speechiw pull push sleep rest leave script use
 
-Kahn
-MERC Industries
-10/29/93
+Use the program types relevant to the target's runtime hooks. The command
+help for each editor lists its usual subset. The editor uses fight, entry,
+and death for room programs as well.
 
+Serialized names
+----------------
+
+mprog_name_to_type in src/db.c accepts the following names in inline and
+external program records.
+
+    in_file_prog act_prog speech_prog rand_prog fight_prog hitprcnt_prog
+    death_prog entry_prog greet_prog all_greet_prog give_prog bribe_prog
+    time_prog hour_prog wear_prog remove_prog sac_prog look_prog exa_prog
+    zap_prog get_prog drop_prog damage_prog repair_prog randiw_prog
+    speechiw_prog pull_prog push_prog sleep_prog rest_prog leave_prog
+    script_prog use_prog
+
+It also accepts room aliases rfight_prog, enter_prog, and rdeath_prog.
+The saver uses the ordinary fight_prog, entry_prog, and death_prog forms.
+in_file_prog is a loader directive for optional external files.
+
+Adding a trigger in the engine
+------------------------------
+
+Add the shared event constant and required prototypes in src/mud.h. Add
+the short editor name in src/build.c mprog_flags and the serialized name
+in src/db.c mprog_name_to_type. Update src/mud_comm.c mprog_type_to_name
+so area saves and program lists can preserve it.
+
+Implement its event handler in src/mud_prog.c and call it from the intended
+game action or update path. Choose the correct mobile, object, or room
+context and guard any references after commands that may extract or move
+their targets. Check the event bit capacity and serialization format when
+assigning a constant.
+
+Verify a normal program through the intended event, the builder editor,
+an area save and reload, and sanitizer-clean shutdown. Update DOC and this
+catalog with its argument and context contract. Recognizing a parser name
+does not itself install an event hook.
+
+Historical upstream note
+------------------------
+
+The original TRIGGER.txt credited Kahn, MERC Industries, 10/29/93, and
+described changes to merc.h, mob_prog.c, and mob_commands.c. Their current
+SWRIPMUD counterparts are listed above.

@@ -1,7 +1,11 @@
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <stdio.h>
 #include <stdlib.h>
 #include "mud.h"
 #include <string.h>
+#include <vector>
 
 /*
  
@@ -78,6 +82,7 @@ bool setroomtoship( SHIP_DATA *ship, ROOM_INDEX_DATA *room, int strtype )
       ship->navseat = room->vnum;
       ship->gunseat = room->vnum;
       ship->pilotseat = room->vnum;
+      break;
     case STRTYPE_DEFAULT: break;
     default: return FALSE; break;
   }
@@ -98,6 +103,12 @@ ROOM_INDEX_DATA *make_template_room(int rtype, SHIP_DATA *ship, int roomnum)
 {
     ROOM_INDEX_DATA *room, *templateroom;
     int strtype, strvnum, roomvnum;
+
+    if ( !ship || !ship->game || ship->shipID <= 0 )
+    {
+      bug( "make_template_room: invalid ship or shipID.\n" );
+      return NULL;
+    }
     
     // STR_AREAVNUM is set in mud.h.  This is the first room of the area in which the template rooms reside - DV 3-20-03    
     strvnum = STR_AREAVNUM+rtype; 
@@ -108,27 +119,39 @@ ROOM_INDEX_DATA *make_template_room(int rtype, SHIP_DATA *ship, int roomnum)
     // Hopefully this produces a unique vnum for every virtual room.. if not, we may have to play with it some more - DV 3-20-03    
     // Alright, so that formula didn't work... so I'm going for a straight sequencial system.
     roomvnum    = (ship->shipID*100) + roomnum;
-    
-    room = make_room( ship->game, roomvnum );
-    
-    templateroom = get_room_index( strvnum );
-    
-    if ( !templateroom )
+
+    if ( get_room_index( roomvnum ) != NULL )
     {
-      bug( "make_template_room: no template room exists.\n", 0 );
+      bug( "make_template_room: target room vnum %d already exists.\n", roomvnum );
       return NULL;
     }
-    
-    
+
+    templateroom = get_room_index( strvnum );
+
+    if ( !templateroom )
+    {
+      bug( "make_template_room: no template room exists.\n" );
+      return NULL;
+    }
+
+    room = make_room( ship->game, roomvnum );
+    if ( !room )
+      return NULL;
+
     room->area    	= templateroom->area;
     room->sector_type 	= templateroom->sector_type;
     room->room_flags  	= templateroom->room_flags;
-    room->name 		= STRALLOC( templateroom->name );
-    room->description 	= STRALLOC( templateroom->description );
+    if ( room->name )
+      STRFREE( room->name );
+    room->name 		= templateroom->name ? STRALLOC( templateroom->name ) : STRALLOC( "" );
+    if ( room->description )
+      STRFREE( room->description );
+    room->description 	= templateroom->description ? STRALLOC( templateroom->description ) : STRALLOC( "" );
     room->tunnel 	= templateroom->tunnel;
     if ( !setroomtoship( ship, room, strtype ) )
     {
-      bug( "make_template_room: setroomtoship failed.\n", 0 );
+      bug( "make_template_room: setroomtoship failed.\n" );
+      delete_room( room );
       return NULL;
     }
 
@@ -140,12 +163,16 @@ int create_exit( int location, int evnum, int edir )
   EXIT_DATA *xit = NULL;
   EXIT_DATA *texit;
   ROOM_INDEX_DATA *tmp;
+  ROOM_INDEX_DATA *loc;
   
-    if ( edir < 0 )
+    if ( edir < 0 || edir > DIR_SOMEWHERE )
       return 1;
       
 //  if ( (xit = get_exit_num(get_room_index(location), edir)) != NULL )
 //    edir = xit->vdir;
+
+	if ( (loc = get_room_index( location )) == NULL )
+	    return 1;
 
 	if ( (tmp = get_room_index( evnum )) == NULL )
 	{
@@ -154,11 +181,13 @@ int create_exit( int location, int evnum, int edir )
 	}
 	if ( !xit )
 	{
-	    if ( xit && get_exit_to(get_room_index(location), edir, tmp->vnum) )
+	    if ( get_exit_to(loc, edir, tmp->vnum) )
 	    {
 		return 1;
 	    }
-	    xit = make_exit( get_room_index(location), tmp, edir );
+	    xit = make_exit( loc, tmp, edir );
+	    if ( !xit )
+		return 1;
 	    xit->keyword		= STRALLOC( "" );
 	    xit->description		= STRALLOC( "" );
 	    xit->key			= -1;
@@ -168,7 +197,7 @@ int create_exit( int location, int evnum, int edir )
 	{
 	    xit->to_room = tmp;
 	    xit->vnum = evnum;
-	    texit = get_exit_to( xit->to_room, rev_dir[edir], get_room_index(location)->vnum );
+	    texit = get_exit_to( xit->to_room, rev_dir[edir], loc->vnum );
 	    if ( texit )
 	    {
 		texit->rexit = xit;
@@ -202,7 +231,10 @@ int join_template_rooms(int room1, ROOM_INDEX_DATA *room2, int exitType)
     int success = 0, dir;
     bool twoway;
 //  char buf[MAX_INPUT_LENGTH];
-    
+
+    if ( !room2 )
+        return 1;
+
     twoway = FALSE;
     
     switch(exitType)
@@ -250,14 +282,49 @@ int join_template_rooms(int room1, ROOM_INDEX_DATA *room2, int exitType)
 int destroy_vnums(ROOM_INDEX_DATA *rooms[], int size)
 {
     int i;
+    if ( !rooms || size <= 0 )
+        return 1;
     for(i = 0; i < size; i++) 
     {
-    	if ( rooms[i] )
-	delete_room( rooms[i] );
-	free(rooms[i]);
+	if ( rooms[i] )
+	{
+	    delete_room( rooms[i] );
+	    rooms[i] = NULL;
+	}
     }
     return 1;
 }
+static void reset_ship_template_rooms( SHIP_DATA *ship )
+{
+    ship->cockpitroom = NULL;
+    ship->cockpit = 0;
+    ship->entrance = 0;
+    ship->pilotseat = 0;
+    ship->coseat = 0;
+    ship->engineroom = 0;
+    ship->navseat = 0;
+    ship->gunseat = 0;
+    ship->hanger = 0;
+    ship->set_room_range( 0, 0 );
+}
+
+static bool pst_parse_int( const char *s, int &out )
+{
+    if ( !s || s[0] == '\0' )
+        return false;
+
+    errno = 0;
+    char *end = nullptr;
+    long val = std::strtol( s, &end, 10 );
+    if ( errno == ERANGE || end == s || *end != '\0' )
+        return false;
+    if ( val < 0 || val > INT_MAX )
+        return false;
+
+    out = static_cast<int>( val );
+    return true;
+}
+
 int parse_ship_template(char *string, SHIP_DATA *ship)
 {
     #define PST_BUF_SIZE 15
@@ -268,47 +335,59 @@ int parse_ship_template(char *string, SHIP_DATA *ship)
     int index;
     int bindex;
     int roomCount;
-    int *roomArray;
-    ROOM_INDEX_DATA *vnumArray[100];
+    ROOM_INDEX_DATA *vnumArray[100] = { NULL };
     int i, j;
     short start;
     int room;
     int room2;
+    int exitType;
+    size_t len;
     
 //  bug( "Parser activated: String: %s, Ship: %s", string, ship->personalname );
     
+    if ( !string || !ship )
+	return 1;
+
+    len = strlen(string);
     masterIndex=0;
     //Parse out the number of rooms
     bindex=0;
-    while(string[masterIndex] != ']' && masterIndex < (int) strlen(string) && bindex < PST_BUF_SIZE)
+    while((size_t)masterIndex < len && string[masterIndex] != ']' && bindex < PST_BUF_SIZE - 1)
     {
 	buf[bindex] = string[masterIndex];
 	masterIndex++;
 	bindex++;
     }
     buf[bindex] = '\0';
-    if (masterIndex == (int) strlen(string) || bindex == PST_BUF_SIZE) {
+    if ((size_t)masterIndex >= len || bindex == 0 || bindex >= PST_BUF_SIZE - 1) {
 	return 1;
     }
     masterIndex++;
-    roomCount = atoi(buf);
-    roomArray = (int*)calloc(roomCount,sizeof(int));
-//    vnumArray = (ROOM_INDEX_DATA*)calloc(roomCount,sizeof(ROOM_INDEX_DATA));
+    if (!pst_parse_int(buf, roomCount) || roomCount <= 0 || roomCount > 100) {
+	return 1;
+    }
+    std::vector<int> roomArray(static_cast<size_t>(roomCount), 0);
 
     //Find all the room numbers
     index = masterIndex-1;
     i = 0;
     start = 1;
     bindex = 0;
-    while(i < roomCount && index < (int) strlen(string)) {
+    buf[0] = '\0';
+    while(i < roomCount && (size_t)index < len) {
 	index++;
 	if (string[index] == ':') {
 	    start = 1;
 	    continue;
 	}
 	if ((string[index] == ',' || string[index] == '\0' || string[index] == ')' || string[index] == ';') && start) {
+	    if (bindex == 0) {
+		return 2;
+	    }
 	    buf[bindex]='\0';
-	    roomArray[i] = atoi(buf);
+	    if (!pst_parse_int(buf, roomArray[i])) {
+		return 2;
+	    }
 	    //Check for duplicates
 	    for(j = 0; j < i; j++) {
 		if (roomArray[j] == roomArray[i]) {
@@ -317,6 +396,7 @@ int parse_ship_template(char *string, SHIP_DATA *ship)
 	    }
 	    start = 0;
 	    bindex = 0;
+	    buf[0] = '\0';
 	    if (j >= i) {
 		i++;          //Only increment if we want to keep this number
 	    }
@@ -328,12 +408,14 @@ int parse_ship_template(char *string, SHIP_DATA *ship)
         if (string[index] < '0' || string[index] > '9')
 	    continue;  //haven't hit a number yet
 	if (start == 1) {
+	    if (bindex >= PST_BUF_SIZE - 1) {
+		return 2;
+	    }
 	    buf[bindex] = string[index];
 	    bindex++;
 	}
     }
     if (i != roomCount) {
-	free(roomArray);
 //	clearrooms(vnumArray);
 	return 2;
     }
@@ -341,7 +423,11 @@ int parse_ship_template(char *string, SHIP_DATA *ship)
 	vnumArray[i] = make_template_room(roomArray[i], ship, i);
 
         if( !(vnumArray[i]) )
-          continue;
+        {
+          destroy_vnums(vnumArray, i);
+          reset_ship_template_rooms( ship );
+          return 2;
+        }
 
 
         if( i == 0 )
@@ -353,16 +439,14 @@ int parse_ship_template(char *string, SHIP_DATA *ship)
           ship->engineroom    = ((vnumArray[i])->vnum);
           ship->navseat       = ((vnumArray[i])->vnum);
           ship->gunseat       = ((vnumArray[i])->vnum);
-          ship->set_lastroom( roomCount );
 //        ship->cockpitroom   = get_room_index((vnumArray[i])->vnum);
         }
 
 //	printf("Make room type: %d, Vnum: %d\n",roomArray[i],vnumArray[i]->vnum);
     }
 
-  ship->set_firstroom( ship->shipID*100 );
-  ship->set_lastroom( ship->get_firstroom() + roomCount - 1 );
-  link_ship_rooms(ship->game, ship);
+  if ( roomCount > 0 )
+    ship->set_room_range( ship->shipID * 100, ship->shipID * 100 + roomCount - 1 );
 /*  for( i = 0; i < roomCount; i++ )
     {
     	bug("Rooms: Tmp#: %d Vnum: %d\n", roomArray[i], vnumArray[i]->vnum );
@@ -374,25 +458,31 @@ int parse_ship_template(char *string, SHIP_DATA *ship)
     i = 0;
     start = 0;
     bindex = 0;
+    buf[0] = '\0';
     room = -1;
-    while(/*i < roomCount && */index < (int) strlen(string)) {
+    while(/*i < roomCount && */(size_t)index < len) {
 	index++;
 	if (string[index] == ')' && !start) {
-	    room = atoi(buf);
+	    if (bindex == 0 || !pst_parse_int(buf, room)) {
+		bug( "No room found for exit.\n" );
+		destroy_vnums(vnumArray,roomCount);
+		reset_ship_template_rooms( ship );
+		return 5;
+	    }
 	    for(j = 0; j < roomCount; j++) {
 		if ( ( roomArray[j] == room ) && vnumArray[j] ) 
 		{
 //		    bug("Tmp#: %d Vnum: %d\n", room, vnumArray[j]->vnum );
 		    room = vnumArray[j]->vnum;
 		    bindex = 0;
+		    buf[0] = '\0';
 		    break;
 		}
 	    }
 	    if (j == roomCount) {
-	    	bug( "No room found for exit.\n", 0 );
+	    	bug( "No room found for exit.\n" );
 		destroy_vnums(vnumArray,roomCount);
-//		free(vnumArray);
-		free(roomArray);
+		reset_ship_template_rooms( ship );
 		return 5;
 	    } 
 	}
@@ -406,29 +496,36 @@ int parse_ship_template(char *string, SHIP_DATA *ship)
 	//capture the room template number.
 	if (start && ((string[index] == ',' || string[index] == '\0') || string[index] == ';')) 
 	{
+	    if (bindex == 0) {
+		destroy_vnums(vnumArray,roomCount);
+		reset_ship_template_rooms( ship );
+		return 3;
+	    }
 	    buf[bindex]='\0';
 	    
 	    //Brings buf to capture the room template number DV- 4-20-03
 	    j = 0;
-	    while(buf[j]!=':') {
-		if (j >= bindex) {
-		    //Some error- really have no idea what :) DV - 4-20-03
-		    destroy_vnums(vnumArray,roomCount);
-//		    free(vnumArray);
-		    free(roomArray);
-		    return 3;
-		}
+	    while(j < bindex && buf[j] != ':') {
 		j++;
 	    }
+	    if (j == 0 || j + 1 >= bindex) {
+		//Some error- really have no idea what :) DV - 4-20-03
+		destroy_vnums(vnumArray,roomCount);
+		reset_ship_template_rooms( ship );
+		return 3;
+	    }
 	    buf[j] = '\0';
-	    room2 = atoi((char*)buf+j+1);
+	    if (!pst_parse_int(buf, exitType) || !pst_parse_int(buf + j + 1, room2)) {
+		destroy_vnums(vnumArray,roomCount);
+		reset_ship_template_rooms( ship );
+		return 3;
+	    }
 //	    bug("Buf: %s Room2: %d\n", buf, room2 );
 	    for(j = 0; j < roomCount; j++) {
 		if (roomArray[j] == room2) {
-		    if (join_template_rooms(room,vnumArray[j],atoi(buf))) {
+		    if (!vnumArray[j] || join_template_rooms(room,vnumArray[j],exitType)) {
 			destroy_vnums(vnumArray,roomCount);
-//			free(vnumArray);
-			free(roomArray);
+			reset_ship_template_rooms( ship );
 			return 6;
 		    }
 		    break;
@@ -436,14 +533,13 @@ int parse_ship_template(char *string, SHIP_DATA *ship)
 	    }
 	    if (j == roomCount)
 	    {
-		printf("searching for: %d\n",room2);
 		destroy_vnums(vnumArray,roomCount);
-//		free(vnumArray);
-		free(roomArray);
+		reset_ship_template_rooms( ship );
 		return 4;
 	    }
 	    start = 0;	    
 	    bindex = 0;
+	    buf[0] = '\0';
 	    i++;  
 	    if (string[index] == ',')
 	    	index--;
@@ -452,15 +548,20 @@ int parse_ship_template(char *string, SHIP_DATA *ship)
 	if (string[index] == ';') {
 	    room = -1;
 	    start = 0;
+	    bindex = 0;
+	    buf[0] = '\0';
 	}
         if ( (string[index] < '0' || string[index] > '9') && string[index] != ':')
 	    continue;  //haven't hit a number yet
+	if (bindex >= PST_BUF_SIZE - 1) {
+	    destroy_vnums(vnumArray,roomCount);
+	    reset_ship_template_rooms( ship );
+	    return 3;
+	}
 	buf[bindex] = string[index];
 	bindex++;
 	buf[bindex] = '\0';
     }
-//  free(vnumArray);
-    free(roomArray);
     return 0;
 }
 

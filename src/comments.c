@@ -55,36 +55,60 @@ void note_attach(CHAR_DATA *ch);
 
 void comment_remove( CHAR_DATA *ch, CHAR_DATA *victim, NOTE_DATA *pnote )
 {
-    if ( IS_NPC( victim ) )
+    bool found = false;
+
+    (void)ch;
+
+    if ( !victim || IS_NPC( victim ) || !victim->pcdata )
     {
-      bug( "comment remove: NPC", 0 );
+      bug( "comment remove: NPC" );
       return;
     }
     if ( !victim->pcdata->comments )
     {
-      bug( "comment remove: null board", 0 );
+      bug( "comment remove: null board" );
       return;
     }
 
     if ( !pnote )
     {
-      bug( "comment remove: null pnote", 0 );
+      bug( "comment remove: null pnote" );
       return;
     }
-    
+
+    for ( NOTE_DATA *cur = victim->pcdata->comments; cur; cur = cur->next )
+    {
+      if ( cur == pnote )
+      {
+        found = true;
+        break;
+      }
+    }
+    if ( !found )
+    {
+      bug( "comment remove: pnote not in victim->pcdata->comments" );
+      return;
+    }
+
     /*
      * Remove comment from linked list.
      */
     if ( !pnote->prev )
-      victim->pcdata->comments	= pnote->next;
+      victim->pcdata->comments = pnote->next;
     else
       pnote->prev->next = pnote->next;
 
-    STRFREE( pnote->text    );
-    STRFREE( pnote->subject );
-    STRFREE( pnote->to_list );
-    STRFREE( pnote->date    );
-    STRFREE( pnote->sender  );
+    if ( pnote->next )
+      pnote->next->prev = pnote->prev;
+
+    if ( pnote->text )        STRFREE( pnote->text    );
+    if ( pnote->subject )     STRFREE( pnote->subject );
+    if ( pnote->to_list )     STRFREE( pnote->to_list );
+    if ( pnote->date )        STRFREE( pnote->date    );
+    if ( pnote->sender )      STRFREE( pnote->sender  );
+    if ( pnote->yesvotes )    STR_DISPOSE( pnote->yesvotes );
+    if ( pnote->novotes )     STR_DISPOSE( pnote->novotes );
+    if ( pnote->abstentions ) STR_DISPOSE( pnote->abstentions );
     DISPOSE( pnote );
 
     /*
@@ -100,21 +124,24 @@ void do_comment( CHAR_DATA *ch, char *argument )
 //  char buf[MAX_STRING_LENGTH];
     std::string	arg;
     std::string arg1;
-	std::string argstr = argument;
+	std::string argstr = argument ? argument : "";
     NOTE_DATA  *pnote;
     CHAR_DATA  *victim;
     int vnum;
     int anum;
 
-    if ( IS_NPC(ch) )
+    if ( !ch )
+        return;
+
+    if ( IS_NPC(ch) || !ch->pcdata )
     {
 	send_to_char("Mobs can't use the comment command.\n", ch);
 	return;
     }
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
-	bug( "do_comment: no descriptor", 0 );
+	bug( "do_comment: no descriptor" );
 	return;
     }
 
@@ -134,42 +161,24 @@ void do_comment( CHAR_DATA *ch, char *argument )
 
 	  if ( !ch->pcdata->pnote )
 	  {
-	     bug( "do_comment: note got lost?", 0 );
+	     bug( "do_comment: note got lost?" );
 	     send_to_char( "Your note got lost!\n", ch );
 	     stop_editing(ch);
 	     return;
 	  }
-	  if ( ch->dest_buf != ch->pcdata->pnote )
-	     bug( "do_comment: sub_writing_note: ch->dest_buf != ch->pnote", 0 );
-	  STRFREE( ch->pcdata->pnote->text );
+          if ( !argstr.empty() || ch->dest_buf != ch->pcdata->pnote || !ch->editor )
+              return;
+	  if ( ch->pcdata->pnote->text )
+	     STRFREE( ch->pcdata->pnote->text );
 	  ch->pcdata->pnote->text = copy_buffer( ch );
 	  stop_editing( ch );	   
 	  return;
     }
 
+    CHECK_SUBRESTRICTED( ch );
     set_char_color( AT_NOTE, ch );
     argstr = one_argument( argstr, arg );
     smash_tilde( argstr );
-
-    if ( !str_cmp( arg, "about" ) )
-    {
-
-        victim = get_char_world(ch, argstr);
-	if (!victim)
-	{
-	   send_to_char("They're not logged on!\n", ch);   /* maybe fix this? */
-	   return;
-	}
-
-    if ( IS_NPC(victim) )
-    {
-	send_to_char("No comments about mobs\n", ch);
-	return;
-    }
-
-
-    }
-
 
     if ( !str_cmp( arg, "list" ) )
     {
@@ -180,7 +189,7 @@ void do_comment( CHAR_DATA *ch, char *argument )
 	   return;
 	}
 
-        if ( IS_NPC(victim) )
+        if ( IS_NPC(victim) || !victim->pcdata )
         {
 	    send_to_char("No comments about mobs\n", ch);
 	    return;
@@ -226,7 +235,7 @@ void do_comment( CHAR_DATA *ch, char *argument )
 	   return;
 	}
 
-        if ( IS_NPC(victim) )
+        if ( IS_NPC(victim) || !victim->pcdata )
         {
 	    send_to_char("No comments about mobs\n", ch);
 	    return;
@@ -276,13 +285,14 @@ void do_comment( CHAR_DATA *ch, char *argument )
 		    pnote->date,
 		    pnote->to_list
 		    );
-		send_to_char( pnote->text, ch );
-		/* act( AT_ACTION, "$n reads a note.", ch, NULL, NULL, TO_ROOM ); */
-		return;
+                send_to_char( pnote->text ? pnote->text : "", ch );
+                if ( !fAll )
+                    return;
 	    }
 	}
 
-	send_to_char( "No such comment.\n", ch );
+	if ( !fAll )
+	    send_to_char( "No such comment.\n", ch );
 	return;
     }
 
@@ -291,7 +301,7 @@ void do_comment( CHAR_DATA *ch, char *argument )
 	note_attach( ch );
 	ch->substate = SUB_WRITING_NOTE;
 	ch->dest_buf = ch->pcdata->pnote;
-	start_editing( ch, ch->pcdata->pnote->text );
+	start_editing( ch, ch->pcdata->pnote->text ? ch->pcdata->pnote->text : "" );
 	return;
     }
 
@@ -343,7 +353,7 @@ void do_comment( CHAR_DATA *ch, char *argument )
 	    ch->pcdata->pnote->subject,
 	    ch->pcdata->pnote->to_list
 	    );
-	send_to_char( ch->pcdata->pnote->text, ch );
+	send_to_char( ch->pcdata->pnote->text ? ch->pcdata->pnote->text : "", ch );
 	return;
     }
 
@@ -365,7 +375,7 @@ void do_comment( CHAR_DATA *ch, char *argument )
 	   return;
 	}
 
-        if ( IS_NPC(victim) )
+        if ( IS_NPC(victim) || !victim->pcdata )
         {
 	    send_to_char("No comments about mobs\n", ch);
 	    return;
@@ -379,9 +389,13 @@ void do_comment( CHAR_DATA *ch, char *argument )
 
 	/* act( AT_ACTION, "$n posts a note.", ch, NULL, NULL, TO_ROOM ); */
 
-	strtime				= ctime( &current_time );
-	strtime[strlen(strtime)-1]	= '\0';
-	ch->pcdata->pnote->date			= STRALLOC( strtime );
+        strtime = ctime( &current_time );
+        std::string date = strtime ? strtime : "";
+        if ( !date.empty() && date.back() == '\n' )
+            date.pop_back();
+        if ( ch->pcdata->pnote->date )
+            STRFREE( ch->pcdata->pnote->date );
+        ch->pcdata->pnote->date = STRALLOC( date );
 
 	pnote		= ch->pcdata->pnote;
 	ch->pcdata->pnote	= NULL;
@@ -432,14 +446,14 @@ void do_comment( CHAR_DATA *ch, char *argument )
 	   return;
 	}
 
-        if ( IS_NPC(victim) )
+        if ( IS_NPC(victim) || !victim->pcdata )
         {
 	    send_to_char("No comments about mobs\n", ch);
 	    return;
         }
 
 	if (  (get_trust(victim) >= get_trust( ch ) )
-           || ( get_trust( ch ) < 58                ) )   /* switch to some LEVEL_ thingie */
+           || get_trust( ch ) < LEVEL_GREATER )
 	{
 	  send_to_char( "You're not of the right caliber to do this...\n", ch );
 	  return;
@@ -457,8 +471,7 @@ void do_comment( CHAR_DATA *ch, char *argument )
 	for ( pnote = victim->pcdata->comments; pnote; pnote = pnote->next )
 	{
 	    vnum++;
-	    if ( ( 58 <= get_trust( ch ) )    /* switch to some LEVEL_ thingie */
-	    &&   ( vnum == anum ) )
+	    if ( vnum == anum )
 	    {
 		comment_remove( ch, victim, pnote );
 		send_to_char( "Ok.\n", ch );
@@ -480,7 +493,7 @@ void fwrite_comments( CHAR_DATA *ch, FILE *fp )
 {
 NOTE_DATA *pnote;
 
-   if( !ch->pcdata || !ch->pcdata->comments)
+   if( !ch || !ch->pcdata || !ch->pcdata->comments || !fp )
       return;
 
    for(pnote=ch->pcdata->comments;pnote;pnote=pnote->next)
@@ -497,25 +510,24 @@ NOTE_DATA *pnote;
 
 void fread_comment( CHAR_DATA *ch, FILE *fp )
 {
-    NOTE_DATA *pnote;
-    
-    if( IS_NPC( ch ) )
+    NOTE_DATA *pnote = NULL;
+
+    if( !ch || IS_NPC( ch ) || !ch->pcdata || !fp )
       return;
 
     for ( ; ; )
     {
-	char letter;
+	int letter;
 
 	do
 	{
 	    letter = getc( fp );
-	    if ( feof(fp) )
+	    if ( letter == EOF || feof(fp) )
 	    {
-		FCLOSE( fp );
 		return;
 	    }
 	}
-	while ( isspace(letter) );
+	while ( isspace( static_cast<unsigned char>( letter ) ) );
 	ungetc( letter, fp );
 
 	CREATE( pnote, NOTE_DATA, 1 );
@@ -541,12 +553,26 @@ void fread_comment( CHAR_DATA *ch, FILE *fp )
 	pnote->text	= fread_string( fp );
 
 	pnote->next		= ch->pcdata->comments;
+	if ( pnote->next )
+	    pnote->next->prev	= pnote;
 	pnote->prev		= NULL;
-	ch->pcdata->comments		= pnote;
+	ch->pcdata->comments	= pnote;
 	return;
     }
 
-    bug( "fread_comment: bad key word. strap in!", 0 );
+    bug( "fread_comment: bad key word. strap in!" );
+    if ( pnote )
+    {
+        if ( pnote->text )        STRFREE( pnote->text );
+        if ( pnote->subject )     STRFREE( pnote->subject );
+        if ( pnote->to_list )     STRFREE( pnote->to_list );
+        if ( pnote->date )        STRFREE( pnote->date );
+        if ( pnote->sender )      STRFREE( pnote->sender );
+        if ( pnote->yesvotes )    STR_DISPOSE( pnote->yesvotes );
+        if ( pnote->novotes )     STR_DISPOSE( pnote->novotes );
+        if ( pnote->abstentions ) STR_DISPOSE( pnote->abstentions );
+        DISPOSE( pnote );
+    }
     /* exit( 1 ); */
 }
 

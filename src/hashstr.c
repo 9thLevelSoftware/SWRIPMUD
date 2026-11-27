@@ -31,6 +31,8 @@
 ****************************************************************************/
 
 #include <openssl/sha.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,26 +45,11 @@ const bool FALSE = false;
 
 #define STR_HASH_SIZE	1024
 
-#define SPRINTF(dst, ...)                                                   \
-do {                                                                        \
-    static_assert(sizeof(dst) != sizeof(char*),                             \
-        "STRINIT requires a char array");                                   \
-                                                                            \
-    size_t __size = __builtin_object_size(dst, 0);                          \
-    if (__size != (size_t)-1)                                               \
-    {                                                                       \
-        int __n = snprintf((dst), __size, __VA_ARGS__);                     \
-        if (__n < 0 || (size_t)__n >= __size)                               \
-            (dst)[__size - 1] = '\0';                                       \
-    }                                                                       \
-} while (0)
-
-
 struct hashstr_data
 {
     struct hashstr_data	*next;		/* next hash element */
+    size_t		 length;	/* length of string */
     unsigned short int	 links;		/* number of links to this string */
-    unsigned short int	 length;	/* length of string */
 };
 
 char *		str_alloc( const char *str );
@@ -76,6 +63,13 @@ struct hashstr_data *string_hash[STR_HASH_SIZE];
 /* Helper: hash a password with SHA-256 into hex string */
 void sha256_hash(const char *password, char out[65])
 {
+    if (!out)
+        return;
+    if (!password)
+    {
+        memset(out, 0, 65);
+        return;
+    }
     unsigned char hash[SHA256_DIGEST_LENGTH];
     SHA256((const unsigned char*)password, strlen(password), hash);
     static const char hex[] = "0123456789abcdef";
@@ -96,30 +90,36 @@ void sha256_hash(const char *password, char out[65])
  */
 char *str_alloc( const char *str )
 {
-   int len, hash, psize;
+   size_t len, hash, psize;
    struct hashstr_data *ptr;
+
+   if (!str)
+       return NULL;
 
    len = strlen(str);
    psize = sizeof(struct hashstr_data);
    hash = len % STR_HASH_SIZE;
    for (ptr = string_hash[hash]; ptr; ptr = ptr->next )
-        if ( len == ptr->length && !strcmp(str,(char *)ptr+psize) )
+        if ( len == ptr->length && !strcmp(str, (const char *)ptr + psize) )
         {
             if ( ptr->links < 65535 )
-            ++ptr->links;
-            return (char *) ptr+psize;
+                ++ptr->links;
+            return (char *) ptr + psize;
         }
-   ptr = (struct hashstr_data *) malloc(len+psize+1);
+   if (len > SIZE_MAX - psize - 1)
+       return NULL;
+   ptr = (struct hashstr_data *) malloc(len + psize + 1);
+   if (!ptr)
+   {
+       fprintf(stderr, "str_alloc: malloc failed (%zu bytes)\n", len + psize + 1);
+       return NULL;
+   }
    ptr->links		= 1;
    ptr->length		= len;
-//   if (len)
-//     strcpy( (char *) ptr+psize, str );
-     memcpy( (char *) ptr+psize, str, len+1 );
-//   else
-//     strcpy( (char *) ptr+psize, "" );
+   memcpy( (char *) ptr + psize, str, len + 1 );
    ptr->next		= string_hash[hash];
    string_hash[hash]	= ptr;
-   return (char *) ptr+psize;
+   return (char *) ptr + psize;
 }
 
 char *str_alloc(const std::string& str)
@@ -134,16 +134,30 @@ char *str_alloc(const std::string& str)
  */
 char *quick_link( char *str )
 {
+    size_t len, hash, psize;
     struct hashstr_data *ptr;
 
-    ptr = (struct hashstr_data *) (str - sizeof(struct hashstr_data));
-    if ( ptr->links == 0 )
+    if (!str)
     {
-	fprintf(stderr, "quick_link: bad pointer\n" );
-	return NULL;
+        fprintf(stderr, "quick_link: bad pointer\n");
+        return NULL;
+    }
+
+    len = strlen(str);
+    psize = sizeof(struct hashstr_data);
+    hash = len % STR_HASH_SIZE;
+    for (ptr = string_hash[hash]; ptr; ptr = ptr->next)
+    {
+        if (len == ptr->length && str == (const char *)ptr + psize)
+            break;
+    }
+    if (!ptr || ptr->links == 0)
+    {
+        fprintf(stderr, "quick_link: bad pointer\n");
+        return NULL;
     }
     if ( ptr->links < 65535 )
-	++ptr->links;
+        ++ptr->links;
     return str;
 }
 
@@ -155,39 +169,43 @@ char *quick_link( char *str )
  */
 int str_free( char *str )
 {
-    int len, hash;
-    struct hashstr_data *ptr, *ptr2, *ptr2_next;
+    size_t len, hash, psize;
+    struct hashstr_data *ptr, *prev;
+
+    if (!str)
+    {
+        fprintf(stderr, "str_free: bad pointer\n");
+        return -1;
+    }
 
     len = strlen(str);
+    psize = sizeof(struct hashstr_data);
     hash = len % STR_HASH_SIZE;
-    ptr = (struct hashstr_data *) (str - sizeof(struct hashstr_data));
+    for (prev = NULL, ptr = string_hash[hash]; ptr; prev = ptr, ptr = ptr->next)
+    {
+        if (len == ptr->length && str == (const char *)ptr + psize)
+            break;
+    }
+    if (!ptr)
+    {
+        fprintf(stderr, "str_free: pointer not found for string: %s\n", str);
+        return -1;
+    }
     if ( ptr->links == 65535 )				/* permanent */
-	return ptr->links;
+        return ptr->links;
     if ( ptr->links == 0 )
     {
-	fprintf(stderr, "str_free: bad pointer\n" );
-	return -1;
+        fprintf(stderr, "str_free: bad pointer\n");
+        return -1;
     }
     if ( --ptr->links == 0 )
     {
-	if ( string_hash[hash] == ptr )
-	{
-	    string_hash[hash] = ptr->next;
-	    free(ptr);
-	    return 0;
-	}
-	for ( ptr2 = string_hash[hash]; ptr2; ptr2 = ptr2_next )
-	{
-	    ptr2_next = ptr2->next;
-	    if ( ptr2_next == ptr )
-	    {
-		ptr2->next = ptr->next;
-		free(ptr);
-		return 0;
-	    }
-	}
-	fprintf( stderr, "str_free: pointer not found for string: %s\n", str );
-	return -1;
+        if (prev)
+            prev->next = ptr->next;
+        else
+            string_hash[hash] = ptr->next;
+        free(ptr);
+        return 0;
     }
     return ptr->links;
 }
@@ -197,10 +215,16 @@ void show_hash( int count )
     struct hashstr_data *ptr;
     int x, c;
 
+    if (count < 0)
+        count = 0;
+    if (count > STR_HASH_SIZE)
+        count = STR_HASH_SIZE;
+
     for ( x = 0; x < count; x++ )
     {
-	for ( c = 0, ptr = string_hash[x]; ptr; ptr = ptr->next, c++ );
-	fprintf( stderr, " %d", c );
+        for ( c = 0, ptr = string_hash[x]; ptr; ptr = ptr->next )
+            c++;
+        fprintf( stderr, " %d", c );
     }
     fprintf( stderr, "\n" );
 }
@@ -211,19 +235,16 @@ void hash_dump( int hash )
     char *str;
     int c;
 
-    if ( hash > STR_HASH_SIZE || hash < 0 )
+    if ( hash >= STR_HASH_SIZE || hash < 0 )
     {
-	fprintf( stderr, "hash_dump: invalid hash size\n" );
-	return;
+        fprintf( stderr, "hash_dump: invalid hash size\n" );
+        return;
     }
-//  psize = sizeof(struct hashstr_data);
-    for ( c=0, ptr = string_hash[hash]; ptr; ptr = ptr->next, c++ )
+    for ( c = 0, ptr = string_hash[hash]; ptr; ptr = ptr->next, c++ )
     {
-// Pointer arithmetic is cleaner and more portable than casting to int and back, and it works on 64-bit systems without modification. AI&DV 3-12-26
-//	str = (char *) (((int) ptr) + psize);
-    str = (char *)(ptr + 1);
-	fprintf( stderr, "Len:%4d Lnks:%5d Str: %s\n",
-	  ptr->length, ptr->links, str );
+        str = (char *)(ptr + 1);
+        fprintf( stderr, "Len:%4zu Lnks:%5d Str: %s\n",
+          ptr->length, ptr->links, str );
     }
     fprintf( stderr, "Total strings in hash %d: %d\n", hash, c );
 }
@@ -231,24 +252,30 @@ void hash_dump( int hash )
 char *check_hash( const char *str )
 {
    static char buf[1024];
-   int len, hash, psize, p, c;
+   size_t len, hash, psize;
+   int p = 0, c;
    struct hashstr_data *ptr, *fnd;
 
    buf[0] = '\0';
+   if (!str)
+   {
+       snprintf( buf, sizeof(buf), "(null) not found.\n" );
+       return buf;
+   }
    len = strlen(str);
    psize = sizeof(struct hashstr_data);
    hash = len % STR_HASH_SIZE;
    for (fnd = NULL, ptr = string_hash[hash], c = 0; ptr; ptr = ptr->next, c++ )
-     if ( len == ptr->length && !strcmp(str,(char *)ptr+psize) )
+     if ( len == ptr->length && !strcmp(str, (const char *)ptr + psize) )
      {
-	fnd = ptr;
-	p = c+1;
+        fnd = ptr;
+        p = c + 1;
      }
    if ( fnd )
-     SPRINTF( buf, "Hash info on string: %s\nLinks: %d  Position: %d/%d  Hash: %d  Length: %d\n",
-	  str, fnd->links, p, c, hash, fnd->length );
+     snprintf( buf, sizeof(buf), "Hash info on string: %.512s%s\nLinks: %d  Position: %d/%d  Hash: %zu  Length: %zu\n",
+          str, (len > 512) ? "..." : "", fnd->links, p, c, hash, fnd->length );
    else
-     SPRINTF( buf, "%s not found.\n", str );
+     snprintf( buf, sizeof(buf), "%.900s%s not found.\n", str, (len > 900) ? "..." : "" );
    return buf;
 }
 
@@ -256,31 +283,33 @@ char *hash_stats( )
 {
     static char buf[1024];
     struct hashstr_data *ptr;
-    int x, c, total, totlinks, unique, bytesused, wouldhave, hilink;
+    int x;
+    size_t total, totlinks, unique, bytesused, wouldhave, hilink, saved;
 
     totlinks = unique = total = bytesused = wouldhave = hilink = 0;
     for ( x = 0; x < STR_HASH_SIZE; x++ )
     {
-	for ( c = 0, ptr = string_hash[x]; ptr; ptr = ptr->next, c++ )
-	{
-	   total++;
-	   if ( ptr->links == 1 )
-	     unique++;
-	   if ( ptr->links > hilink )
-	     hilink = ptr->links;
-	   totlinks += ptr->links;
-	   bytesused += (ptr->length + 1 + sizeof(struct hashstr_data));
-       wouldhave += ( ( ptr->links * sizeof(struct hashstr_data) ) + ( ptr->links * ( ptr->length + 1 ) ) );
-	}
+        for ( ptr = string_hash[x]; ptr; ptr = ptr->next )
+        {
+           total++;
+           if ( ptr->links == 1 )
+             unique++;
+           if ( ptr->links > hilink )
+             hilink = ptr->links;
+           totlinks += ptr->links;
+           bytesused += (ptr->length + 1 + sizeof(struct hashstr_data));
+           wouldhave += ( ( ptr->links * sizeof(struct hashstr_data) ) + ( ptr->links * ( ptr->length + 1 ) ) );
+        }
     }
-    SPRINTF( buf, "Hash strings allocated:%8d  Total links  : %d\nString bytes allocated:%8d  Bytes saved  : %d\nUnique (wasted) links :%8d  Hi-Link count: %d\n",
-	total, totlinks, bytesused, wouldhave - bytesused, unique, hilink );
+    saved = (wouldhave >= bytesused) ? (wouldhave - bytesused) : 0;
+    snprintf( buf, sizeof(buf),
+        "Hash strings allocated:%8zu  Total links  : %zu\nString bytes allocated:%8zu  Bytes saved  : %zu\nUnique (wasted) links :%8zu  Hi-Link count: %zu\n",
+        total, totlinks, bytesused, saved, unique, hilink );
     return buf;
 }
 
 void hash_unique( int count)
 {
-
     int nolinks = 0;
     for (int hash = 0; hash < STR_HASH_SIZE && nolinks < count; ++hash)
     {
@@ -290,7 +319,7 @@ void hash_unique( int count)
 
             if (ptr->links == 1)
             {
-                fprintf(stderr, "hash=%d len=%d links=%d str=[%s]\n",
+                fprintf(stderr, "hash=%d len=%zu links=%d str=[%s]\n",
                        hash, ptr->length, ptr->links, s);
                 nolinks++;
             }
@@ -305,28 +334,27 @@ void show_high_hash( int top )
     int x;
     char *str;
 
-//  psize = sizeof(struct hashstr_data);
     for ( x = 0; x < STR_HASH_SIZE; x++ )
-	for ( ptr = string_hash[x]; ptr; ptr = ptr->next )
-	  if ( ptr->links >= top )
-	  {
-    // Pointer arithmetic is cleaner and more portable than casting to int and back, and it works on 64-bit systems without modification. AI&DV 3-12-26
-    //	str = (char *) (((int) ptr) + psize);
-    str = (char *)(ptr + 1);         
- 	     fprintf( stderr, "Links: %5d  String: >%s<\n", ptr->links, str );
-	  }
+        for ( ptr = string_hash[x]; ptr; ptr = ptr->next )
+          if ( top <= 0 || (unsigned int)ptr->links >= (unsigned int)top )
+          {
+             str = (char *)(ptr + 1);
+             fprintf( stderr, "Links: %5d  String: >%s<\n", ptr->links, str );
+          }
 }
 
 bool in_hash_table( const char *str )
 {
-   int len, hash, psize;
+   size_t len, hash, psize;
    struct hashstr_data *ptr;
 
+   if (!str)
+       return FALSE;
    len = strlen( str );
    psize = sizeof( struct hashstr_data );
    hash = len % STR_HASH_SIZE;
    for( ptr = string_hash[hash]; ptr; ptr = ptr->next )
-      if( len == ptr->length && str == ( (char *)ptr + psize ) )
+      if( len == ptr->length && str == ( (const char *)ptr + psize ) )
          return TRUE;
    return FALSE;
 }

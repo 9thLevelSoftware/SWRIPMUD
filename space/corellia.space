@@ -1,0 +1,16 @@
+#SPACE
+Name         Corellia~
+Filename     corellia.space~
+Type         1
+Locationa    Shipyard Landing Bay~
+Doca         10603
+Locationb    ~
+Docb         0
+Locationc    ~
+Docc         0
+Xpos         502
+Ypos         7200
+Zpos         3080
+End
+
+#END

@@ -1,3 +1,13 @@
+Building SWRIPMUD on a Windows host
 
-Release v1.0.1 is now compatible with Windows when compiling in cgywin.  All you need to do is copy Makefile-win to overwrite Makefile, and it should compile without any problems.  Let me know if you encounter any at Darrik@swrip.net
+Use WSL with the Linux C++ toolchain and development headers for zlib,
+OpenSSL, and libcrypt. From the checkout directory inside WSL, run:
 
+    make -C src
+
+The build installs the Linux executable at bin/swrip. Start it from the
+bin directory so the server can find the sibling world and system directories.
+
+Existing WSL scripts may also use make -C src -f Makefile-win. This entry
+point delegates to the same Linux Makefile. Native Windows and Cygwin builds
+are retired.

@@ -21,7 +21,7 @@
 * 			New OLC Schema-based System				                       *
 * ------------------------------------------------------------------------ *
 * 	There are only two hooks currently for this system:                    *
-* One in handler.c in char_to_room to handle rwalk                         *
+* One in act_move.c on voluntary movement to handle rwalk                *
 * One in interpret() (two small blocks of code) to intercept OLC commands  *
 * Not counting the do_declarations, obviously                              *
 ****************************************************************************/
@@ -58,12 +58,28 @@
     // OLC_SHOP olc_shop specific functions    
     // DO_COMMANDS DO_?EDIT
 
+#include <algorithm>
+#include <climits>
 #include <typeinfo>
 #include <cstring>
+#include <limits>
 #include <set>
 #include "mud.h"
 #include "olc.h"
 #include "craft.h"
+
+extern int top_ed;
+static bool olc_desc_in_list(const DESCRIPTOR_DATA *d)
+{
+    if (!d)
+        return false;
+    for (const DESCRIPTOR_DATA *cur = first_descriptor; cur; cur = cur->next)
+    {
+        if (cur == d)
+            return true;
+    }
+    return false;
+}
 
 // extern functions
 extern size_t visible_length(const char *txt);
@@ -75,11 +91,16 @@ extern size_t get_langflag(const std::string& flag);
 extern bool command_is_authorized_for_char(CHAR_DATA* ch, CMDTYPE* cmd);
 std::vector<CraftRecipe> &craft_get_recipes_for_olc();
 CraftRecipe *craft_find_recipe_for_olc( const std::string &name );
-void craft_save_all_recipes_for_olc();
+CraftRecipe *craft_append_recipe_for_olc( const CraftRecipe &recipe );
+
+bool olc_craft_is_uncommitted_draft(const OlcSession* sess);
+void olc_craft_cleanup_uncommitted_draft(OlcSession* sess);
+bool olc_craft_pre_commit_check(CHAR_DATA* ch, OlcSession* sess);
 
 
 bool olc_extradescs_equal(const EXTRA_DESCR_DATA* a, const EXTRA_DESCR_DATA* b);
 bool olc_affects_equal(const AFFECT_DATA* a, const AFFECT_DATA* b);
+static void olc_check_wield_after_affects(CHAR_DATA* ch);
 void olc_apply_flag_delta(BitSet& dst, const BitSet& edited, const BitSet& baseline);
 MatchResult match_keywords(const std::string& keyword_list, const std::string& input);
 void olc_show_extradesc_help(CHAR_DATA* ch);
@@ -164,6 +185,39 @@ static bool craft_validate_recipe_report( CHAR_DATA *ch, const CraftRecipe *reci
 static bool olc_craft_is_field_name( const char *input );
 static bool olc_craft_edit_interpret( CHAR_DATA *ch, const std::string &command, const std::string &argument );
 bool olc_craft_edit_revert(CHAR_DATA* ch);
+
+static void olc_abort_active_line_editor(CHAR_DATA *ch, OlcSession *sess)
+{
+    if (!ch)
+    {
+        if (sess)
+            sess->editor_context = nullptr;
+        return;
+    }
+
+    DESCRIPTOR_DATA *d = ch->desc;
+    bool active = (ch->editor != nullptr)
+        || (ch->substate > SUB_NONE && ch->substate < SUB_TIMER_DO_ABORT)
+        || (d && d->connected == CON_EDITING)
+        || (sess && sess->editor_context != nullptr);
+
+    if (!active)
+        return;
+
+    if (ch->editor)
+        stop_editing(ch);
+
+    if (ch->substate < SUB_TIMER_DO_ABORT)
+        ch->substate = SUB_NONE;
+    ch->dest_buf = nullptr;
+    ch->spare_ptr = nullptr;
+
+    if (d && d->connected == CON_EDITING)
+        d->connected = CON_PLAYING;
+
+    if (sess)
+        sess->editor_context = nullptr;
+}
 
 template <typename T>
 OlcField<T> make_olc_std_string_field(
@@ -271,7 +325,7 @@ const OlcSchema<ROOM_INDEX_DATA>* get_room_schema()
 {
     static std::vector<OlcField<ROOM_INDEX_DATA>> room_fields =
     {
-        make_olc_string_nohash_field<ROOM_INDEX_DATA>("name", &ROOM_INDEX_DATA::name,
+        make_olc_string_field<ROOM_INDEX_DATA>("name", &ROOM_INDEX_DATA::name,
             "Room Name - Seen at the top when looking at a room"),
         make_olc_editor_field<ROOM_INDEX_DATA>("description", &ROOM_INDEX_DATA::description,
             SUB_ROOM_DESC, "Room's long description which shows when looking/moving and not +BRIEF"),
@@ -501,15 +555,23 @@ const OlcSchema<SHOP_DATA>* get_shop_schema()
         make_olc_int_field<SHOP_DATA>("close", &SHOP_DATA::close_hour,
             "Closing Hour - Time the shop closes", 0, 23),
         make_olc_int_field<SHOP_DATA>("buy", &SHOP_DATA::profit_buy,
-            "Profit Margin (Buy) - Percentage the shop charges for items it buys", 100, 200),
+            "Profit Margin (Buy) - Percentage the shop charges for items it buys", 0, 1000),
         make_olc_int_field<SHOP_DATA>("sell", &SHOP_DATA::profit_sell,
             "Profit Margin (Sell) - Percentage the shop charges for items it sells", 0, 100),
         make_olc_int_field<SHOP_DATA>("fix", &SHOP_DATA::profit_fix,
-            "Profit Margin (Fix) - Percentage the shop charges for fixing items", 0, 100),            
+            "Profit Margin (Fix) - Percentage the shop charges for fixing items", 1, 1000),            
         make_olc_flag_field<SHOP_DATA>("stype", &SHOP_DATA::shop_type,
             shop_types, "Shop types: Determines what the shop will do"),            
         make_olc_flag_field<SHOP_DATA>("itypes", &SHOP_DATA::buy_type,
             o_types, "Item types: the object types the shop will handle"),              
+        make_olc_bool_field<SHOP_DATA>("splitrepair", &SHOP_DATA::separate_repair,
+            "Use separate repair item types and hours"),
+        make_olc_flag_field<SHOP_DATA>("repairtypes", &SHOP_DATA::repair_type,
+            o_types, "Item types accepted when separate repair settings are on"),
+        make_olc_int_field<SHOP_DATA>("repairopen", &SHOP_DATA::repair_open_hour,
+            "Repair opening hour when separate repair settings are on", 0, 23),
+        make_olc_int_field<SHOP_DATA>("repairclose", &SHOP_DATA::repair_close_hour,
+            "Repair closing hour when separate repair settings are on", 0, 23),
     };
 
     static OlcSchema<SHOP_DATA> shop_schema;
@@ -557,8 +619,16 @@ const OlcSchema<CraftRecipe>* get_craft_schema()
 
                 try
                 {
-                    r->gsn = std::stoi(s);
-                    return true;
+                    size_t pos = 0;
+                    int val = std::stoi(s, &pos);
+                    if ( pos != s.size() )
+                        return false;
+                    if ( val == -1 || (val >= 0 && val < top_sn && val < MAX_SKILL && skill_table[val] && skill_table[val]->name) )
+                    {
+                        r->gsn = val;
+                        return true;
+                    }
+                    return false;
                 }
                 catch (...)
                 {
@@ -567,7 +637,7 @@ const OlcSchema<CraftRecipe>* get_craft_schema()
             },
             [](CraftRecipe* r) -> std::string
             {
-                if ( r->gsn < 0 || !skill_table[r->gsn] )
+                if ( r->gsn < 0 || r->gsn >= top_sn || r->gsn >= MAX_SKILL || !skill_table[r->gsn] || !skill_table[r->gsn]->name )
                     return "none";
                 return skill_table[r->gsn]->name;
             },
@@ -879,6 +949,8 @@ bool olc_room_edit_revert(CHAR_DATA* ch)
         return false;
     }
 
+    olc_abort_active_line_editor(ch, sess);
+
     /* Free current working copy */
     if (sess->working_copy)
         sess->ops->free_clone(sess->working_copy);
@@ -937,16 +1009,26 @@ EXTRA_DESCR_DATA* olc_room_find_extra_desc(ROOM_INDEX_DATA* room, const std::str
 
 EXTRA_DESCR_DATA* olc_room_get_or_create_extra_desc(ROOM_INDEX_DATA* room, const std::string& keyword)
 {
+    if (!room || keyword.empty())
+        return nullptr;
+
     auto ed = olc_room_find_extra_desc(room, keyword);
 
     if (ed)
         return ed;
 
-    ed = new EXTRA_DESCR_DATA();
+    ed = new EXTRA_DESCR_DATA{};
     ed->keyword = STRALLOC(keyword);
     ed->description = STRALLOC("");
 
+    ed->prev = nullptr;
     ed->next = room->first_extradesc;
+
+    if (room->first_extradesc)
+        room->first_extradesc->prev = ed;
+    else
+        room->last_extradesc = ed;
+
     room->first_extradesc = ed;
 
     return ed;
@@ -965,10 +1047,10 @@ EXIT_DATA* olc_room_clone_exits(EXIT_DATA* src)
         ex->next = nullptr;
         ex->rexit = nullptr;
 
-        ex->to_room = src->to_room;
+        ex->vnum = src->vnum;
+        ex->to_room = (src->vnum > 0) ? get_room_index(src->vnum) : nullptr;
         ex->keyword = src->keyword ? STRALLOC(src->keyword) : nullptr;
         ex->description = src->description ? STRALLOC(src->description) : nullptr;
-        ex->vnum = src->vnum;
         ex->rvnum = src->rvnum;
         ex->exit_info = src->exit_info;
         ex->key = src->key;
@@ -1003,10 +1085,11 @@ ROOM_INDEX_DATA* olc_room_clone(const ROOM_INDEX_DATA* src)
     // Non editable field - used in olc show only
     dst->vnum        = src->vnum;
     dst->area        = src->area;
+    dst->game        = src->game;
 
     // Fix pointer fields
 
-    dst->name = src->name ? str_dup(src->name) : nullptr;
+    dst->name = src->name ? STRALLOC(src->name) : nullptr;
     dst->description = src->description ? STRALLOC(src->description) : nullptr;
 
     // Do NOT carry live world state
@@ -1035,10 +1118,27 @@ ROOM_INDEX_DATA* olc_room_clone(const ROOM_INDEX_DATA* src)
 
 bool olc_room_remove_extra_desc(ROOM_INDEX_DATA* room, const char* keyword)
 {
+    if (!room || !keyword || keyword[0] == '\0')
+        return false;
+
     for (auto ed = room->first_extradesc; ed; ed = ed->next)
     {
-        if (is_name(keyword, ed->keyword))
+        if (ed->keyword && is_name(keyword, ed->keyword))
         {
+            std::vector<DESCRIPTOR_DATA*> targets;
+            for (DESCRIPTOR_DATA* d = first_descriptor; d; d = d->next)
+            {
+                if (!d->closing && d->olc && d->olc->editor_context == ed)
+                    targets.push_back(d);
+            }
+            for (DESCRIPTOR_DATA* d : targets)
+            {
+                if (!olc_desc_in_list(d) || d->closing)
+                    continue;
+                if (d->olc && d->olc->editor_context == ed)
+                    olc_abort_active_line_editor(d->character, d->olc);
+            }
+
             // unlink
             if (ed->prev)
                 ed->prev->next = ed->next;
@@ -1107,6 +1207,23 @@ void olc_room_free_extra_descs(EXTRA_DESCR_DATA* ed)
     }
 }
 
+static void olc_replace_live_extra_descs(EXTRA_DESCR_DATA*& first, EXTRA_DESCR_DATA*& last,
+                                        EXTRA_DESCR_DATA* source)
+{
+    auto replacement = olc_room_clone_extra_descs(source);
+    for (auto ed = first; ed; ed = ed->next)
+        --top_ed;
+    olc_room_free_extra_descs(first);
+
+    first = replacement;
+    last = nullptr;
+    for (auto ed = first; ed; ed = ed->next)
+    {
+        last = ed;
+        ++top_ed;
+    }
+}
+
 void olc_room_free_exits( ROOM_INDEX_DATA *room, EXIT_DATA *xit )
 {
     EXIT_DATA *exit, *exit_next;
@@ -1127,7 +1244,7 @@ void olc_room_free(ROOM_INDEX_DATA* room)
         return;
 
     if (room->name)
-        STR_DISPOSE(room->name);
+        STRFREE(room->name);
 
     if (room->description)
         STRFREE(room->description);
@@ -1150,8 +1267,8 @@ void olc_room_apply_changes(ROOM_INDEX_DATA* src, ROOM_INDEX_DATA* dst)
 {
     // Strings
     if (src->name)
-        STR_DISPOSE(src->name);
-    src->name = dst->name ? str_dup(dst->name) : nullptr;
+        STRFREE(src->name);
+    src->name = dst->name ? STRALLOC(dst->name) : nullptr;
 
     if (src->description)
         STRFREE(src->description);
@@ -1166,13 +1283,7 @@ void olc_room_apply_changes(ROOM_INDEX_DATA* src, ROOM_INDEX_DATA* dst)
     src->tele_delay  = dst->tele_delay;
 
     // Extra descriptions
-    if (src->first_extradesc)
-        olc_room_free_extra_descs(src->first_extradesc);
-
-    src->first_extradesc = olc_room_clone_extra_descs(dst->first_extradesc);
-    src->last_extradesc = nullptr;
-    for (auto ed = src->first_extradesc; ed; ed = ed->next)
-        src->last_extradesc = ed;
+    olc_replace_live_extra_descs(src->first_extradesc, src->last_extradesc, dst->first_extradesc);
 
     // Exits
     if (src->first_exit)
@@ -1193,7 +1304,7 @@ bool olc_room_finish_extradesc_edit(
 
     if ( !ch || !ch->desc || !ch->desc->olc || !ch->desc->olc->editor_context )
     {
-        bug( "olc_room_finish_extradesc_edit: NULL editor_context", 0 );
+        bug( "olc_room_finish_extradesc_edit: NULL editor_context" );
         return false;
     }
 
@@ -1238,7 +1349,15 @@ bool olc_room_edit_extradesc_field(CHAR_DATA* ch, ROOM_INDEX_DATA* room)
     }
 
     /* CREATE / EDIT */
+    if (ch->substate == SUB_RESTRICTED || ch->editor != nullptr)
+    {
+        send_to_char("You cannot use this command from within another command.\n", ch);
+        return false;
+    }
+
     auto ed = olc_room_get_or_create_extra_desc(room, arg);
+    if (!ed)
+        return false;
 
     ch->substate = SUB_ROOM_EXTRA;
     ch->dest_buf = room;
@@ -1415,9 +1534,7 @@ void olc_room_relink_exits(ROOM_INDEX_DATA* room)
 
     EXIT_DATA* ex;
     EXIT_DATA* ex_next;
-    bool has_exit = false;
-
-    /* First pass: refresh destination pointers, rvnum, and remove bad exits */
+    /* Preserve unresolved destinations so builders can link rooms before creating them. */
     for (ex = room->first_exit; ex; ex = ex_next)
     {
         ex_next = ex->next;
@@ -1425,7 +1542,7 @@ void olc_room_relink_exits(ROOM_INDEX_DATA* room)
         ex->rvnum = room->vnum;
         ex->rexit = nullptr;
 
-        if (ex->vnum <= 0 || (ex->to_room = get_room_index(ex->vnum)) == nullptr)
+        if (ex->vnum <= 0)
         {
             bug("olc_room_relink_exits: deleting bad %s exit in room %d (vnum %d)",
                 exit_dir_label(ex->vdir), room->vnum, ex->vnum);
@@ -1433,11 +1550,8 @@ void olc_room_relink_exits(ROOM_INDEX_DATA* room)
             continue;
         }
 
-        has_exit = true;
+        ex->to_room = get_room_index(ex->vnum);
     }
-
-    if (!has_exit)
-        BV_SET_BIT(room->room_flags, ROOM_NO_MOB);
 
     /* Second pass: rebuild reverse pointers */
     for (ex = room->first_exit; ex; ex = ex->next)
@@ -1528,8 +1642,10 @@ void olc_room_init_pending_reverse_from_live(
     p.final_exit_info = 0;
     p.final_keyword.clear();
 
-    if (!ex->to_room)
+    ROOM_INDEX_DATA* to = (ex->vnum > 0) ? get_room_index(ex->vnum) : nullptr;
+    if (!to)
     {
+        ex->to_room = nullptr;
         p.initialized = true;
         return;
     }
@@ -1541,7 +1657,7 @@ void olc_room_init_pending_reverse_from_live(
         return;
     }
 
-    EXIT_DATA* back = olc_room_find_reverse_exit_to_room(ex->to_room, rdir, from->vnum);
+    EXIT_DATA* back = olc_room_find_reverse_exit_to_room(to, rdir, from->vnum);
     if (back)
     {
         p.final_key = back->key;
@@ -1689,14 +1805,19 @@ void olc_room_apply_pending_exit_side_effect(const OlcPendingExitSideEffect& p)
 
 void olc_room_exit_link_two_way(EXIT_DATA* ex, ROOM_INDEX_DATA* from)
 {
-    if (!ex || !from || !ex->to_room)
+    if (!ex || !from)
         return;
+
+    ROOM_INDEX_DATA* to = (ex->vnum > 0) ? get_room_index(ex->vnum) : nullptr;
+    if (!to)
+    {
+        ex->to_room = nullptr;
+        return;
+    }
 
     int rdir = get_rev_dir(ex->vdir);
     if (rdir < 0)
         return;
-
-    ROOM_INDEX_DATA* to = ex->to_room;
 
     /* Find a reverse-direction exit that actually leads back to the source room */
     EXIT_DATA* back = olc_room_find_reverse_exit_to_room(to, rdir, from->vnum);
@@ -1834,17 +1955,14 @@ std::string olc_room_exit_list_summary(void* obj)
 
     std::string out;
     int exit_num = 0;
-    int dir_counts[MAX_DIR+1];
-
-    for (int i = 0; i <= MAX_DIR; ++i)
-        dir_counts[i] = 0;
+    int dir_counts[DIR_SOMEWHERE + 1] = {};
 
     for (auto ex = room->first_exit; ex; ex = ex->next)
     {
         ++exit_num;
 
         int dir = ex->vdir;
-        bool valid_dir = (dir >= 0 && dir <= MAX_DIR+1);
+        bool valid_dir = (dir >= 0 && dir <= DIR_SOMEWHERE);
 
         int dir_index = 0;
         if (valid_dir)
@@ -2003,7 +2121,7 @@ bool olc_room_handle_exit_flags(CHAR_DATA* ch, EXIT_DATA* ex, const std::string&
         }
 
         int bit = get_exflag(word);
-        if (bit < 0)
+        if (bit < 0 || bit > 31)
         {
             send_to_char(("Unknown flag: " + word + "\n"), ch);
 
@@ -2018,9 +2136,9 @@ bool olc_room_handle_exit_flags(CHAR_DATA* ch, EXIT_DATA* ex, const std::string&
         }
 
         if (remove)
-            REMOVE_BIT(bits, (1 << bit));
+            REMOVE_BIT(bits, (1U << bit));
         else
-            SET_BIT(bits, (1 << bit));
+            SET_BIT(bits, (1U << bit));
     }
 
     ex->exit_info = bits;
@@ -2072,7 +2190,10 @@ bool olc_room_handle_exit_keyword(CHAR_DATA* ch, EXIT_DATA* ex)
     std::string arg = olc_room_exit_remaining_args(ch->desc->olc->last_cmd_arg);
     succ = set_str_field(ex->keyword, arg);
     if (succ)
+    {
+        ch->desc->olc->dirty = true;
         ch_printf(ch, "Exit %s keyword updated\n", exit_dir_label(ex->vdir));
+    }
     else
         ch_printf(ch, "Exit %s keyword failed to update\n", exit_dir_label(ex->vdir));
 
@@ -2088,7 +2209,10 @@ bool olc_room_handle_exit_desc(CHAR_DATA* ch, EXIT_DATA* ex)
     std::string arg = olc_room_exit_remaining_args(ch->desc->olc->last_cmd_arg);
     succ = set_str_field(ex->description, arg);
     if (succ)
+    {
+        ch->desc->olc->dirty = true;
         ch_printf(ch, "Exit %s desc updated\n", exit_dir_label(ex->vdir));
+    }
     else
         ch_printf(ch, "Exit %s desc failed to update\n", exit_dir_label(ex->vdir));
 
@@ -2137,7 +2261,7 @@ bool olc_room_handle_bexit_flags(CHAR_DATA* ch, ROOM_INDEX_DATA* room, EXIT_DATA
         }
 
         int bit = get_exflag((word));
-        if (bit < 0)
+        if (bit < 0 || bit > 31)
         {
             send_to_char(("Unknown flag: " + word + "\n"), ch);
 
@@ -2152,9 +2276,9 @@ bool olc_room_handle_bexit_flags(CHAR_DATA* ch, ROOM_INDEX_DATA* room, EXIT_DATA
         }
 
         if (remove)
-            REMOVE_BIT(bits, (1 << bit));
+            REMOVE_BIT(bits, (1U << bit));
         else
-            SET_BIT(bits, (1 << bit));
+            SET_BIT(bits, (1U << bit));
     }
 
     p->type = OlcExitSideEffectType::UPSERT_REVERSE;
@@ -2420,6 +2544,8 @@ void olc_room_discard_current_room_working_copy(CHAR_DATA* ch)
 
     auto sess = ch->desc->olc;
 
+    olc_abort_active_line_editor(ch, sess);
+
     if (sess->working_copy)
     {
         olc_room_free(static_cast<ROOM_INDEX_DATA*>(sess->working_copy));
@@ -2437,9 +2563,21 @@ void olc_room_discard_current_room_working_copy(CHAR_DATA* ch)
     sess->dirty = false;
 }
 
+static bool olc_block_crafting_menu(CHAR_DATA* ch)
+{
+    if (ch->substate != SUB_CRAFT_MENU)
+        return false;
+
+    send_to_char("Pause or cancel crafting before opening an editor.\n", ch);
+    return true;
+}
+
 void olc_room_edit_enter(CHAR_DATA* ch)
 {
-    if (!ch || !ch->desc || !ch->in_room)
+    if (!ch || !ch->desc || ch->desc->closing || ch->desc->write_failed || !ch->in_room)
+        return;
+
+    if (olc_block_crafting_menu(ch))
         return;
 
     if (ch->desc->olc)
@@ -2447,6 +2585,15 @@ void olc_room_edit_enter(CHAR_DATA* ch)
         send_to_char("You are already editing something.\n", ch);
         return;
     }
+
+    if (ch->substate == SUB_RESTRICTED || ch->editor != nullptr)
+    {
+        send_to_char("You cannot use this command from within another command.\n", ch);
+        return;
+    }
+
+    if (!ch->game || !can_rmodify(ch, ch->in_room))
+        return;
 
     olc_start(ch, ch->in_room, get_room_schema(), &room_olc_ops);
 
@@ -2456,7 +2603,7 @@ void olc_room_edit_enter(CHAR_DATA* ch)
     ch->desc->olc->mode = OlcEditMode::ROOM_INLINE;
     ch->desc->olc->anchor_room = ch->in_room;
 
-    do_olcshow(ch, "");
+    olc_show(ch, "", "");
 
     send_to_char("Room editing mode enabled.\n", ch);
     send_to_char("To exit, type stop save/abort, or just save/abort.\n", ch);    
@@ -2466,27 +2613,38 @@ void olc_room_edit_enter(CHAR_DATA* ch)
 
 void olc_room_edit_switch_to_room(CHAR_DATA* ch, ROOM_INDEX_DATA* room)
 {
-    if (!ch || !ch->desc || !ch->desc->olc || !room)
+    if (!ch || !ch->desc || !ch->desc->olc || !room || room != ch->in_room)
         return;
 
     auto sess = ch->desc->olc;
-    if (sess->mode != OlcEditMode::ROOM_INLINE)
+    if (sess->mode != OlcEditMode::ROOM_INLINE || sess->original == room ||
+        ch->desc->connected != CON_PLAYING || ch->desc->closing || ch->desc->write_failed ||
+        ch->editor || ch->substate != SUB_NONE || sess->editor_context)
         return;
 
-    /* Commit old room into live world, but do NOT save area file */
-    olc_commit_current(ch);
+    if (!ch->game || room->ship || !room->area || get_room_index(room->vnum) != room ||
+        !can_rmodify(ch, room))
+        return;
 
-    /* Tear down old current-room draft */
+    // Commit pending reverse exits before taking the new room snapshots.
+    if ((sess->dirty || !sess->pending_exit_side_effects.empty()) && !olc_commit_current(ch))
+        return;
+
+    auto working = olc_room_clone(room);
+    auto baseline = olc_room_clone(room);
+    if (!working || !baseline)
+    {
+        olc_room_free(working);
+        olc_room_free(baseline);
+        send_to_char("Could not open the new room editor.\n", ch);
+        return;
+    }
+
     olc_discard_current_working_copy(ch);
-
-    /* Retarget same inline session to the new room */
     sess->original = room;
-    sess->working_copy = sess->ops->clone(room);
-    sess->original_clone = sess->ops->clone(room);
-    sess->schema = get_room_schema();
-    sess->ops = &room_olc_ops;
+    sess->working_copy = working;
+    sess->original_clone = baseline;
     sess->anchor_room = room;
-    sess->mode = OlcEditMode::ROOM_INLINE;
 
     send_to_char("Now editing this room.\n", ch);
 }
@@ -2652,45 +2810,60 @@ bool olc_room_edit_interpret(CHAR_DATA* ch, const std::string& command, const st
 
 void olc_show_room_preview_exits( CHAR_DATA* ch, ROOM_INDEX_DATA* room )
 {
-    char buf[MAX_STRING_LENGTH];    
-    EXIT_DATA *pexit;    
+    char buf[MAX_STRING_LENGTH];
+    EXIT_DATA *pexit;
+
+    if ( !ch || !room )
+        return;
+
     set_char_color( AT_EXITS, ch );
     bool found = false;
 
     ch_printf(ch,  "Exits:\n" );
-    for ( pexit = room->first_exit; pexit; pexit = pexit->next )    
+    for ( pexit = room->first_exit; pexit; pexit = pexit->next )
     {
-        if ( pexit->to_room
-        &&  !IS_SET(pexit->exit_info, EX_HIDDEN) )        
+        ROOM_INDEX_DATA *to_room = (pexit->vnum > 0) ? get_room_index(pexit->vnum) : nullptr;
+        if ( !to_room )
+            pexit->to_room = nullptr;
+
+        if ( to_room
+        &&  !IS_SET(pexit->exit_info, EX_HIDDEN) )
             found = true;
-        buf[0] = '\0';        
+
+        const char *dir_lbl = (pexit->vdir >= 0 && pexit->vdir <= DIR_SOMEWHERE)
+            ? dir_name[pexit->vdir]
+            : "unknown";
+        const char *dest_name = !to_room
+            ? "(unlinked)"
+            : (room_is_dark( to_room )
+                ? "Too dark to tell"
+                : (to_room->name ? to_room->name : "(unnamed)"));
+
+        buf[0] = '\0';
         if ( IS_SET(pexit->exit_info, EX_CLOSED) )
         {
             STRAPP( buf, "%-5s - (closed)",
-            capitalize( dir_name[pexit->vdir] ).c_str() );
+            capitalize( dir_lbl ).c_str() );
         }
         else if ( IS_SET(pexit->exit_info, EX_WINDOW) )
         {
             STRAPP( buf, "%-5s - (window)",
-            capitalize( dir_name[pexit->vdir] ).c_str() );
+            capitalize( dir_lbl ).c_str() );
         }
         else if ( IS_SET(pexit->exit_info, EX_xAUTO) )
         {
-        STRAPP( buf, "%-5s - %s",
-            capitalize( pexit->keyword ).c_str(),
-            room_is_dark( pexit->to_room )
-            ?  "Too dark to tell"
-            : pexit->to_room->name );
+            const char *kw = (pexit->keyword && pexit->keyword[0] != '\0') ? pexit->keyword : dir_lbl;
+            STRAPP( buf, "%-5s - %s",
+            capitalize( kw ).c_str(),
+            dest_name );
         }
         else
             STRAPP( buf, "%-5s - %s",
-            capitalize( dir_name[pexit->vdir] ).c_str(),
-            room_is_dark( pexit->to_room )
-            ?  "Too dark to tell"
-            : pexit->to_room->name ); 
+            capitalize( dir_lbl ).c_str(),
+            dest_name );
         ch_printf(ch, "%s\n", buf);
-    }   
-    buf[0] = '\0';         
+    }
+    buf[0] = '\0';
     if ( !found )
         ch_printf(ch, "%s", "none.\n");
 }
@@ -2731,18 +2904,21 @@ void olc_show_room_preview(CHAR_DATA* ch, ROOM_INDEX_DATA* room, const char* arg
         return;
 
     std::string arg = argument ? argument : "";
-    std::string out;    
+    size_t first_non_space = arg.find_first_not_of(' ');
+    if (first_non_space == std::string::npos)
+        arg.clear();
+    else
+        arg.erase(0, first_non_space);
+
     if (arg.empty())
     {
-        arg.erase(0, arg.find_first_not_of(' '));
-
         set_char_color( AT_RMNAME, ch);
-        send_to_char( room->name, ch);
+        send_to_char( room->name ? room->name : "(unnamed)", ch);
         send_to_char(" ", ch);
 
-        if( !ch->desc->original )
+        if( ch->desc && !ch->desc->original && !IS_NPC(ch) && ch->pcdata )
         {
-            if( ( get_trust( ch ) >= LEVEL_IMMORTAL ) )             
+            if( ( get_trust( ch ) >= LEVEL_IMMORTAL ) )
             {
                 if( BV_IS_SET( ch->act, PLR_ROOMVNUM ) )
                 {
@@ -2762,31 +2938,32 @@ void olc_show_room_preview(CHAR_DATA* ch, ROOM_INDEX_DATA* room, const char* arg
         }
 
         send_to_char( "\n", ch );
-        set_char_color( AT_RMDESC, ch ); 	
-        
-        if ( ( !IS_NPC(ch) && !BV_IS_SET(ch->act, PLR_BRIEF) ) )
-            send_to_char( room->description, ch );
+        set_char_color( AT_RMDESC, ch );
+
+        if ( !IS_NPC(ch) && !BV_IS_SET(ch->act, PLR_BRIEF) )
+            send_to_char( room->description ? room->description : "", ch );
 
         if ( BV_IS_SET( room->room_flags, ROOM_CAN_LAND ) )
             send_to_char( "&GYou can rent ships here. ( Type rent )&R&W\n", ch );
-        
+
         if ( is_bus_stop( room->vnum ) )
             send_to_char( "&GA Serin shuttle picks up passengers here. ( Type findserin )&R&W\n", ch );
-            
+
         if ( !IS_NPC(ch) && BV_IS_SET(ch->act, PLR_AUTOEXIT) )
-                olc_show_room_preview_exits( ch, room );
+            olc_show_room_preview_exits( ch, room );
+
+        return;
     }
+
     const char* ed = get_extra_descr(arg, room->first_extradesc);
-    if (ed)
+    if (ed && ed[0] != '\0')
     {
-        out = ed;
-        if (!out.empty())
-        {
-            send_to_char("\n", ch);
-            send_to_char(out, ch);
-            return;
-        }
+        send_to_char("\n", ch);
+        send_to_char(ed, ch);
+        return;
     }
+
+    send_to_char("You don't see that here.\n", ch);
 }
 
 void olc_show_room(CHAR_DATA* ch, ROOM_INDEX_DATA* room, bool show_help, int term_width)
@@ -2858,7 +3035,7 @@ void olc_show_room(CHAR_DATA* ch, ROOM_INDEX_DATA* room, bool show_help, int ter
     {
         std::string sector =
             (room->sector_type >= 0)
-                ? get_flag_name(sect_types, room->sector_type, SECT_MAX)
+                ? get_flag_name_sparse(sect_types, room->sector_type, SECT_MAX)
                 : std::to_string(room->sector_type);
 
         auto lines = olc_format_line(
@@ -3036,6 +3213,12 @@ void object_olc_after_commit(CHAR_DATA* ch, void* original, void* working)
     {
         olc_object_apply_prototype_changes(live->pIndexData, draft, baseline);
     }
+    else if (live->carried_by && live->wear_loc != WEAR_NONE &&
+             !olc_affects_equal(draft->first_affect, baseline->first_affect))
+    {
+        olc_check_wield_after_affects(live->carried_by);
+    }
+    draft->wear_loc = live->wear_loc;
 }
 
 void object_olc_after_revert(CHAR_DATA* ch, void* original, void* working)
@@ -3080,7 +3263,7 @@ bool olc_object_parse_affect_value_wrap(CHAR_DATA* ch, int loc, const std::strin
     return olc_object_parse_affect_value(ch, loc, value_text, out_value);
 }
 
-std::vector<std::string> olc_object_format_single_affect_lines(
+static std::vector<std::string> olc_format_single_affect_lines(
     AFFECT_DATA* paf,
     size_t max_name_len,
     int term_width)
@@ -3090,16 +3273,23 @@ std::vector<std::string> olc_object_format_single_affect_lines(
     if (!paf)
         return out;
 
-    char locbuf[MSL];
-    char modbuf[MSL];
-
-    snprintf(locbuf, sizeof(locbuf), "%d", paf->location);
-    snprintf(modbuf, sizeof(modbuf), "%d", paf->modifier);
-
-    olc_append_lines(out, olc_format_line("location", locbuf, OLC_COL_ENUM, (int)max_name_len, term_width));
-    olc_append_lines(out, olc_format_line("modifier", modbuf, OLC_COL_INT, (int)max_name_len, term_width));
+    const int width = std::max(9, static_cast<int>(max_name_len));
+    const std::string bit = paf->bitvector == AFF_NONE ? "none" : enum_to_string_flag(paf->bitvector, aff_flags);
+    olc_append_lines(out, olc_format_line("location", enum_to_string_flag(paf->location, a_types), OLC_COL_ENUM, width, term_width));
+    olc_append_lines(out, olc_format_line("modifier", std::to_string(paf->modifier), OLC_COL_INT, width, term_width));
+    olc_append_lines(out, olc_format_line("duration", std::to_string(paf->duration), OLC_COL_INT, width, term_width));
+    olc_append_lines(out, olc_format_line("type", std::to_string(paf->type), OLC_COL_INT, width, term_width));
+    olc_append_lines(out, olc_format_line("bitvector", bit, OLC_COL_ENUM, width, term_width));
 
     return out;
+}
+
+std::vector<std::string> olc_object_format_single_affect_lines(
+    AFFECT_DATA* paf,
+    size_t max_name_len,
+    int term_width)
+{
+    return olc_format_single_affect_lines(paf, max_name_len, term_width);
 }
 
 bool olc_object_edit_revert(CHAR_DATA* ch)
@@ -3114,6 +3304,8 @@ bool olc_object_edit_revert(CHAR_DATA* ch)
         send_to_char("No revert snapshot is available.\n", ch);
         return false;
     }
+
+    olc_abort_active_line_editor(ch, sess);
 
     if (sess->working_copy)
         sess->ops->free_clone(sess->working_copy);
@@ -3146,6 +3338,12 @@ OBJ_DATA* olc_object_clone(const OBJ_DATA* src)
 
     if (dst->next || dst->prev || dst == first_object || dst == last_object)
         UNLINK(dst, first_object, last_object, next, prev);
+
+    /* OLC clones are detached working snapshots, not live world objects */
+    if (dst->pIndexData)
+        --dst->pIndexData->count;
+    --numobjsloaded;
+    --physicalobjects;
 
     /* Detach world/runtime linkage */
     dst->next = nullptr;
@@ -3241,20 +3439,95 @@ void olc_object_free_clone(OBJ_DATA* obj)
     obj->first_affect = nullptr;
     obj->last_affect = nullptr;
 
-    /* Undo clone_object() bookkeeping */
-    if (obj->pIndexData)
-        obj->pIndexData->count -= obj->count;
-
-    numobjsloaded -= obj->count;
-    --physicalobjects;
-
     delete obj;
+}
+
+static void olc_modify_live_affects(CHAR_DATA* ch, AFFECT_DATA* first, bool add)
+{
+    for (AFFECT_DATA* af = first; af; af = af->next)
+    {
+        const int location = af->location % REVERSE_APPLY;
+        if (location == APPLY_WEARSPELL || location == APPLY_REMOVESPELL || location == APPLY_STRIPSN)
+        {
+            // These locations fire actions during a game event. Apply only their flags during editing.
+            AFFECT_DATA flags = *af;
+            flags.location = APPLY_NONE;
+            affect_modify(ch, &flags, add);
+        }
+        else
+            affect_modify(ch, af, add);
+    }
+}
+
+static void olc_restore_shared_affect_flags(CHAR_DATA* ch, const FLAG_SET& before)
+{
+    FLAG_SET supplied;
+    if (IS_NPC(ch) && ch->pIndexData)
+        supplied = ch->pIndexData->affected_by;
+    else if (!IS_NPC(ch) && ch->race >= 0 && ch->race < MAX_RACE)
+        supplied = race_table[ch->race].affected;
+
+    const auto collect = [&supplied](const AFFECT_DATA* first) {
+        for (const AFFECT_DATA* af = first; af; af = af->next)
+        {
+            if (af->bitvector >= 0 && af->bitvector < AFF_MAX)
+                supplied.set(af->bitvector);
+            if (af->location % REVERSE_APPLY == APPLY_AFFECT && af->modifier >= 0 && af->modifier < AFF_MAX)
+                supplied.set(af->modifier);
+        }
+    };
+
+    collect(ch->first_affect);
+    for (const OBJ_DATA* obj = ch->first_carrying; obj; obj = obj->next_content)
+    {
+        if (obj->wear_loc == WEAR_NONE)
+            continue;
+        collect(obj->first_affect);
+        if (obj->pIndexData)
+            collect(obj->pIndexData->first_affect);
+    }
+
+    for (int bit = 0; bit < AFF_MAX; ++bit)
+        if (before.test(bit) && supplied.test(bit))
+            ch->affected_by.set(bit);
+}
+
+static void olc_replace_live_affects(AFFECT_DATA*& first, AFFECT_DATA*& last, AFFECT_DATA* edited,
+                                     CHAR_DATA* previous_target, CHAR_DATA* new_target)
+{
+    AFFECT_DATA* replacement = olc_clone_affects(edited);
+    AFFECT_DATA* previous = first;
+    first = last = nullptr;
+
+    if (previous_target && previous)
+    {
+        const FLAG_SET before = previous_target->affected_by;
+        olc_modify_live_affects(previous_target, previous, false);
+        olc_restore_shared_affect_flags(previous_target, before);
+    }
+    olc_free_affects(previous);
+
+    first = replacement;
+    for (AFFECT_DATA* af = first; af; af = af->next)
+        last = af;
+    if (new_target)
+        olc_modify_live_affects(new_target, first, true);
+}
+
+static void olc_check_wield_after_affects(CHAR_DATA* ch)
+{
+    AFFECT_DATA check{};
+    check.location = APPLY_NONE;
+    check.bitvector = AFF_NONE;
+    affect_modify(ch, &check, true);
 }
 
 void olc_object_apply_instance_changes(OBJ_DATA* dst, OBJ_DATA* src)
 {
     if (!dst || !src)
         return;
+
+    CHAR_DATA* previous_wearer = dst->wear_loc != WEAR_NONE ? dst->carried_by : nullptr;
 
     /* strings */
     set_str_field(dst->name, src->name ? src->name : "");
@@ -3272,28 +3545,72 @@ void olc_object_apply_instance_changes(OBJ_DATA* dst, OBJ_DATA* src)
     dst->timer = src->timer;
     dst->objflags = src->objflags;
     dst->trig_flags = src->trig_flags;
-    dst->count = src->count;
+    {
+        int new_count = std::min<int>(SHRT_MAX, std::max<int>(1, src->count));
+        if (dst->count != new_count)
+        {
+            int delta = new_count - dst->count;
+            if (dst->pIndexData)
+                dst->pIndexData->count += delta;
+            numobjsloaded += delta;
+            dst->count = static_cast<sh_int>(new_count);
+        }
+    }
 
     for (int i = 0; i < 6; ++i)
         dst->value[i] = src->value[i];
 
     /* extra descs */
-    if (dst->first_extradesc)
-        olc_room_free_extra_descs(dst->first_extradesc);
+    olc_replace_live_extra_descs(dst->first_extradesc, dst->last_extradesc, src->first_extradesc);
 
-    dst->first_extradesc = olc_room_clone_extra_descs(src->first_extradesc);
-    dst->last_extradesc = nullptr;
-    for (auto ed = dst->first_extradesc; ed; ed = ed->next)
-        dst->last_extradesc = ed;
+    CHAR_DATA* wearer = dst->wear_loc != WEAR_NONE ? dst->carried_by : nullptr;
+    if (previous_wearer != wearer || !olc_affects_equal(dst->first_affect, src->first_affect))
+    {
+        // Defer wield checks until the instance and its prototype have both been updated.
+        CHAR_DATA* affected_carrier = dst->carried_by;
+        CHAR_DATA* previous_saving_char = saving_char;
+        if (affected_carrier)
+            saving_char = affected_carrier;
+        olc_replace_live_affects(dst->first_affect, dst->last_affect, src->first_affect, previous_wearer, wearer);
+        saving_char = previous_saving_char;
+    }
+}
 
-    /* affects */
-    if (dst->first_affect)
-        olc_free_affects(dst->first_affect);
+static void olc_object_replace_prototype_affects(OBJ_INDEX_DATA* dst, AFFECT_DATA* edited)
+{
+    std::map<CHAR_DATA*, int> wearers;
+    for (OBJ_DATA* obj = first_object; obj; obj = obj->next)
+        if (obj->pIndexData == dst && obj->carried_by && obj->wear_loc != WEAR_NONE)
+            ++wearers[obj->carried_by];
 
-    dst->first_affect = olc_clone_affects(src->first_affect);
-    dst->last_affect = nullptr;
-    for (auto af = dst->first_affect; af; af = af->next)
+    AFFECT_DATA* replacement = olc_clone_affects(edited);
+    AFFECT_DATA* previous = dst->first_affect;
+    dst->first_affect = dst->last_affect = nullptr;
+
+    CHAR_DATA* previous_saving_char = saving_char;
+    for (const auto& [wearer, count] : wearers)
+    {
+        saving_char = wearer;
+        const FLAG_SET before = wearer->affected_by;
+        for (int i = 0; i < count; ++i)
+            olc_modify_live_affects(wearer, previous, false);
+        olc_restore_shared_affect_flags(wearer, before);
+    }
+    olc_free_affects(previous);
+
+    dst->first_affect = replacement;
+    for (AFFECT_DATA* af = replacement; af; af = af->next)
         dst->last_affect = af;
+    for (const auto& [wearer, count] : wearers)
+    {
+        saving_char = wearer;
+        for (int i = 0; i < count; ++i)
+            olc_modify_live_affects(wearer, replacement, true);
+    }
+    saving_char = previous_saving_char;
+
+    for (const auto& entry : wearers)
+        olc_check_wield_after_affects(entry.first);
 }
 
 void olc_object_apply_prototype_changes(
@@ -3342,9 +3659,6 @@ void olc_object_apply_prototype_changes(
         olc_apply_flag_delta(dst->objflags, edited->objflags, baseline->objflags);
     }
 
-    if (edited->count != baseline->count)
-        dst->count = edited->count;
-
     /* value[0..5] */
     for (int i = 0; i < 6; ++i)
     {
@@ -3354,32 +3668,19 @@ void olc_object_apply_prototype_changes(
 
     /* Extra descriptions */
     if (!olc_extradescs_equal(edited->first_extradesc, baseline->first_extradesc))
-    {
-        if (dst->first_extradesc)
-            olc_room_free_extra_descs(dst->first_extradesc);
-
-        dst->first_extradesc = olc_room_clone_extra_descs(edited->first_extradesc);
-        dst->last_extradesc = nullptr;
-        for (auto ed = dst->first_extradesc; ed; ed = ed->next)
-            dst->last_extradesc = ed;
-    }
+        olc_replace_live_extra_descs(dst->first_extradesc, dst->last_extradesc, edited->first_extradesc);
 
     /* Affects */
     if (!olc_affects_equal(edited->first_affect, baseline->first_affect))
-    {
-        if (dst->first_affect)
-            olc_free_affects(dst->first_affect);
-
-        dst->first_affect = olc_clone_affects(edited->first_affect);
-        dst->last_affect = nullptr;
-        for (auto af = dst->first_affect; af; af = af->next)
-            dst->last_affect = af;
-    }
+        olc_object_replace_prototype_affects(dst, edited->first_affect);
 }
 
 void olc_object_edit_enter(CHAR_DATA* ch, OBJ_DATA* obj)
 {
-    if (!ch || !ch->desc || !obj)
+    if (!ch || !ch->desc || ch->desc->closing || ch->desc->write_failed || !obj)
+        return;
+
+    if (olc_block_crafting_menu(ch))
         return;
 
     if (ch->desc->olc)
@@ -3388,12 +3689,25 @@ void olc_object_edit_enter(CHAR_DATA* ch, OBJ_DATA* obj)
         return;
     }
 
+    if (ch->substate == SUB_RESTRICTED || ch->editor != nullptr)
+    {
+        send_to_char("You cannot use this command from within another command.\n", ch);
+        return;
+    }
+
+    if (!ch->game || !obj->pIndexData || !can_omodify(ch, obj))
+        return;
+
+    separate_obj(obj);
     olc_start(ch, obj, get_object_schema(), &object_olc_ops);
 
     if (!ch->desc->olc)
         return;
 
-    send_to_char("Object editing mode enabled.\n", ch);
+    ch->desc->olc->mode = OlcEditMode::OBJECT_INLINE;
+    olc_show(ch, "", "");
+    send_to_char("Object inline editing mode enabled.\n", ch);
+    send_to_char("To exit, type stop save/abort, or just save/abort.\n", ch);
 }
 
 void olc_object_show_header(CHAR_DATA* ch, OBJ_DATA* obj)
@@ -3470,6 +3784,20 @@ bool olc_object_remove_extra_desc(OBJ_DATA* obj, const char* keyword)
     {
         if (is_name(keyword, ed->keyword))
         {
+            std::vector<DESCRIPTOR_DATA*> targets;
+            for (DESCRIPTOR_DATA* d = first_descriptor; d; d = d->next)
+            {
+                if (!d->closing && d->olc && d->olc->editor_context == ed)
+                    targets.push_back(d);
+            }
+            for (DESCRIPTOR_DATA* d : targets)
+            {
+                if (!olc_desc_in_list(d) || d->closing)
+                    continue;
+                if (d->olc && d->olc->editor_context == ed)
+                    olc_abort_active_line_editor(d->character, d->olc);
+            }
+
             if (ed->prev)
                 ed->prev->next = ed->next;
             else
@@ -3522,7 +3850,7 @@ bool olc_object_finish_extradesc_edit(
 
     if ( !ch || !ch->desc || !ch->desc->olc || !ch->desc->olc->editor_context )
     {
-        bug( "olc_object_finish_extradesc_edit: NULL editor_context", 0 );
+        bug( "olc_object_finish_extradesc_edit: NULL editor_context" );
         return false;
     }
 
@@ -3563,6 +3891,12 @@ bool olc_object_edit_extradesc_field(CHAR_DATA* ch, OBJ_DATA* obj)
         }
 
         return true;
+    }
+
+    if (ch->substate == SUB_RESTRICTED || ch->editor != nullptr)
+    {
+        send_to_char("You cannot use this command from within another command.\n", ch);
+        return false;
     }
 
     auto ed = olc_object_get_or_create_extra_desc(obj, arg);
@@ -4188,15 +4522,50 @@ void mobile_olc_save(CHAR_DATA* ch, void* original)
         send_to_char("Live mobile changes saved to instance only.\n", ch);
 }
 
-void mobile_olc_after_commit(CHAR_DATA* ch, void* /*original*/, void* /*working*/)
+void mobile_olc_after_commit(CHAR_DATA* ch, void* original, void* working)
 {
-    /*
-     * IMPORTANT:
-     * Prototype delta sync is NOT done here.
-     * It must be done in the main commit path where baseline is available.
-     */
-    if (ch)
-        send_to_char("Mobile committed.\n", ch);
+    if (!ch || !ch->desc || !ch->desc->olc || !original || !working)
+        return;
+
+    auto sess = ch->desc->olc;
+    auto live = static_cast<CHAR_DATA*>(original);
+    auto edited = static_cast<CHAR_DATA*>(working);
+    const auto* baseline = static_cast<const CHAR_DATA*>(sess->original_clone);
+
+    // The draft starts with applied stats. Apply only builder edits, then replace live modifiers.
+    const auto apply_delta = [live, edited, baseline](auto CHAR_DATA::* field) {
+        using Value = std::remove_reference_t<decltype(live->*field)>;
+        const auto value = static_cast<long long>(live->*field) + (edited->*field - static_cast<long long>(baseline->*field));
+        live->*field = static_cast<Value>(std::clamp<long long>(value, std::numeric_limits<Value>::min(), std::numeric_limits<Value>::max()));
+    };
+    if (edited->sex != baseline->sex)
+        live->sex = (live->sex + edited->sex - baseline->sex + 3) % 3;
+    apply_delta(&CHAR_DATA::saving_poison_death);
+    apply_delta(&CHAR_DATA::saving_wand);
+    apply_delta(&CHAR_DATA::saving_para_petri);
+    apply_delta(&CHAR_DATA::saving_breath);
+    apply_delta(&CHAR_DATA::saving_spell_staff);
+    apply_delta(&CHAR_DATA::hitroll);
+    apply_delta(&CHAR_DATA::damroll);
+    apply_delta(&CHAR_DATA::height);
+    apply_delta(&CHAR_DATA::weight);
+    apply_delta(&CHAR_DATA::armor);
+    apply_delta(&CHAR_DATA::max_hit);
+    apply_delta(&CHAR_DATA::max_mana);
+    apply_delta(&CHAR_DATA::max_move);
+
+    olc_apply_flag_delta(live->affected_by, edited->affected_by, baseline->affected_by);
+    olc_apply_flag_delta(live->resistant, edited->resistant, baseline->resistant);
+    olc_apply_flag_delta(live->immune, edited->immune, baseline->immune);
+    olc_apply_flag_delta(live->susceptible, edited->susceptible, baseline->susceptible);
+
+    if (!olc_affects_equal(edited->first_affect, baseline->first_affect))
+        olc_replace_live_affects(live->first_affect, live->last_affect, edited->first_affect, live, live);
+
+    // Keep displayed stats and the next edit aligned with the new live baseline.
+    sess->working_copy = olc_mobile_clone(live);
+    olc_mobile_free(edited);
+    send_to_char("Mobile committed.\n", ch);
 }
 
 void mobile_olc_after_revert(CHAR_DATA* ch, void* /*original*/, void* /*working*/)
@@ -4582,7 +4951,7 @@ void olc_show_object(CHAR_DATA* ch, OBJ_DATA* obj, bool help_only_mode, int term
         auto proto_pairs = proto ? olc_object_proto_labeled_value_pairs(proto)
                                 : std::vector<std::string>{};
 
-        bool differs = false;
+        const bool differs = current_pairs != proto_pairs;
 
         olc_show_object_value_meanings_block(
             ch,
@@ -4597,10 +4966,10 @@ void olc_show_object(CHAR_DATA* ch, OBJ_DATA* obj, bool help_only_mode, int term
     }
 
     olc_show_object_string_compare_block(
-        ch, "Short",
-        obj->short_descr ? obj->short_descr : "",
-        proto && proto->short_descr ? proto->short_descr : "",
-        !(proto && olc_str_eq(obj->short_descr, proto->short_descr)),
+        ch, "Description",
+        obj->description ? obj->description : "",
+        proto && proto->description ? proto->description : "",
+        !(proto && olc_str_eq(obj->description, proto->description)),
         label_width, term_width, OLC_COL_STRING
     );
 
@@ -4691,21 +5060,7 @@ std::vector<std::string> olc_mobile_format_single_affect_lines(
     size_t max_name_len,
     int term_width)
 {
-    std::vector<std::string> out;
-
-    if (!paf)
-        return out;
-
-    char locbuf[MSL];
-    char modbuf[MSL];
-
-    snprintf(locbuf, sizeof(locbuf), "%d", paf->location);
-    snprintf(modbuf, sizeof(modbuf), "%d", paf->modifier);
-
-    olc_append_lines(out, olc_format_line("location", locbuf, OLC_COL_ENUM, (int)max_name_len, term_width));
-    olc_append_lines(out, olc_format_line("modifier", modbuf, OLC_COL_INT, (int)max_name_len, term_width));
-
-    return out;
+    return olc_format_single_affect_lines(paf, max_name_len, term_width);
 }
 
 bool olc_mobile_set_spec(CHAR_DATA* mob, const std::string& value)
@@ -4750,7 +5105,7 @@ bool olc_mobile_set_legacy_bits_field(CHAR_DATA* mob, int CHAR_DATA::*member,
                                           const std::string& value,
                                           const char* const* table)
 {
-    if (!mob)
+    if (!mob || !table)
         return false;
 
     int bits = mob->*member;
@@ -4789,14 +5144,14 @@ bool olc_mobile_set_legacy_bits_field(CHAR_DATA* mob, int CHAR_DATA::*member,
         switch (op)
         {
             case '-':
-                REMOVE_BIT(bits, (1 << flag));
+                REMOVE_BIT(bits, (1U << flag));
                 break;
             case '!':
-                TOGGLE_BIT(bits, (1 << flag));
+                TOGGLE_BIT(bits, (1U << flag));
                 break;
             case '+':
             default:
-                SET_BIT(bits, (1 << flag));
+                SET_BIT(bits, (1U << flag));
                 break;
         }
 
@@ -4815,10 +5170,10 @@ std::string olc_mobile_get_legacy_bits_field(
     int CHAR_DATA::*member,
     const char* const* table)
 {
-    if (!mob)
+    if (!mob || !table)
         return "";
 
-    return flag_string(mob->*member, (char* const*)table);
+    return flag_string(mob->*member, table);
 }
 
 bool olc_mobile_set_pending_proto_die_field(CHAR_DATA* ch,
@@ -5228,7 +5583,6 @@ CHAR_DATA* olc_mobile_clone(const CHAR_DATA* src)
     dst->owner = nullptr;
     dst->home = nullptr;
     dst->on = nullptr;
-    dst->pet = nullptr;
 
     dst->num_fighting = 0;
     dst->substate = SUB_NONE;
@@ -5302,7 +5656,6 @@ void olc_mobile_apply_instance_changes(CHAR_DATA* dst, const CHAR_DATA* src)
     olc_replace_string(dst->long_descr, src->long_descr);
     olc_replace_string(dst->description, src->description);
 
-    dst->sex         = src->sex;
     dst->race        = src->race;
     dst->top_level   = src->top_level;
 
@@ -5312,36 +5665,21 @@ void olc_mobile_apply_instance_changes(CHAR_DATA* dst, const CHAR_DATA* src)
     dst->gold        = src->gold;
 
     dst->act         = src->act;
-    dst->affected_by = src->affected_by;
     dst->xflags      = src->xflags;
-    dst->resistant   = src->resistant;
-    dst->immune      = src->immune;
-    dst->susceptible = src->susceptible;
     dst->attacks     = src->attacks;
     dst->defenses    = src->defenses;
     dst->speaks      = src->speaks;
     dst->speaking    = src->speaking;
     dst->vip_flags   = src->vip_flags;
 
-    dst->saving_poison_death = src->saving_poison_death;
-    dst->saving_wand         = src->saving_wand;
-    dst->saving_para_petri   = src->saving_para_petri;
-    dst->saving_breath       = src->saving_breath;
-    dst->saving_spell_staff  = src->saving_spell_staff;
-
     dst->alignment   = src->alignment;
     dst->barenumdie  = src->barenumdie;
     dst->baresizedie = src->baresizedie;
     dst->mobthac0    = src->mobthac0;
-    dst->hitroll     = src->hitroll;
-    dst->damroll     = src->damroll;
     dst->hitplus     = src->hitplus;
     dst->damplus     = src->damplus;
     dst->position    = src->position;
     dst->defposition = src->defposition;
-    dst->height      = src->height;
-    dst->weight      = src->weight;
-    dst->armor       = src->armor;
     dst->numattacks  = src->numattacks;
 
     dst->perm_str    = src->perm_str;
@@ -5356,19 +5694,7 @@ void olc_mobile_apply_instance_changes(CHAR_DATA* dst, const CHAR_DATA* src)
     dst->spec_fun    = src->spec_fun;
     dst->spec_2      = src->spec_2;
 
-    dst->max_hit     = src->max_hit;
-    dst->max_mana    = src->max_mana;
-    dst->max_move    = src->max_move;
     dst->carry_weight = src->carry_weight;
-
-    if (dst->first_affect)
-        olc_free_affects(dst->first_affect);
-
-    dst->first_affect = olc_clone_affects(src->first_affect);
-    dst->last_affect = nullptr;
-    for (AFFECT_DATA* af = dst->first_affect; af; af = af->next)
-        dst->last_affect = af;
-
 }
 
 bool olc_mobile_apply_prototype_changes(MOB_INDEX_DATA* idx,
@@ -5695,6 +6021,8 @@ bool olc_mobile_edit_revert(CHAR_DATA* ch)
         send_to_char("No revert snapshot is available.\n", ch);
         return false;
     }
+
+    olc_abort_active_line_editor(ch, sess);
 
     if (sess->working_copy)
         sess->ops->free_clone(sess->working_copy);
@@ -6159,7 +6487,7 @@ void olc_show_mob(CHAR_DATA* ch, CHAR_DATA* mob, bool show_help, int term_width)
         OLC_COL_LABEL,
         OLC_COL_RESET,
         OLC_COL_INT,
-        lang_names[mob->speaking].name,
+        get_flag_name_sparse(lang_names, mob->speaking, LANG_MAX),
         OLC_COL_RESET);
     send_to_char(buf, ch);
 
@@ -6566,6 +6894,8 @@ bool olc_shop_edit_revert(CHAR_DATA *ch)
         return false;
     }
 
+    olc_abort_active_line_editor(ch, sess);
+
     /* Free current working copy */
     if (sess->working_copy)
         sess->ops->free_clone(sess->working_copy);
@@ -6614,6 +6944,10 @@ SHOP_DATA* olc_shop_clone(const SHOP_DATA* src)
     dst->profit_fix = src->profit_fix;
     dst->open_hour = src->open_hour;
     dst->close_hour = src->close_hour;
+    dst->separate_repair = src->separate_repair;
+    dst->repair_type = src->repair_type;
+    dst->repair_open_hour = src->repair_open_hour;
+    dst->repair_close_hour = src->repair_close_hour;
 
     return dst;
 }
@@ -6639,6 +6973,10 @@ void olc_shop_apply_instance_changes(SHOP_DATA* dst, const SHOP_DATA* src)
     dst->profit_fix = src->profit_fix;
     dst->open_hour = src->open_hour;
     dst->close_hour = src->close_hour;
+    dst->separate_repair = src->separate_repair;
+    dst->repair_type = src->repair_type;
+    dst->repair_open_hour = src->repair_open_hour;
+    dst->repair_close_hour = src->repair_close_hour;
 }
 
 void olc_show_shop(CHAR_DATA* ch, SHOP_DATA* shop, bool show_help, int term_width)
@@ -6710,25 +7048,123 @@ void craft_olc_apply_changes(void* original, void* working)
     *dst = *src;
 }
 
-void craft_olc_save(CHAR_DATA* ch, void* original)
-{
-    CraftRecipe *recipe = static_cast<CraftRecipe*>( original );
+static std::set<CraftRecipe*> s_cfcreate_drafts;
 
-    if ( !craft_validate_recipe_report(ch, recipe, "Committed craft recipe") )
+bool olc_craft_is_uncommitted_draft(const OlcSession* sess)
+{
+    if (!sess || sess->mode != OlcEditMode::CRAFT_INLINE || !sess->original)
+        return false;
+
+    return s_cfcreate_drafts.find(static_cast<CraftRecipe*>(sess->original)) != s_cfcreate_drafts.end();
+}
+
+void olc_craft_cleanup_uncommitted_draft(OlcSession* sess)
+{
+    if (!sess || sess->mode != OlcEditMode::CRAFT_INLINE || !sess->original)
+        return;
+
+    CraftRecipe* orig = static_cast<CraftRecipe*>(sess->original);
+    auto it = s_cfcreate_drafts.find(orig);
+    if (it != s_cfcreate_drafts.end())
     {
-        if ( ch )
-            send_to_char("Craft recipes were NOT written to disk.\n", ch);
+        s_cfcreate_drafts.erase(it);
+        delete orig;
+        sess->original = nullptr;
+    }
+}
+
+static bool olc_craft_name_conflicts_in_sessions(const std::string& name, const OlcSession* ignore_sess)
+{
+    if (name.empty())
+        return false;
+
+    for (const CraftRecipe* draft : s_cfcreate_drafts)
+    {
+        if (ignore_sess && ignore_sess->original == draft)
+            continue;
+        if (draft && !str_cmp(draft->name, name))
+            return true;
+    }
+
+    for (DESCRIPTOR_DATA* d = first_descriptor; d; d = d->next)
+    {
+        if (!d->olc || d->olc == ignore_sess)
+            continue;
+        if (d->olc->mode != OlcEditMode::CRAFT_INLINE)
+            continue;
+
+        const CraftRecipe* working = static_cast<const CraftRecipe*>(d->olc->working_copy);
+        const CraftRecipe* baseline = static_cast<const CraftRecipe*>(d->olc->original_clone);
+        if (working && !str_cmp(working->name, name))
+            return true;
+        if (baseline && !str_cmp(baseline->name, name))
+            return true;
+    }
+
+    return false;
+}
+
+bool olc_craft_pre_commit_check(CHAR_DATA* ch, OlcSession* sess)
+{
+    if (!sess || sess->mode != OlcEditMode::CRAFT_INLINE)
+        return true;
+
+    const CraftRecipe* working = static_cast<const CraftRecipe*>(sess->working_copy);
+    if (!working || working->name.empty())
+    {
+        if (ch)
+            send_to_char("Craft recipe name cannot be empty.\n", ch);
+        return false;
+    }
+
+    CraftRecipe* existing = craft_find_recipe_for_olc(working->name);
+    if (existing && existing != sess->original)
+    {
+        if (ch)
+            send_to_char("A craft recipe with that name already exists.\n", ch);
+        return false;
+    }
+
+    if (olc_craft_name_conflicts_in_sessions(working->name, sess))
+    {
+        if (ch)
+            send_to_char("Another builder is currently editing or creating a craft recipe with that name.\n", ch);
+        return false;
+    }
+
+    std::vector<std::string> errors;
+    if ( craft_validate_recipe(working, errors) )
+        return true;
+
+    send_to_char("Working craft recipe is invalid:\n", ch);
+    for (const auto &error : errors)
+        ch_printf(ch, "  - %s\n", error.c_str());
+    return false;
+}
+
+void craft_olc_after_commit(CHAR_DATA* ch, void* original, void* /*working*/)
+{
+    CraftRecipe* orig_recipe = static_cast<CraftRecipe*>(original);
+    auto draft_it = s_cfcreate_drafts.find(orig_recipe);
+    if (draft_it != s_cfcreate_drafts.end())
+    {
+        CraftRecipe* live = craft_append_recipe_for_olc(*orig_recipe);
+        if (live)
+        {
+            if (ch && ch->desc && ch->desc->olc && ch->desc->olc->original == orig_recipe)
+                ch->desc->olc->original = live;
+            s_cfcreate_drafts.erase(draft_it);
+            delete orig_recipe;
+            if ( ch )
+                send_to_char("Craft recipe committed.\n", ch);
+        }
+        else if ( ch )
+        {
+            send_to_char("Failed to commit craft recipe.\n", ch);
+        }
         return;
     }
 
-    craft_save_all_recipes_for_olc();
-
-    if ( ch )
-        send_to_char("Craft recipes written to disk.\n", ch);
-}
-
-void craft_olc_after_commit(CHAR_DATA* ch, void* /*original*/, void* /*working*/)
-{
     if ( ch )
         send_to_char("Craft recipe committed.\n", ch);
 }
@@ -6744,7 +7180,7 @@ const OlcOps craft_olc_ops =
     craft_olc_clone,
     craft_olc_free_clone,
     craft_olc_apply_changes,
-    craft_olc_save,
+    nullptr,
     craft_olc_after_commit,
     craft_olc_after_revert,
     olc_craft_edit_interpret,
@@ -6803,6 +7239,8 @@ bool olc_craft_edit_revert(CHAR_DATA *ch)
         return false;
     }
 
+    olc_abort_active_line_editor(ch, sess);
+
     /* Free current working copy */
     if (sess->working_copy)
         sess->ops->free_clone(sess->working_copy);
@@ -6816,7 +7254,7 @@ bool olc_craft_edit_revert(CHAR_DATA *ch)
     }
 
     sess->last_cmd_arg.clear();
-    sess->dirty = false;
+    sess->dirty = olc_craft_is_uncommitted_draft(sess);
 
     if (sess->ops->after_revert)
         sess->ops->after_revert(ch, sess->original, sess->working_copy);
@@ -6902,7 +7340,7 @@ static bool olc_craft_edit_interpret( CHAR_DATA *ch, const std::string &command,
     {
         if ( olc_commit_current(ch) )
             send_to_char("Current changes committed.\n", ch);
-        else
+        else if (!ch->desc->olc->dirty)
             send_to_char("No pending changes to commit.\n", ch);
         return true;
     }
@@ -7015,6 +7453,8 @@ static bool craft_validate_recipe( const CraftRecipe *recipe, std::vector<std::s
 
     if ( recipe->gsn < -1 )
         errors.push_back( "Recipe gsn is less than -1." );
+    else if ( recipe->gsn >= 0 && (recipe->gsn >= top_sn || recipe->gsn >= MAX_SKILL || !skill_table[recipe->gsn] || !skill_table[recipe->gsn]->name) )
+        errors.push_back( "Recipe gsn is out of range or invalid." );
 
     if ( recipe->timer_ticks < 0 )
         errors.push_back( "Recipe timer is negative." );
@@ -7026,6 +7466,8 @@ static bool craft_validate_recipe( const CraftRecipe *recipe, std::vector<std::s
     {
         if ( recipe->result_vnum <= 0 )
             errors.push_back( "Create-prototype recipe requires result_vnum > 0." );
+        else if ( !get_obj_index(recipe->result_vnum) )
+            errors.push_back( "Result object prototype does not exist." );
     }
     else if ( recipe->output_mode == CraftOutputMode::TransformBaseMaterial )
     {
@@ -7057,6 +7499,13 @@ static bool craft_validate_recipe( const CraftRecipe *recipe, std::vector<std::s
 
         if ( slot.item_type < 0 )
             errors.push_back( str_printf("Slot '%s' has invalid item type.", slot.name.c_str()) );
+
+        if ( slot.item_vnum != 0 )
+        {
+            const OBJ_INDEX_DATA *prototype = get_obj_index(slot.item_vnum);
+            if ( !prototype || prototype->item_type != slot.item_type )
+                errors.push_back( str_printf("Slot '%s' requires a prototype of its item type.", slot.name.c_str()) );
+        }
 
         if ( slot.min_count < 0 )
             errors.push_back( str_printf("Slot '%s' has min_count < 0.", slot.name.c_str()) );
@@ -7143,7 +7592,7 @@ static bool craft_validate_recipe( const CraftRecipe *recipe, std::vector<std::s
         const CraftAffectDef &aff = recipe->affects[i];
         std::string err;
 
-        if ( aff.location < 0 || !a_types[aff.location].name )
+        if ( aff.location < 0 || aff.location >= MAX_APPLY_TYPE || !a_types[aff.location].name )
             errors.push_back( str_printf("Affect #%zu has invalid location %d.",
                 i + 1, aff.location) );
 
@@ -7351,7 +7800,7 @@ static bool olc_craft_edit_affects_field( CHAR_DATA *ch, CraftRecipe *recipe )
         }
 
         location = get_atype( location_name );
-        if ( location < 1 )
+        if ( location < 1 || location >= MAX_APPLY_TYPE )
         {
             ch_printf(ch, "Unknown affect location: %s\n", location_name.c_str() );
             olc_craft_show_affect_location_choices(ch);
@@ -7371,6 +7820,7 @@ static bool olc_craft_edit_affects_field( CHAR_DATA *ch, CraftRecipe *recipe )
         aff.use_duration = false;
 
         recipe->affects.push_back( std::move(aff) );
+        olc_craft_mark_dirty(ch);
         send_to_char("Affect added.\n", ch);
         return true;
     }
@@ -7396,6 +7846,7 @@ static bool olc_craft_edit_affects_field( CHAR_DATA *ch, CraftRecipe *recipe )
         }
 
         recipe->affects.erase( recipe->affects.begin() + idx );
+        olc_craft_mark_dirty(ch);
         send_to_char("Affect deleted.\n", ch);
         return true;
     }
@@ -7427,7 +7878,7 @@ static bool olc_craft_edit_affects_field( CHAR_DATA *ch, CraftRecipe *recipe )
         if ( !str_cmp(field, "location") )
         {
             int location = get_atype( value );
-            if ( location < 1 )
+            if ( location < 1 || location >= MAX_APPLY_TYPE )
             {
                 ch_printf(ch, "Unknown affect location: %s\n", value.c_str() );
                 olc_craft_show_affect_location_choices(ch);
@@ -7435,6 +7886,7 @@ static bool olc_craft_edit_affects_field( CHAR_DATA *ch, CraftRecipe *recipe )
             }
 
             aff.location = location;
+            olc_craft_mark_dirty(ch);
             send_to_char("Affect location updated.\n", ch);
             return true;
         }
@@ -7451,6 +7903,7 @@ static bool olc_craft_edit_affects_field( CHAR_DATA *ch, CraftRecipe *recipe )
             }
 
             aff.modifier_expr = std::move(expr);
+            olc_craft_mark_dirty(ch);
             send_to_char("Affect modifier updated.\n", ch);
             return true;
         }
@@ -7460,6 +7913,7 @@ static bool olc_craft_edit_affects_field( CHAR_DATA *ch, CraftRecipe *recipe )
             if ( !str_cmp(value, "none") )
             {
                 aff.bitvector = -1;
+                olc_craft_mark_dirty(ch);
                 send_to_char("Affect bitvector cleared.\n", ch);
                 return true;
             }
@@ -7472,6 +7926,7 @@ static bool olc_craft_edit_affects_field( CHAR_DATA *ch, CraftRecipe *recipe )
             }
 
             aff.bitvector = flag->bit;
+            olc_craft_mark_dirty(ch);
             send_to_char("Affect bitvector updated.\n", ch);
             return true;
         }
@@ -7486,6 +7941,7 @@ static bool olc_craft_edit_affects_field( CHAR_DATA *ch, CraftRecipe *recipe )
             }
 
             aff.use_duration = b;
+            olc_craft_mark_dirty(ch);
             send_to_char("Affect use_duration updated.\n", ch);
             return true;
         }
@@ -7502,6 +7958,7 @@ static bool olc_craft_edit_affects_field( CHAR_DATA *ch, CraftRecipe *recipe )
             }
 
             aff.duration_expr = std::move(expr);
+            olc_craft_mark_dirty(ch);
             send_to_char("Affect duration expression updated.\n", ch);
             return true;
         }
@@ -8085,6 +8542,7 @@ static bool olc_craft_edit_derived_vars_field( CHAR_DATA *ch, CraftRecipe *recip
             }
 
             dv.var_name = value;
+            olc_craft_mark_dirty(ch);
             send_to_char("Derived var name updated.\n", ch);
             return true;
         }
@@ -8344,7 +8802,8 @@ static void olc_craft_show_slot_help( CHAR_DATA *ch )
     send_to_char("  <max> may be 0 for unlimited.\n", ch);
     send_to_char("\n", ch);
     send_to_char("Fields for 'slots set' are:\n", ch);
-    send_to_char("  name  type  min  max  consume  base\n", ch);
+    send_to_char("  name  type  vnum  min  max  consume  base\n", ch);
+    send_to_char("  vnum is an item prototype restriction (0 accepts any matching type).\n", ch);
 }
 
 static int olc_craft_find_slot_index( const CraftRecipe *recipe, const std::string &which )
@@ -8413,10 +8872,11 @@ static bool olc_craft_edit_slots_field( CHAR_DATA *ch, CraftRecipe *recipe )
             const CraftSlotDef &slot = recipe->slots[i];
 
             ch_printf(ch,
-                "#%zu %-12s type=%s min=%d max=%s optional=%s consume=%s base=%s\n",
+                "#%zu %-12s type=%s vnum=%d min=%d max=%s optional=%s consume=%s base=%s\n",
                 i + 1,
                 slot.name.c_str(),
                 get_enum_flag_field(slot.item_type, o_types).c_str(),
+                slot.item_vnum,
                 slot.min_count,
                 (slot.max_count > 0 ? std::to_string(slot.max_count).c_str() : "inf"),
                 slot.min_count == 0 ? "optional" : "required",
@@ -8586,6 +9046,20 @@ static bool olc_craft_edit_slots_field( CHAR_DATA *ch, CraftRecipe *recipe )
             return true;
         }
 
+        if ( !str_cmp(field, "vnum") )
+        {
+            int vnum = 0;
+            if ( !olc_format_parse_strict_int(value, vnum) || vnum < 0 )
+            {
+                send_to_char("vnum must be 0 or a positive object prototype number.\n", ch);
+                return false;
+            }
+            slot.item_vnum = vnum;
+            olc_craft_mark_dirty(ch);
+            send_to_char("Slot prototype restriction updated.\n", ch);
+            return true;
+        }
+
         if ( !str_cmp(field, "min") )
         {
             try
@@ -8664,7 +9138,7 @@ static bool olc_craft_edit_slots_field( CHAR_DATA *ch, CraftRecipe *recipe )
             return true;
         }
 
-        send_to_char("Unknown slot field. Use: name type min max consume base\n", ch);
+        send_to_char("Unknown slot field. Use: name type vnum min max consume base\n", ch);
         return false;
     }
 
@@ -8679,10 +9153,12 @@ static bool olc_craft_edit_slots_field( CHAR_DATA *ch, CraftRecipe *recipe )
 void do_cfedit(CHAR_DATA* ch, char* argument)
 {
     std::string arg1;
-    std::string arg2;
     std::string argstr = argument;
 
-    if (!ch || !ch->desc)
+    if (!ch || !ch->desc || ch->desc->closing || ch->desc->write_failed)
+        return;
+
+    if (olc_block_crafting_menu(ch))
         return;
 
     /*
@@ -8690,9 +9166,7 @@ void do_cfedit(CHAR_DATA* ch, char* argument)
      */
     if (olc_craft_in_edit_mode(ch))
     {
-        std::string rest = argstr;
-        rest = one_argument(rest, arg1);
-        rest = one_argument(rest, arg2);
+        one_argument(argstr, arg1);
 
         if (argstr.empty())
         {
@@ -8705,18 +9179,6 @@ void do_cfedit(CHAR_DATA* ch, char* argument)
             CraftRecipe *working = olc_session_working_as<CraftRecipe>( ch->desc->olc );
             craft_validate_recipe_report(ch, working, "Working craft recipe");
             return;
-        }
-
-        if ( !str_cmp(arg1, "save")
-          || !str_cmp(arg1, "done")
-          || ( !str_cmp(arg1, "stop") && !str_cmp(arg2, "save") ) )
-        {
-            CraftRecipe *working = olc_session_working_as<CraftRecipe>( ch->desc->olc );
-            if ( !craft_validate_recipe_report(ch, working, "Working craft recipe") )
-            {
-                send_to_char("Save blocked until the recipe validates cleanly.\n", ch);
-                return;
-            }
         }
 
         do_olc(ch, argument);
@@ -8745,6 +9207,21 @@ void do_cfedit(CHAR_DATA* ch, char* argument)
     {
         send_to_char("You are already editing something.\n", ch);
         return;
+    }
+
+    if (ch->substate == SUB_RESTRICTED || ch->editor != nullptr)
+    {
+        send_to_char("You cannot use this command from within another command.\n", ch);
+        return;
+    }
+
+    for (DESCRIPTOR_DATA* d = first_descriptor; d; d = d->next)
+    {
+        if (d->olc && d->olc->mode == OlcEditMode::CRAFT_INLINE && d->olc->original == recipe)
+        {
+            send_to_char("Another builder is already editing that craft recipe.\n", ch);
+            return;
+        }
     }
 
     olc_start(ch, recipe, get_craft_schema(), &craft_olc_ops);
@@ -8783,57 +9260,25 @@ void do_redit2(CHAR_DATA* ch, char* argument)
         return;
     }
 
-    if (!str_cmp(arg, "help") || !str_cmp(arg, "?"))
+    if (!str_cmp(arg, "stop") || !str_cmp(arg, "save") ||
+        !str_cmp(arg, "abort") || !str_cmp(arg, "cancel"))
     {
-        if (!argstr.empty())
-            olc_show(ch, argstr, "help");
-        else
-            olc_show(ch, arg, "");
+        send_to_char("You are not editing a room.\n", ch);
         return;
     }
 
-    if (!str_cmp(arg, "stop"))
-    {
-        std::string arg2;
-        argstr = one_argument(argstr, arg2);
-
-        if (!str_cmp(arg2, "save") || arg2.empty())
-        {
-            olc_stop(ch, true);
-            return;
-        }
-
-        if (!str_cmp(arg2, "abort"))
-        {
-            olc_stop(ch, false);
-            return;
-        }
-    }
-
-    if (!str_cmp(arg, "abort") || !str_cmp(arg, "cancel"))
-    {
-        olc_stop(ch, false);
-        return;
-    }
-
-    if (!str_cmp(arg, "save"))
-    {
-        olc_stop(ch, true);
-        return;
-    }
-
-    send_to_char("Syntax: redit (start)\n", ch);
-    send_to_char("        redit stop save|abort\n", ch);
-    send_to_char("or just redit save|abort\n", ch);    
+    send_to_char("Syntax: redit2 [start|stop save|stop abort]\n", ch);
 }
 
 void do_oedit(CHAR_DATA* ch, char* argument)
 {
     std::string arg1;
-    std::string arg2;
     std::string argstr = argument;
 
-    if (!ch || !ch->desc)
+    if (!ch || !ch->desc || ch->desc->closing || ch->desc->write_failed)
+        return;
+
+    if (olc_block_crafting_menu(ch))
         return;
 
     /* =========================
@@ -8850,36 +9295,14 @@ void do_oedit(CHAR_DATA* ch, char* argument)
         return;
     }
 
-    argstr = one_argument(argstr, arg1);
-    argstr = one_argument(argstr, arg2);
+    one_argument(argstr, arg1);
 
     //Start a new object edit session
-    OBJ_DATA* obj = NULL;
     if (arg1.empty())
     {
         send_to_char("Usage: oedit <object>\n", ch);
         return;
     }
-
-    if ( !obj && get_trust(ch) <= LEVEL_IMMORTAL )
-    {
-        if ( ( obj = get_obj_here( ch, arg1 ) ) == NULL )
-        {
-            send_to_char( "You can't find that here.\n", ch );
-            return;
-        }
-    }
-
-
-    obj = get_obj_world(ch, arg1);
-
-    if (!obj)
-    {
-        send_to_char("Object not found.\n", ch);
-        return;
-    }
-
-    separate_obj( obj );
 
     if (ch->desc->olc)
     {
@@ -8887,18 +9310,15 @@ void do_oedit(CHAR_DATA* ch, char* argument)
         return;
     }
 
-    olc_start(ch, obj, get_object_schema(), &object_olc_ops);
-    if (!ch->desc->olc)
-        return;
-
-   //send_to_char("Object ready for editing using olcset.\n", ch);
-    olc_show(ch, "", "");
+    const bool local = get_trust(ch) <= LEVEL_IMMORTAL;
+    OBJ_DATA* obj = local ? get_obj_here(ch, arg1) : get_obj_world(ch, arg1);
+    if (!obj)
     {
-        ch->desc->olc->mode = OlcEditMode::OBJECT_INLINE;
-        send_to_char("Object inline editing mode enabled.\n", ch);
-        send_to_char("To exit, type stop save/abort, or just save/abort.\n", ch);    
-
+        send_to_char(local ? "You can't find that here.\n" : "Object not found.\n", ch);
+        return;
     }
+
+    olc_object_edit_enter(ch, obj);
 }
 
 void do_medit(CHAR_DATA* ch, char* argument)
@@ -8907,7 +9327,10 @@ void do_medit(CHAR_DATA* ch, char* argument)
     std::string arg2;
     std::string argstr = argument;
 
-    if (!ch || !ch->desc)
+    if (!ch || !ch->desc || ch->desc->closing || ch->desc->write_failed)
+        return;
+
+    if (olc_block_crafting_menu(ch))
         return;
 
     /*
@@ -8980,6 +9403,15 @@ void do_medit(CHAR_DATA* ch, char* argument)
         return;
     }
 
+    if (ch->substate == SUB_RESTRICTED || ch->editor != nullptr)
+    {
+        send_to_char("You cannot use this command from within another command.\n", ch);
+        return;
+    }
+
+    if (!ch->game || !victim->pIndexData || !can_mmodify(ch, victim))
+        return;
+
     olc_start(ch, victim, get_mobile_schema(), &mobile_olc_ops);
     if (!ch->desc->olc)
         return;
@@ -8999,7 +9431,10 @@ void do_shopset(CHAR_DATA* ch, char* argument)
     MOB_INDEX_DATA *mob = nullptr;
 
 
-    if (!ch || !ch->desc)
+    if (!ch || !ch->desc || ch->desc->closing || ch->desc->write_failed)
+        return;
+
+    if (olc_block_crafting_menu(ch))
         return;
 
     /*
@@ -9030,8 +9465,8 @@ void do_shopset(CHAR_DATA* ch, char* argument)
         send_to_char("Usage: shopset <vnum of shop>\n", ch);
         return;
     }
-    long vnum;
-    vnum = atoi( arg1.c_str() );
+    int vnum;
+    vnum = strtoi( arg1 );
 
     if ( (mob = get_mob_index(vnum)) == NULL )
     {
@@ -9055,6 +9490,12 @@ void do_shopset(CHAR_DATA* ch, char* argument)
         return;
     }
 
+    if (ch->substate == SUB_RESTRICTED || ch->editor != nullptr)
+    {
+        send_to_char("You cannot use this command from within another command.\n", ch);
+        return;
+    }
+
     olc_start(ch, shop, get_shop_schema(), &shop_olc_ops);
     if (!ch->desc->olc)
         return;
@@ -9073,7 +9514,10 @@ void do_cfcreate(CHAR_DATA* ch, char* argument)
     std::string source_name;
     std::string argstr = argument;
 
-    if (!ch || !ch->desc)
+    if (!ch || !ch->desc || ch->desc->closing || ch->desc->write_failed)
+        return;
+
+    if (olc_block_crafting_menu(ch))
         return;
 
     if (ch->desc->olc)
@@ -9082,7 +9526,14 @@ void do_cfcreate(CHAR_DATA* ch, char* argument)
         return;
     }
 
+    if (ch->substate == SUB_RESTRICTED || ch->editor != nullptr)
+    {
+        send_to_char("You cannot use this command from within another command.\n", ch);
+        return;
+    }
+
     argstr = one_argument(argstr, new_name);
+    smash_tilde(new_name);
 
     if (new_name.empty())
     {
@@ -9091,9 +9542,9 @@ void do_cfcreate(CHAR_DATA* ch, char* argument)
         return;
     }
 
-    if (craft_find_recipe_for_olc(new_name))
+    if (craft_find_recipe_for_olc(new_name) || olc_craft_name_conflicts_in_sessions(new_name, nullptr))
     {
-        send_to_char("A craft recipe with that name already exists.\n", ch);
+        send_to_char("A craft recipe with that name already exists or is currently being edited.\n", ch);
         return;
     }
 
@@ -9159,24 +9610,156 @@ void do_cfcreate(CHAR_DATA* ch, char* argument)
         recipe.affects.clear();
     }
 
-    auto &list = craft_get_recipes_for_olc();
-    list.push_back(std::move(recipe));
-    CraftRecipe *created = &list.back();
+    CraftRecipe *draft = new CraftRecipe(std::move(recipe));
+    s_cfcreate_drafts.insert(draft);
 
-    send_to_char("Craft recipe created.\n", ch);
-
-    if (ch->desc->olc)
+    olc_start(ch, draft, get_craft_schema(), &craft_olc_ops);
+    if (!ch->desc->olc)
     {
-        send_to_char("You are already editing something.\n", ch);
+        s_cfcreate_drafts.erase(draft);
+        delete draft;
         return;
     }
 
-    olc_start(ch, created, get_craft_schema(), &craft_olc_ops);
-    if (!ch->desc->olc)
-        return;
-
     ch->desc->olc->mode = OlcEditMode::CRAFT_INLINE;
+    ch->desc->olc->dirty = true;
+    send_to_char("Craft recipe created.\n", ch);
     send_to_char("Entering craft editor.\n", ch);
     olc_show(ch, "", "");
+}
+
+void olc_abort_descriptor(DESCRIPTOR_DATA *d)
+{
+    if (!d || !d->olc)
+        return;
+
+    OlcSession *sess = d->olc;
+    if (d->character && d->character->desc == d)
+        olc_abort_active_line_editor(d->character, sess);
+    else
+        sess->editor_context = nullptr;
+
+    if (sess->ops && sess->ops->free_clone)
+    {
+        if (sess->working_copy)
+        {
+            sess->ops->free_clone(sess->working_copy);
+            sess->working_copy = nullptr;
+        }
+        if (sess->original_clone)
+        {
+            sess->ops->free_clone(sess->original_clone);
+            sess->original_clone = nullptr;
+        }
+    }
+
+    olc_craft_cleanup_uncommitted_draft(sess);
+
+    sess->pending_exit_side_effects.clear();
+    sess->last_cmd_arg.clear();
+    sess->dirty = false;
+    sess->editor_context = nullptr;
+    sess->original = nullptr;
+    sess->anchor_room = nullptr;
+    olc_mobile_reset_pending_proto(sess);
+
+    delete sess;
+    d->olc = nullptr;
+}
+
+descriptor_data::~descriptor_data()
+{
+    olc_abort_descriptor(this);
+}
+
+void olc_invalidate_target(void *target, const char *reason)
+{
+    if (!target)
+        return;
+
+    std::vector<DESCRIPTOR_DATA*> targets;
+    for (DESCRIPTOR_DATA *d = first_descriptor; d; d = d->next)
+    {
+        if (!d->closing)
+            targets.push_back(d);
+    }
+
+    for (DESCRIPTOR_DATA *d : targets)
+    {
+        if (!olc_desc_in_list(d) || d->closing)
+            continue;
+
+        CHAR_DATA *ch = d->character;
+        bool aborted_olc = false;
+
+        if (d->olc && (d->olc->original == target || d->olc->anchor_room == target || d->olc->editor_context == target))
+        {
+            if (ch && (d->connected == CON_EDITING || ch->editor != nullptr ||
+                       (ch->substate > SUB_NONE && ch->substate < SUB_TIMER_DO_ABORT)))
+            {
+                int saved_substate = ch->substate;
+                if (ch->editor)
+                    stop_editing(ch);
+                ch->dest_buf = nullptr;
+                ch->spare_ptr = nullptr;
+                if (saved_substate >= SUB_TIMER_DO_ABORT)
+                    ch->substate = saved_substate;
+                else
+                    ch->substate = SUB_NONE;
+                if (d->connected == CON_EDITING)
+                    d->connected = CON_PLAYING;
+            }
+            olc_abort_descriptor(d);
+            aborted_olc = true;
+        }
+        else
+        {
+            if (d->olc && d->olc->schema && d->olc->schema->name &&
+                !str_cmp(d->olc->schema->name, "room"))
+            {
+                ROOM_INDEX_DATA *work = static_cast<ROOM_INDEX_DATA*>(d->olc->working_copy);
+                ROOM_INDEX_DATA *orig_clone = static_cast<ROOM_INDEX_DATA*>(d->olc->original_clone);
+
+                if (work)
+                {
+                    for (EXIT_DATA *ex = work->first_exit; ex; ex = ex->next)
+                    {
+                        if (ex->to_room == target)
+                        {
+                            ex->to_room = nullptr;
+                            ex->rexit = nullptr;
+                        }
+                    }
+                }
+                if (orig_clone)
+                {
+                    for (EXIT_DATA *ex = orig_clone->first_exit; ex; ex = ex->next)
+                    {
+                        if (ex->to_room == target)
+                        {
+                            ex->to_room = nullptr;
+                            ex->rexit = nullptr;
+                        }
+                    }
+                }
+            }
+
+            if (ch && d->connected == CON_EDITING && ch->dest_buf == target)
+            {
+                if (ch->editor)
+                    stop_editing(ch);
+                ch->dest_buf = nullptr;
+                ch->spare_ptr = nullptr;
+                ch->substate = SUB_NONE;
+                d->connected = CON_PLAYING;
+                aborted_olc = true;
+            }
+        }
+
+        if (aborted_olc && ch && !char_died(ch) && comm_desc_alive(d))
+        {
+            send_to_char(reason ? reason : "Your editing target is no longer valid; session aborted.\n", ch);
+        }
+    }
 }
 

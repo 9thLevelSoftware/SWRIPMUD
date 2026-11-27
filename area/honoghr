@@ -31,7 +31,7 @@ A noghri male is standing here.
 6 0 0 0 67 67 3
 7 9 0 0 0 0 0 0
 64 0 0 0 0 0 0 0
-> fight_prog 1000~
+> fight_prog 100~
 get dagger sheath
 wield dagger
 ~
@@ -476,7 +476,7 @@ people of honoghr feel safe. The Noghri people are paying
 their debt to the empire. The Port has very
 few ships docked in its bays.
 ~
-0 4 2
+0 20 2
 D1
 ~
 ~
@@ -1617,7 +1617,7 @@ E 1 1007 1 6
 E 1 1003 1 12
 E 1 1006 1 9
 E 1 10424 1 17
-E 1 28100 1 16
+* Unavailable prototype: E 1 28100 1 16
 M 1 1004 18 1020
 M 1 1012 45 1020
 M 1 1002 20 1020

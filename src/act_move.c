@@ -24,6 +24,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <vector>
 #include "mud.h"
 
 void do_closehatch(CHAR_DATA *ch, const std::string& argument );
@@ -107,10 +108,10 @@ const flag_name		sect_types[] =
 
 const	int		sent_total[SECT_MAX]		=
 {
-    4, 24, 4, 4, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1
+    4, 26, 4, 4, 1, 1, 1, 1, 1, 2, 2, 1, 1, 1
 };
 
-char *	const		room_sents[SECT_MAX][25]	=
+char *	const		room_sents[SECT_MAX][26]	=
 {
     {
 	"The smooth walls are made of durasteel.",
@@ -124,7 +125,7 @@ char *	const		room_sents[SECT_MAX][25]	=
 	"Tall buildings loom on either side of you stretching to the sky.",
 	"Some street people are putting on an interesting display of talent trying to earn some credits.",
 	"Two people nearby shout heated words of argument at one another.",
-	"You think you can make out several shady figures talking down a dark alleyway."
+	"You think you can make out several shady figures talking down a dark alleyway.",
         "A slight breeze blows through the tall buildings.",
         "A small crowd of people have gathered at one side of the street.",
         "Clouds far above you obscure the tops of the highest skyscrapers.",
@@ -144,8 +145,8 @@ char *	const		room_sents[SECT_MAX][25]	=
         "Along the edge of the street railings prevent pedestrians from falling to their death.",
         "In between the many towers you can see down into depths of the lower city.",
         "A grate in the street prevents rainwater from building up.",
-        "You can see you reflection in several of the transparisteel windows as you pass by."
-        "You hear a scream far of in the distance.",
+        "You can see you reflection in several of the transparisteel windows as you pass by.",
+        "You hear a scream far of in the distance."
     },
 
     {
@@ -258,15 +259,27 @@ void decorate_room( ROOM_INDEX_DATA *room )
     int nRand;
     int iRand, len;
     int previous[8];
-    int sector = room->sector_type;
+    int sector;
+
+    if ( !room )
+        return;
+
+    sector = room->sector_type;
+    if ( sector < 0 || sector >= SECT_MAX )
+        sector = 0;
 
     if ( room->name )
       STRFREE( room->name );
     if ( room->description )
       STRFREE( room->description );
 
-    room->name	= STRALLOC( (char*)get_flag_name(sect_names, sector, SECT_MAX) );
+    room->name	= STRALLOC( (char*)get_flag_name_sparse(sect_names, sector, FLAG_TABLE_COUNT(sect_names)) );
     buf.clear();
+    if ( sent_total[sector] <= 0 )
+    {
+        room->description = STRALLOC( "\n" );
+        return;
+    }
     nRand = number_range( 1, UMIN(8,sent_total[sector]) );
 
     for ( iRand = 0; iRand < nRand; iRand++ )
@@ -290,7 +303,9 @@ void decorate_room( ROOM_INDEX_DATA *room )
 	    previous[iRand] = x;
 
 	    len = buf.length();
-	    buf2 = room_sents[sector][x];
+	    buf2 = room_sents[sector][x] ? room_sents[sector][x] : "";
+	    if ( buf2.empty() )
+	        break;
 	    if ( len > 5 && buf[len-1] == '.' )
 	    {
 		buf += "  ";
@@ -302,7 +317,7 @@ void decorate_room( ROOM_INDEX_DATA *room )
 	    buf += buf2;
 	}
     }
-	buf2 = str_printf("%s\n", buf );
+	buf2 = str_printf("%s\n", buf.c_str() );
     room->description = STRALLOC( buf2 );
 }
 
@@ -334,11 +349,13 @@ void clear_vrooms( GameContext *game )
 	    {
 		if ( prev )
 		  prev->next = room_next;
+		else
+		  vroom_hash[hash] = room_next;
 		clean_room( room );
 		DISPOSE( room );
 		--top_vroom;
 	    }
-	    if ( room )
+	    else
 	      prev = room;
 	}
     }
@@ -354,7 +371,7 @@ EXIT_DATA *get_exit( ROOM_INDEX_DATA *room, sh_int dir )
 
     if ( !room )
     {
-      	bug( "Get_exit: NULL room", 0 );
+      	bug( "Get_exit: NULL room" );
 		return NULL;
     }
 
@@ -373,7 +390,7 @@ EXIT_DATA *get_exit_to( ROOM_INDEX_DATA *room, sh_int dir, int vnum )
 
     if ( !room )
     {
-      	bug( "Get_exit: NULL room", 0 );
+      	bug( "Get_exit: NULL room" );
 		return NULL;
     }
 
@@ -393,7 +410,7 @@ EXIT_DATA *get_exit_num( ROOM_INDEX_DATA *room, sh_int count )
 
     if ( !room )
     {
-      	bug( "Get_exit: NULL room", 0 );
+      	bug( "Get_exit: NULL room" );
 		return NULL;
     }
 
@@ -440,6 +457,9 @@ sh_int encumbrance( CHAR_DATA *ch, sh_int move )
  */
 bool will_fall( CHAR_DATA *ch, int fall )
 {
+    if ( !ch || !ch->in_room )
+        return FALSE;
+
     if ( BV_IS_SET( ch->in_room->room_flags, ROOM_NOFLOOR )
     &&   CAN_GO(ch, DIR_DOWN)
     && (!IS_AFFECTED( ch, AFF_FLYING )
@@ -462,52 +482,78 @@ bool will_fall( CHAR_DATA *ch, int fall )
 }
 
 
+static bool is_virtual_room( const ROOM_INDEX_DATA *room )
+{
+    if ( !room )
+        return FALSE;
+    uint32_t hash = (uint32_t)room->vnum % 64u;
+    for ( ROOM_INDEX_DATA *vr = vroom_hash[hash]; vr; vr = vr->next )
+    {
+        if ( vr == room )
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /*
  * create a 'virtual' room					-Thoric
  */
 ROOM_INDEX_DATA *generate_exit( ROOM_INDEX_DATA *in_room, EXIT_DATA **pexit )
 {
     EXIT_DATA *xit, *bxit;
-    EXIT_DATA *orig_exit = (EXIT_DATA *) *pexit;
+    EXIT_DATA *orig_exit = pexit ? (EXIT_DATA *) *pexit : NULL;
     ROOM_INDEX_DATA *room, *backroom;
     int brvnum;
     int serial;
+    uint32_t u_serial;
     int roomnum;
     int distance = -1;
-    int vdir = orig_exit->vdir;
+    int vdir;
     sh_int hash;
     bool found = FALSE;
 
-    if ( in_room->vnum > 32767 )	/* room is virtual */
+    if ( !in_room || !orig_exit || !orig_exit->to_room )
+        return NULL;
+
+    vdir = orig_exit->vdir;
+
+    if ( is_virtual_room( in_room ) )	/* room is virtual */
     {
 	serial = in_room->vnum;
+	u_serial = (uint32_t)serial;
 	roomnum = in_room->tele_vnum;
-	if ( (serial & 65535) == orig_exit->vnum )
+	if ( (int)(u_serial & 0xFFFFu) == orig_exit->vnum )
 	{
-	  brvnum = serial >> 16;
+	  brvnum = (int)(u_serial >> 16);
 	  --roomnum;
 	  distance = roomnum;
 	}
 	else
 	{
-	  brvnum = serial & 65535;
+	  brvnum = (int)(u_serial & 0xFFFFu);
 	  ++roomnum;
 	  distance = orig_exit->distance - 1;
 	}
 	backroom = get_room_index( brvnum );
+	if ( !backroom )
+	  return NULL;
     }
     else
     {
 	int r1 = in_room->vnum;
 	int r2 = orig_exit->vnum;
 
+	if ( r1 < 0 || r2 < 0 || r1 > 65535 || r2 > 65535 )
+	  return NULL;
+
 	brvnum = r1;
 	backroom = in_room;
-	serial = (UMAX( r1, r2 ) << 16) | UMIN( r1, r2 );
+	u_serial = ((uint32_t)UMAX( r1, r2 ) << 16) | ((uint32_t)UMIN( r1, r2 ) & 0xFFFFu);
+	serial = (int)u_serial;
 	distance = orig_exit->distance - 1;
 	roomnum = r1 < r2 ? 1 : distance;
     }
-    hash = serial % 64;
+    hash = (sh_int)(u_serial % 64u);
     
     for ( room = vroom_hash[hash]; room; room = room->next )
 	if ( room->vnum == serial && room->tele_vnum == roomnum )
@@ -543,12 +589,12 @@ ROOM_INDEX_DATA *generate_exit( ROOM_INDEX_DATA *in_room, EXIT_DATA **pexit )
 	bxit->keyword		= STRALLOC( "" );
 	bxit->description	= STRALLOC( "" );
 	bxit->key		= -1;
-	if ( (serial & 65535) != orig_exit->vnum )
+	if ( (int)(u_serial & 0xFFFFu) != orig_exit->vnum )
 	  bxit->distance = roomnum;
 	else
 	{
 	  EXIT_DATA *tmp = get_exit( backroom, vdir );
-	  int fulldist = tmp->distance;
+	  int fulldist = tmp ? tmp->distance : (distance + roomnum);
 	  
 	  bxit->distance = fulldist - distance;
 	}
@@ -557,7 +603,7 @@ ROOM_INDEX_DATA *generate_exit( ROOM_INDEX_DATA *in_room, EXIT_DATA **pexit )
     return room;
 }
 
-ch_ret move_char( CHAR_DATA *ch, EXIT_DATA *pexit, int fall )
+ch_ret move_char( CHAR_DATA *ch, EXIT_DATA *pexit, int fall, bool voluntary )
 {
     ROOM_INDEX_DATA *in_room;
     ROOM_INDEX_DATA *to_room;
@@ -570,6 +616,9 @@ ch_ret move_char( CHAR_DATA *ch, EXIT_DATA *pexit, int fall )
     bool drunk = FALSE;
     bool brief = FALSE;
     int hpmove;
+
+    if ( !ch || !ch->in_room )
+        return rNONE;
 
     if ( !IS_NPC( ch ) )
       if ( IS_DRUNK( ch, 2 ) && ( ch->position != POS_SHOVE )
@@ -670,8 +719,16 @@ ch_ret move_char( CHAR_DATA *ch, EXIT_DATA *pexit, int fall )
      * Crazy virtual room idea, created upon demand.		-Thoric
      */
     if ( distance > 1 )
+    {
 	if ( (to_room=generate_exit(in_room, &pexit)) == NULL )
+	{
 	    send_to_char( "Alas, you cannot go that way.\n", ch );
+	    return rNONE;
+	}
+    }
+
+    if ( !to_room )
+	return rNONE;
 
     if ( !fall
     &&   IS_AFFECTED(ch, AFF_CHARM)
@@ -898,7 +955,7 @@ ch_ret move_char( CHAR_DATA *ch, EXIT_DATA *pexit, int fall )
 	else
 	{
 	
-	  hpmove = 500/( ch->hit? ch->hit : 1 );
+	  hpmove = UMAX(1, 500 / UMAX(1, ch->hit));
 	  if ( !IS_AFFECTED(ch, AFF_FLYING)
 	  &&   !IS_AFFECTED(ch, AFF_FLOATING)
 	  &&   !IS_AFFECTED(ch, AFF_ENDURANCE) )	// Johnson ( Michael Shattuck ) 4/28 - Added 5-15-04 - DV
@@ -1024,6 +1081,8 @@ ch_ret move_char( CHAR_DATA *ch, EXIT_DATA *pexit, int fall )
 		}
 
 		char_to_room( ch, to_room );
+		if ( voluntary && !fall && ch->in_room == to_room && olc_room_in_edit_mode(ch) )
+		    olc_room_edit_switch_to_room(ch, to_room);
 
 		if ( !IS_AFFECTED(ch, AFF_SNEAK)
 		&& ( IS_NPC(ch) || !BV_IS_SET(ch->act, PLR_WIZINVIS) ) )
@@ -1103,6 +1162,7 @@ ch_ret move_char( CHAR_DATA *ch, EXIT_DATA *pexit, int fall )
 
 	if ( !IS_IMMORTAL(ch)
     &&  !IS_NPC(ch)
+	&&  ch->in_room && to_room->area
     &&  ch->in_room->area != to_room->area )
     {
 	if ( ch->top_level < to_room->area->low_soft_range )
@@ -1119,43 +1179,47 @@ ch_ret move_char( CHAR_DATA *ch, EXIT_DATA *pexit, int fall )
     }
 
     do_look( ch, "auto" );
+    if ( char_died(ch) )
+        return global_retcode;
+    if ( !ch->in_room )
+        return retcode;
 	if (!IS_NPC(ch))
 		gmcp_evt_room_change(ch);
     if ( brief ) 
       BV_SET_BIT( ch->act, PLR_BRIEF );
 
 
-    /* BIG ugly looping problem here when the character is mptransed back
-       to the starting room.  To avoid this, check how many chars are in 
-       the room at the start and stop processing followers after doing
-       the right number of them.  -- Narn
-    */
-    if ( !fall )
+    if ( !fall && ch->in_room == to_room )
     {
-      CHAR_DATA *fch;
-      CHAR_DATA *nextinroom;
-      int chars = 0, count = 0;
+        // Movement triggers may relocate or extract anyone in the source room.
+        std::vector<CHAR_DATA *> followers;
+        for ( CHAR_DATA *follower = from_room->first_person; follower;
+              follower = follower->next_in_room )
+            if ( follower != ch && follower->master == ch && follower->position == POS_STANDING )
+                followers.push_back(follower);
 
-      for ( fch = from_room->first_person; fch; fch = fch->next_in_room )
-        chars++;
+        for ( CHAR_DATA *follower : followers )
+        {
+            if ( char_died(ch) || ch->in_room != to_room )
+                break;
+            if ( char_died(follower) || follower->in_room != from_room
+                 || follower->master != ch || follower->position != POS_STANDING )
+                continue;
 
-      for ( fch = from_room->first_person; fch && ( count < chars ); fch = nextinroom )
-      {
-		nextinroom = fch->next_in_room;
-        count++;
-         if( fch != ch  /* loop room bug fix here by Thoric */
-             && fch->master == ch && fch->position == POS_STANDING )
-         {
-            if( !get_exit( from_room, door ) )
+            EXIT_DATA *follow_exit = get_exit(from_room, door);
+            if ( !follow_exit || !follow_exit->to_room )
             {
-              act( AT_ACTION, "The entrance closes behind $N, preventing you from following!", fch, NULL, ch, TO_CHAR );
-              continue;
+                act( AT_ACTION, "The entrance closes behind $N, preventing you from following!",
+                     follower, NULL, ch, TO_CHAR );
+                continue;
             }
-            act( AT_ACTION, "You follow $N.", fch, NULL, ch, TO_CHAR );
-            move_char( fch, pexit, 0 );
-         }
-      }
+            act( AT_ACTION, "You follow $N.", follower, NULL, ch, TO_CHAR );
+            move_char(follower, follow_exit, 0);
+        }
     }
+
+    if ( char_died(ch) || !ch->in_room )
+      return retcode;
 
     if ( ch->in_room->first_content )
       retcode = check_room_for_traps( ch, TRAP_ENTER_ROOM );
@@ -1204,66 +1268,86 @@ ch_ret move_char( CHAR_DATA *ch, EXIT_DATA *pexit, int fall )
 
 void do_north( CHAR_DATA *ch, char *argument )
 {
-    move_char( ch, get_exit(ch->in_room, DIR_NORTH), 0 );
+    if ( !ch || !ch->in_room )
+        return;
+    move_char( ch, get_exit(ch->in_room, DIR_NORTH), 0, true );
     return;
 }
 
 
 void do_east( CHAR_DATA *ch, char *argument )
 {
-    move_char( ch, get_exit(ch->in_room, DIR_EAST), 0 );
+    if ( !ch || !ch->in_room )
+        return;
+    move_char( ch, get_exit(ch->in_room, DIR_EAST), 0, true );
     return;
 }
 
 
 void do_south( CHAR_DATA *ch, char *argument )
 {
-    move_char( ch, get_exit(ch->in_room, DIR_SOUTH), 0 );
+    if ( !ch || !ch->in_room )
+        return;
+    move_char( ch, get_exit(ch->in_room, DIR_SOUTH), 0, true );
     return;
 }
 
 
 void do_west( CHAR_DATA *ch, char *argument )
 {
-    move_char( ch, get_exit(ch->in_room, DIR_WEST), 0 );
+    if ( !ch || !ch->in_room )
+        return;
+    move_char( ch, get_exit(ch->in_room, DIR_WEST), 0, true );
     return;
 }
 
 
 void do_up( CHAR_DATA *ch, char *argument )
 {
-    move_char( ch, get_exit(ch->in_room, DIR_UP), 0 );
+    if ( !ch || !ch->in_room )
+        return;
+    move_char( ch, get_exit(ch->in_room, DIR_UP), 0, true );
     return;
 }
 
 
 void do_down( CHAR_DATA *ch, char *argument )
 {
-    move_char( ch, get_exit(ch->in_room, DIR_DOWN), 0 );
+    if ( !ch || !ch->in_room )
+        return;
+    move_char( ch, get_exit(ch->in_room, DIR_DOWN), 0, true );
     return;
 }
 
 void do_northeast( CHAR_DATA *ch, char *argument )
 {
-    move_char( ch, get_exit(ch->in_room, DIR_NORTHEAST), 0 );
+    if ( !ch || !ch->in_room )
+        return;
+    move_char( ch, get_exit(ch->in_room, DIR_NORTHEAST), 0, true );
     return;
 }
 
 void do_northwest( CHAR_DATA *ch, char *argument )
 {
-    move_char( ch, get_exit(ch->in_room, DIR_NORTHWEST), 0 );
+    if ( !ch || !ch->in_room )
+        return;
+    move_char( ch, get_exit(ch->in_room, DIR_NORTHWEST), 0, true );
     return;
 }
 
 void do_southeast( CHAR_DATA *ch, char *argument )
 {
-    move_char( ch, get_exit(ch->in_room, DIR_SOUTHEAST), 0 );
+    if ( !ch || !ch->in_room )
+        return;
+    move_char( ch, get_exit(ch->in_room, DIR_SOUTHEAST), 0, true );
     return;
 }
 
 void do_southwest( CHAR_DATA *ch, char *argument )
 {
-    move_char( ch, get_exit(ch->in_room, DIR_SOUTHWEST), 0 );
+    if ( !ch || !ch->in_room )
+        return;
+    move_char( ch, get_exit(ch->in_room, DIR_SOUTHWEST), 0, true );
     return;
 }
 
@@ -1391,7 +1475,7 @@ void do_open( CHAR_DATA *ch, char *argument )
 	{
 	    act( AT_ACTION, "$n opens the $d.", ch, NULL, pexit->keyword, TO_ROOM );
 	    act( AT_ACTION, "You open the $d.", ch, NULL, pexit->keyword, TO_CHAR );
-	    if ( (pexit_rev = pexit->rexit) != NULL
+	    if ( pexit->to_room && (pexit_rev = pexit->rexit) != NULL
 	    &&   pexit_rev->to_room == ch->in_room )
 	    {
 		CHAR_DATA *rch;
@@ -1492,7 +1576,7 @@ void do_close( CHAR_DATA *ch, char *argument )
 	act( AT_ACTION, "You close the $d.", ch, NULL, pexit->keyword, TO_CHAR );
 
 	/* close the other side */
-	if ( ( pexit_rev = pexit->rexit ) != NULL
+	if ( pexit->to_room && ( pexit_rev = pexit->rexit ) != NULL
 	&&   pexit_rev->to_room == ch->in_room )
 	{
 	    CHAR_DATA *rch;
@@ -1515,9 +1599,9 @@ void do_close( CHAR_DATA *ch, char *argument )
 	  if( CAN_WEAR(obj, ITEM_WEAR_OVER))
 	  {
 		obj->value[2] = 1;
-		act( AT_ACTION, "You closes $p.", ch, obj, NULL, TO_CHAR );
+		act( AT_ACTION, "You close $p.", ch, obj, NULL, TO_CHAR );
 		act( AT_ACTION, "$n closes $p.", ch, obj, NULL, TO_ROOM );
-		check_for_trap( ch, obj, TRAP_OPEN );
+		check_for_trap( ch, obj, TRAP_CLOSE );
 		return;
 	  	
 	  }
@@ -1784,7 +1868,8 @@ void do_bashdoor( CHAR_DATA *ch, char *argument )
 		act(AT_SKILL, "WHAAAAM!!!  $n bashes against the $d, but it holds strong.",
 			ch, NULL, keyword, TO_ROOM );
 		damage( ch, ch, ( ch->max_hit / 20 ) + 10, gsn_bashdoor ); //Damage is already done here - DV 3-13-26
-		learn_from_failure(ch, gsn_bashdoor);
+		if ( !char_died(ch) )
+		    learn_from_failure(ch, gsn_bashdoor);
 	    }
 	}    
 	else
@@ -1794,7 +1879,8 @@ void do_bashdoor( CHAR_DATA *ch, char *argument )
 	    act(AT_SKILL, "WHAAAAM!!!  $n bashes against the wall, but it holds strong.",
 		ch, NULL, NULL, TO_ROOM );
 	    damage( ch, ch, ( ch->max_hit / 20 ) + 10, gsn_bashdoor );
-	    learn_from_failure(ch, gsn_bashdoor);
+	    if ( !char_died(ch) )
+	        learn_from_failure(ch, gsn_bashdoor);
 	}
 /*	FUSS adjustment - unnecessary chance to kill themselves (damage is done above already) - DV 3-13-26
 	if ( !char_died( ch ) )
@@ -1937,6 +2023,11 @@ void do_sit (CHAR_DATA *ch, char *argument )
 		act(AT_ACTION, "You sit on $p.",ch,obj,NULL,TO_CHAR);
 		act(AT_ACTION, "$n sits on $p.",ch,obj,NULL,TO_ROOM);
 	    }
+	    else if (obj->value[2] == SIT_IN)
+	    {
+		act(AT_ACTION, "You sit in $p.", ch, obj, NULL, TO_CHAR);
+		act(AT_ACTION, "$n sits in $p.", ch, obj, NULL, TO_ROOM);
+	    }
 	    ch->position = POS_SITTING;
 	    break;
 	case POS_SITTING:
@@ -1972,6 +2063,7 @@ void do_sit (CHAR_DATA *ch, char *argument )
 void do_rest( CHAR_DATA *ch, char *argument )
 {
     OBJ_DATA *obj = NULL;
+    const auto previous_position = ch->position;
 
     if (ch->position == POS_FIGHTING)
     {
@@ -2098,7 +2190,8 @@ void do_rest( CHAR_DATA *ch, char *argument )
         return;
     }
 
-    rprog_rest_trigger( ch );
+    if ( previous_position != ch->position && ch->position == POS_RESTING )
+        rprog_rest_trigger( ch );
     return;
 }
 
@@ -2106,6 +2199,7 @@ void do_rest( CHAR_DATA *ch, char *argument )
 void do_sleep( CHAR_DATA *ch, char *argument )
 {
     OBJ_DATA *obj = NULL;
+    const auto previous_position = ch->position;
 
     switch ( ch->position )
     {
@@ -2173,7 +2267,8 @@ void do_sleep( CHAR_DATA *ch, char *argument )
 	break;
     }
 
-    rprog_sleep_trigger( ch );
+    if ( previous_position != ch->position && ch->position == POS_SLEEPING )
+        rprog_sleep_trigger( ch );
     return;
 }
 
@@ -2276,7 +2371,7 @@ void do_climb( CHAR_DATA *ch, char *argument )
 	for ( pexit = ch->in_room->first_exit; pexit; pexit = pexit->next )
          if( IS_SET( pexit->exit_info, EX_xCLIMB ) || IS_SET( pexit->exit_info, EX_CLIMB ) )
 	    {
-		move_char( ch, pexit, 0 );
+		move_char( ch, pexit, 0, true );
 		return;
 	    }
 	send_to_char( "You cannot climb here.\n", ch );
@@ -2286,7 +2381,7 @@ void do_climb( CHAR_DATA *ch, char *argument )
    	if( ( pexit = find_door( ch, argument, TRUE ) ) != NULL
     	&& ( IS_SET( pexit->exit_info, EX_xCLIMB ) || IS_SET( pexit->exit_info, EX_CLIMB ) ) )
     {
-	move_char( ch, pexit, 0 );
+	move_char( ch, pexit, 0, true );
 	return;
     }
     send_to_char( "You cannot climb there.\n", ch );
@@ -2307,7 +2402,7 @@ void do_enter( CHAR_DATA *ch, char *argument )
 	for ( pexit = ch->in_room->first_exit; pexit; pexit = pexit->next )
 	    if ( IS_SET( pexit->exit_info, EX_xENTER ) )
 	    {
-		move_char( ch, pexit, 0 );
+		move_char( ch, pexit, 0, true );
 		return;
 	    }
 	send_to_char( "You cannot find an entrance here.\n", ch );
@@ -2317,7 +2412,7 @@ void do_enter( CHAR_DATA *ch, char *argument )
     if ( (pexit = find_door( ch, argument, TRUE )) != NULL
     &&   IS_SET( pexit->exit_info, EX_xENTER ))
     {
-	move_char( ch, pexit, 0 );
+	move_char( ch, pexit, 0, true );
 	return;
     }
     do_board(ch,argument);
@@ -2338,7 +2433,7 @@ void do_leave( CHAR_DATA *ch, char *argument )
 	for ( pexit = ch->in_room->first_exit; pexit; pexit = pexit->next )
 	    if ( IS_SET( pexit->exit_info, EX_xLEAVE ) )
 	    {
-		move_char( ch, pexit, 0 );
+		move_char( ch, pexit, 0, true );
 		return;
 	    }
 	do_leaveship( ch , "" );
@@ -2348,7 +2443,7 @@ void do_leave( CHAR_DATA *ch, char *argument )
     if ( (pexit = find_door( ch, argument, TRUE )) != NULL
     &&   IS_SET( pexit->exit_info, EX_xLEAVE ))
     {
-	move_char( ch, pexit, 0 );
+	move_char( ch, pexit, 0, true );
 	return;
     }
     do_leaveship( ch, "" );

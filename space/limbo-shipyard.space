@@ -1,0 +1,16 @@
+#SPACE
+Name         Limbo Shipyard~
+Filename     limbo-shipyard.space~
+Type         3
+Locationa    Limbo Shipyard~
+Doca         45
+Locationb    ~
+Docb         0
+Locationc    ~
+Docc         0
+Xpos         1000
+Ypos         -1000
+Zpos         -500
+End
+
+#END

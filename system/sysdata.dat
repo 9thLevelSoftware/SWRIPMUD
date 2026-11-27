@@ -23,7 +23,8 @@ Dammobvsmob    103
 Forcepc        101
 Guildoverseer  Darrik~
 Guildadvisor   Laagos~
-Saveflags      4045
+SaveflagsEx    0 2 3 6 7 8 9 10 11 -1
+ShipIDCurrent  4000
 Savefreq       20
 End
 

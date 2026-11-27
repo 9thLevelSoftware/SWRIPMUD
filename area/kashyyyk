@@ -581,7 +581,7 @@ livable. The walls that partially surround  the pad have the tools that
 the techs use for the repairs as well as some pictures of female wookiees
 in compromising positions. The only way out is back the way you came.
 ~
-0 0 1
+0 16 1
 D0
 ~
 ~
@@ -1743,7 +1743,7 @@ M 1 28603 12 28611
 M 1 28608 1 28615
 G 1 305 1
 G 1 32261 1
-G 1 31522 1
+* Unavailable prototype: G 1 31522 1
 G 1 10314 1
 G 1 28605 1
 M 1 28600 1 28617

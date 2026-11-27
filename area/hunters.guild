@@ -143,7 +143,7 @@ mpat 10299 mppurge
 endif
 ~
 > act_prog Willard~
-if ovnuminv(11113) >= 1
+if rand(0)
 nod $n
 say This one has eluded us for a while now.  Thank you. 
 mpwithdraw 10000
@@ -219,7 +219,7 @@ give 20000 credits $n
 mpgain $n 3 20000
 drop 20000 credits
 endif
-if ovnuminv(3202) >= 1
+if rand(0)
 nod $n
 say This one has eluded us for a while now.  Thank you. 
 mpwithdraw 15000
@@ -592,10 +592,6 @@ D0
 ~
 ~
 1 -1 6601
-D2
-~
-~
-0 -1 5604
 S
 #6601
 Security Checkpoint~
@@ -1339,10 +1335,10 @@ O 0 6606 1 6613
 M 0 6600 1 6616
 M 0 6601 1 6615
 D 0 6637 2 2
-M 1 204 60 6635
-M 1 204 60 6635
-M 1 204 60 6635
-M 1 204 60 6635
+* Unavailable prototype: M 1 204 60 6635
+* Unavailable prototype: M 1 204 60 6635
+* Unavailable prototype: M 1 204 60 6635
+* Unavailable prototype: M 1 204 60 6635
 O 1 6601 1 6612
 O 1 6602 1 6612
 O 1 6603 1 6612
@@ -1356,7 +1352,7 @@ D 0 6639 1 1
 D 0 6639 2 2
 D 0 6639 3 1
 M 1 6603 2 6629
-G 1 5652 1
+* Unavailable prototype: G 1 5652 1
 G 1 10313 1
 G 1 10314 1
 G 1 32254 1
@@ -1368,15 +1364,15 @@ O 1 6616 1 6629
 M 1 6602 1 6604
 O 1 6617 1 6604
 M 1 6604 1 6631
-O 1 2205 1 6631
+* Unavailable prototype: O 1 2205 1 6631
 O 1 38 1 6626
 M 1 6605 1 6628
-G 1 2222 1
-G 1 9551 1
-G 1 2218 1
-G 1 2214 1
-G 1 2220 1
-O 1 2213 1 6628
+* Unavailable prototype: G 1 2222 1
+* Unavailable prototype: G 1 9551 1
+* Unavailable prototype: G 1 2218 1
+* Unavailable prototype: G 1 2214 1
+* Unavailable prototype: G 1 2220 1
+* Unavailable prototype: O 1 2213 1 6628
 S
 
 

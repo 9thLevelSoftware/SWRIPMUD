@@ -33,4 +33,5 @@ struct	alias_type
 DECLARE_DO_FUN( do_alias	);
 
 void	free_aliases		args( ( CHAR_DATA *ch ) );
+/* A handled alias consumes the command, even when its expansion disconnects ch. */
 bool	check_alias			args( ( CHAR_DATA *ch, const std::string& command, const std::string& argument ) );

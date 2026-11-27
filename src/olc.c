@@ -78,6 +78,9 @@ void olc_mobile_reset_pending_proto(OlcSession* sess);;
 void olc_mobile_init_pending_proto_from_live(OlcSession* sess, CHAR_DATA* mob);
 bool olc_mobile_maybe_sync_prototype(CHAR_DATA* live, const CHAR_DATA* baseline, const CHAR_DATA* edited);
 bool olc_mobile_apply_pending_prototype_changes(CHAR_DATA* ch, CHAR_DATA* live);
+bool olc_craft_is_uncommitted_draft(const OlcSession* sess);
+void olc_craft_cleanup_uncommitted_draft(OlcSession* sess);
+bool olc_craft_pre_commit_check(CHAR_DATA* ch, OlcSession* sess);
 
 void olc_show_object(CHAR_DATA* ch, OBJ_DATA* obj, bool help_only_mode, int term_width);
 void olc_object_show_header(CHAR_DATA* ch, OBJ_DATA* obj);
@@ -167,7 +170,9 @@ std::string enum_to_string_legacy(int value, const char* const* table)
 
 std::string enum_to_string_flag(size_t value, const flag_name *table)
 {
-    if (!table || value < 0)
+    if (value == static_cast<size_t>(-1))
+        return "-1";
+    if (!table)
         return std::to_string(value);
 
     for (int i = 0; table[i].name != nullptr; ++i)
@@ -1430,7 +1435,8 @@ void olc_free_affects(AFFECT_DATA* af)
 
 void olc_apply_flag_delta(BitSet& dst, const BitSet& edited, const BitSet& baseline)
 {
-    for (size_t bit = 0; bit < edited.size(); ++bit)
+    const size_t max_bits = std::max(edited.size(), baseline.size());
+    for (size_t bit = 0; bit < max_bits; ++bit)
     {
         bool was_set = baseline.test(bit);
         bool is_set  = edited.test(bit);
@@ -1444,7 +1450,8 @@ void olc_apply_flag_delta(BitSet& dst, const BitSet& edited, const BitSet& basel
 
 bool olc_try_inline_interpret(CHAR_DATA* ch, const std::string& command, const std::string& argument, OlcInterpretStage stage)
 {
-    if (!ch || !ch->desc || !ch->desc->olc)
+    // Let the command table dispatch the full `olc` command before inline prefix matching.
+    if (!ch || !ch->desc || !ch->desc->olc || !str_cmp(command, "olc"))
         return false;
 
     auto sess = ch->desc->olc;
@@ -1515,9 +1522,20 @@ bool olc_commit_current(CHAR_DATA* ch)
         !has_pending_mob_proto)
         return false;
 
+    if (sess->mode == OlcEditMode::CRAFT_INLINE && !olc_craft_pre_commit_check(ch, sess))
+        return false;
+
     /*
      * 1) Apply working copy back to the live object.
      */
+    if (sess->mode == OlcEditMode::OBJECT_INLINE)
+    {
+        auto live = static_cast<OBJ_DATA*>(sess->original);
+        auto edited = static_cast<OBJ_DATA*>(sess->working_copy);
+        const auto* baseline = static_cast<const OBJ_DATA*>(sess->original_clone);
+        if (edited->wear_loc == baseline->wear_loc)
+            edited->wear_loc = live->wear_loc;
+    }
     sess->ops->apply_changes(sess->original, sess->working_copy);
 
     /*
@@ -1590,6 +1608,21 @@ void olc_discard_current_working_copy(CHAR_DATA* ch)
         return;
 
     auto sess = ch->desc->olc;
+    if (ch->editor || (ch->substate > SUB_NONE && ch->substate < SUB_TIMER_DO_ABORT) ||
+        ch->desc->connected == CON_EDITING || sess->editor_context != nullptr)
+    {
+        if (ch->editor)
+            stop_editing(ch);
+
+        if (ch->substate < SUB_TIMER_DO_ABORT)
+            ch->substate = SUB_NONE;
+        ch->dest_buf = nullptr;
+        ch->spare_ptr = nullptr;
+        if (ch->desc->connected == CON_EDITING)
+            ch->desc->connected = CON_PLAYING;
+        sess->editor_context = nullptr;
+    }
+
     if (!sess->ops || !sess->ops->free_clone)
         return;
 
@@ -1604,6 +1637,8 @@ void olc_discard_current_working_copy(CHAR_DATA* ch)
         sess->ops->free_clone(sess->original_clone);
         sess->original_clone = nullptr;
     }
+
+    olc_craft_cleanup_uncommitted_draft(sess);
 
     sess->pending_exit_side_effects.clear();
     sess->last_cmd_arg.clear();
@@ -1663,7 +1698,7 @@ bool olc_matches_word(const std::string& input, const char* word)
 
 bool olc_dispatch_entry_command(CHAR_DATA* ch, const std::string& type, const std::string& rest)
 {
-    char buf[MSL];
+    char buf[MSL] = {};
 
     if (olc_matches_word(type, "room") || olc_matches_word(type, "r"))
     {
@@ -1673,7 +1708,7 @@ bool olc_dispatch_entry_command(CHAR_DATA* ch, const std::string& type, const st
             return true;
         }
 
-        do_redit2(ch, "");
+        do_redit2(ch, buf);
         return true;
     }
 
@@ -1792,23 +1827,11 @@ bool olc_dispatch_session_command(CHAR_DATA* ch, const std::string& cmd, const s
 
     if (olc_matches_word(cmd, "show"))
     {
-        std::string arg1;
-        std::string arg2;
-        std::string restbuf;
-
-        restbuf = rest;
-        std::string p = restbuf;
-        p = one_argument(p, arg1);
-        p = one_argument(p, arg2);
-
-        std::string field = arg1;
-        std::string value = p;
+        std::string field;
+        std::string value = one_argument(rest, field);
 
         if (!value.empty())
             value.erase(0, value.find_first_not_of(' '));
-
-        if (field.empty() && arg2[0] != '\0')
-            field = arg2;
 
         olc_show(ch, field, value);
         return true;
@@ -1845,7 +1868,7 @@ bool olc_dispatch_session_command(CHAR_DATA* ch, const std::string& cmd, const s
     {
         if (olc_commit_current(ch))
             send_to_char("Current changes committed.\n", ch);
-        else
+        else if (sess->mode != OlcEditMode::CRAFT_INLINE || !sess->dirty)
             send_to_char("No pending changes to commit.\n", ch);
         return true;
     }
@@ -1889,6 +1912,17 @@ bool olc_dispatch_session_command(CHAR_DATA* ch, const std::string& cmd, const s
         }
 
         send_to_char("Revert is not supported for this editor.\n", ch);
+        return true;
+    }
+
+    if (!str_cmp(cmd, "stop"))
+    {
+        if (!str_cmp(rest, "save"))
+            olc_stop(ch, true);
+        else if (!str_cmp(rest, "abort"))
+            olc_stop(ch, false);
+        else
+            send_to_char("Usage: olc stop save|abort\n", ch);
         return true;
     }
 
@@ -2022,7 +2056,7 @@ void olc_show(CHAR_DATA* ch, const std::string& field, const std::string& value)
                 sess,
                 olc_session_working_as<OBJ_DATA>(sess),
                 get_object_schema(),
-                field,
+                !str_cmp(field, "affects") ? "affect" : field,
                 value,
                 term_width);
             return;
@@ -2033,7 +2067,7 @@ void olc_show(CHAR_DATA* ch, const std::string& field, const std::string& value)
                 sess,
                 olc_session_working_as<CHAR_DATA>(sess),
                 get_mobile_schema(),
-                field,
+                !str_cmp(field, "affects") ? "affect" : field,
                 value,
                 term_width);
             return;
@@ -2079,11 +2113,38 @@ void olc_stop(CHAR_DATA* ch, bool save)
 
     if (save)
     {
-        olc_commit_current(ch);
+        if (sess->mode == OlcEditMode::CRAFT_INLINE)
+        {
+            if (!olc_craft_pre_commit_check(ch, sess))
+            {
+                send_to_char("Save blocked. The craft editor remains open.\n", ch);
+                return;
+            }
 
-        if (sess->ops && sess->ops->save)
-            sess->ops->save(ch, sess->original);
+            const bool draft = olc_craft_is_uncommitted_draft(sess);
+            const bool changed = sess->dirty || draft;
+            const auto original = changed && !draft ? static_cast<const CraftRecipe*>(sess->original) : nullptr;
+            const auto candidate = changed ? static_cast<const CraftRecipe*>(sess->working_copy) : nullptr;
+            if (!craft_save_all_recipes_for_olc(original, candidate))
+            {
+                send_to_char("Craft recipes were NOT written to disk. The craft editor remains open.\n", ch);
+                return;
+            }
 
+            if (changed)
+            {
+                sess->ops->apply_changes(sess->original, sess->working_copy);
+                if (sess->ops->after_commit)
+                    sess->ops->after_commit(ch, sess->original, sess->working_copy);
+            }
+            send_to_char("Craft recipes written to disk.\n", ch);
+        }
+        else
+        {
+            olc_commit_current(ch);
+            if (sess->ops && sess->ops->save)
+                sess->ops->save(ch, sess->original);
+        }
         send_to_char("Changes saved.\n", ch);
     }
     else
@@ -2139,12 +2200,16 @@ void olc_set(CHAR_DATA* ch, const std::string& field, const std::string& value)
                 field, value);
             return;
         case OlcEditMode::CRAFT_INLINE:
+        {
+            std::string sanitized_value = value;
+            smash_tilde(sanitized_value);
             olc_set_typed(
                 ch, sess,
                 olc_session_working_as<CraftRecipe>(sess),
                 get_craft_schema(),
-                field, value);
+                field, sanitized_value);
             return;
+        }
 
 
         default:
@@ -2166,7 +2231,14 @@ void do_olcset(CHAR_DATA* ch, char* argument)
 
     if (ch->substate > SUB_NONE)
     {
-        if (olc_finish_editor_substate(ch))
+        if (!ch->editor)
+        {
+            if (ch->substate < SUB_TIMER_DO_ABORT)
+                ch->substate = SUB_NONE;
+            ch->dest_buf = nullptr;
+            ch->spare_ptr = nullptr;
+        }
+        else if (olc_finish_editor_substate(ch))
             return;
     }
 
@@ -2260,6 +2332,12 @@ void do_olc(CHAR_DATA* ch, char* argument)
      */
     if (olc_dispatch_entry_command(ch, cmd, rest))
         return;
+
+    if (!str_cmp(cmd, "done") || !str_cmp(cmd, "stop"))
+    {
+        send_to_char("You are not editing anything. Use 'olc stop save' or 'olc stop abort' while editing.\n", ch);
+        return;
+    }
 
     send_to_char("Unknown OLC command. Type 'olc help'.\n", ch);
 }

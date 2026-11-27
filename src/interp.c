@@ -211,11 +211,13 @@ bool command_is_authorized_for_char(CHAR_DATA* ch, CMDTYPE* cmd)
 
     if (cmd->level <= trust
     && (IS_NPC(ch)
+    || !ch->pcdata
     || !cmd->commandgroup.any()
     || cmd->commandgroup.intersects(ch->pcdata->commandgroup)))
         return true;
 
     if (!IS_NPC(ch)
+    && ch->pcdata
     && ch->pcdata->bestowments
     && ch->pcdata->bestowments[0] != '\0'
     && is_name(cmd->name, ch->pcdata->bestowments)
@@ -247,7 +249,7 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
 
     if ( !ch )
     {
-	bug( "interpret: null ch!", 0 );
+	bug( "interpret: null ch!" );
 	return;
     }
 
@@ -259,7 +261,7 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
         if ( (fun=ch->last_cmd) == NULL )
         {
             ch->substate = SUB_NONE;
-            bug( "interpret: SUB_REPEATCMD with NULL last_cmd", 0 );
+            bug( "interpret: SUB_REPEATCMD with NULL last_cmd" );
             return;
         }
         else
@@ -284,7 +286,7 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
             if ( !found )
             {
                 cmd = NULL;
-                bug( "interpret: SUB_REPEATCMD: last_cmd invalid", 0 );
+                bug( "interpret: SUB_REPEATCMD: last_cmd invalid" );
                 return;
             }
             logline = "(" + std::string( cmd->name ) + ") " + arg;
@@ -296,7 +298,7 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
         /* Changed the order of these ifchecks to prevent crashing. */
         if ( arg.empty() ) 
         {
-            bug( "interpret: null argument!", 0 );
+            bug( "interpret: null argument!" );
             return;
         }
 
@@ -341,7 +343,9 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
                 if ( arg.find( '$' ) != std::string::npos )
                     arg = parse_target( ch, arg );
     
-        if ( !arg.empty() && !isalpha( static_cast<unsigned char>( arg[0] ) )
+        if ( !arg.empty()
+        &&   static_cast<unsigned char>( arg[0] ) < 0x80
+        &&   !isalpha( static_cast<unsigned char>( arg[0] ) )
         &&   !isdigit( static_cast<unsigned char>( arg[0] ) ) )
         {
             command.assign( 1, arg[0] );
@@ -360,13 +364,17 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
         * Look for command in command table.
         * Check for council powers and/or bestowments
         */
-        for ( cmd = command_hash[LOWER(command[0])%126]; cmd; cmd = cmd->next )
-            if ( !str_prefix( command.c_str(), cmd->name )
-            &&   command_is_authorized_for_char(ch, cmd) )
-            {
-                found = TRUE;
-                break;
-            }
+        if ( !command.empty() )
+        {
+            unsigned char cmd_ch = static_cast<unsigned char>( LOWER( static_cast<unsigned char>( command[0] ) ) );
+            for ( cmd = command_hash[cmd_ch % 126]; cmd; cmd = cmd->next )
+                if ( !str_prefix( command.c_str(), cmd->name )
+                &&   command_is_authorized_for_char(ch, cmd) )
+                {
+                    found = TRUE;
+                    break;
+                }
+        }
 
         /*
         * Turn off afk bit when any command performed.
@@ -406,13 +414,16 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
       /* Added by Narn to show who is switched into a mob that executes
            a logged command.  Check for descriptor in case force is used. */
         if ( ch->desc && ch->desc->original ) 
-          log_printf_plus( loglvl, ch->top_level, "Log %s (%s): %s", ch->name,
-                   ch->desc->original->name, logline.c_str() );
+          log_printf_plus( loglvl, ch->top_level, "Log %s (%s): %s",
+                   ch->name ? ch->name : "(null)",
+                   ch->desc->original->name ? ch->desc->original->name : "(null)",
+                   logline.c_str() );
         else
-          log_printf_plus( loglvl, ch->top_level, "Log %s: %s", ch->name, logline.c_str() );
+          log_printf_plus( loglvl, ch->top_level, "Log %s: %s",
+                   ch->name ? ch->name : "(null)", logline.c_str() );
     }
 
-    if ( ch->desc && ch->desc->snoop_by )
+    if ( ch->desc && ch->desc->snoop_by && !ch->desc->snoop_by->closing && !ch->desc->snoop_by->write_failed )
     {
         output_to_descriptor( ch->desc->snoop_by, std::string( ch->name ? ch->name : "" ) );
         output_to_descriptor( ch->desc->snoop_by, "% " );
@@ -424,6 +435,9 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
 
     if ( timer )
     {
+        if ( craft_interpret_during_build( ch, found && cmd->do_fun == do_craft ? "craft" : command, arg ) )
+            return;
+
         int tempsub;
 
         tempsub = ch->substate;
@@ -457,16 +471,17 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
     /*
      * Look for command in skill and socials table.
      */
-    if ( !found )
+    if ( !found && !command.empty() )
     {
-        if ( !check_skill( ch, command, arg )
-        &&   !check_alias( ch, command, arg )
-        &&   !check_social( ch, command, arg ) )
+        const bool skill_found = check_skill( ch, command, arg );
+        if ( !skill_found && check_alias( ch, command, arg ) )
+            return;
+        if ( !skill_found && !check_social( ch, command, arg ) )
         {
             EXIT_DATA *pexit;
             foundother = false;
             /* check for an auto-matic exit command */
-            if ( (pexit = find_door( ch, command, TRUE )) != NULL
+            if ( ch->in_room && (pexit = find_door( ch, command, TRUE )) != NULL
             &&   IS_SET( pexit->exit_info, EX_xAUTO ))
             {
                 if ( IS_SET(pexit->exit_info, EX_CLOSED)
@@ -479,7 +494,7 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
                         send_to_char( "You cannot do that here.\n", ch );
                     return;
                 }
-                move_char( ch, pexit, 0 );
+                move_char( ch, pexit, 0, true );
                 return;
             }
         }
@@ -527,7 +542,8 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
     /* laggy command notice: command took longer than 1.5 seconds */
     if ( tmptime > 1500000 )
     {
-        log_printf_plus(LOG_NORMAL, get_trust(ch), "[*****] LAG: %s: %s %s (R:%d S:%d.%06d)", ch->name,
+        log_printf_plus(LOG_NORMAL, get_trust(ch), "[*****] LAG: %s: %s %s (R:%d S:%d.%06d)",
+                ch->name ? ch->name : "(null)",
                 cmd->name, (cmd->log == LOG_NEVER ? "XXX" : arg.c_str() ),
 		ch->in_room ? ch->in_room->vnum : 0,
 		(int) (time_used.tv_sec),(int) (time_used.tv_usec) );
@@ -546,7 +562,10 @@ CMDTYPE *find_command( const std::string& command )
     CMDTYPE *cmd;
     int hash;
 
-    hash = LOWER(command[0]) % 126;
+    if ( command.empty() )
+        return NULL;
+
+    hash = static_cast<unsigned char>( LOWER( static_cast<unsigned char>( command[0] ) ) ) % 126;
 
     for ( cmd = command_hash[hash]; cmd; cmd = cmd->next )
 	if ( !str_prefix( command, cmd->name ) )
@@ -560,7 +579,10 @@ SOCIALTYPE *find_social( const std::string& command )
     SOCIALTYPE *social;
     int hash;
 
-    char c = LOWER(command[0]);
+    if ( command.empty() )
+        return NULL;
+
+    unsigned char c = static_cast<unsigned char>( LOWER( static_cast<unsigned char>( command[0] ) ) );
 
     if( c < 'a' || c > 'z' )
         hash = 0;
@@ -580,6 +602,9 @@ bool check_social( CHAR_DATA *ch, const std::string& command, const std::string&
     std::string argstr = argument;
     CHAR_DATA *victim;
     SOCIALTYPE *social;
+
+    if ( !ch || !ch->in_room )
+        return FALSE;
 
     if ( (social=find_social(command)) == NULL )
 	    return FALSE;
@@ -647,7 +672,7 @@ bool check_social( CHAR_DATA *ch, const std::string& command, const std::string&
             switch ( number_bits( 4 ) )
             {
             case 0:
-            if ( !BV_IS_SET(ch->in_room->room_flags, ROOM_SAFE )
+            if ( ch->in_room && !BV_IS_SET(ch->in_room->room_flags, ROOM_SAFE )
             &&    IS_EVIL(ch) )
             {
                 if ( !str_cmp( social->name, "slap" ) || !str_cmp( social->name, "punch" ) )
@@ -707,9 +732,15 @@ bool is_number(const std::string& arg)
     if (arg.empty())
         return FALSE;
 
-    for (unsigned char c : arg)
+    size_t i = 0;
+    if (arg[0] == '-' || arg[0] == '+')
+        i = 1;
+    if (i >= arg.size())
+        return FALSE;
+
+    for (; i < arg.size(); ++i)
     {
-        if (!isdigit(c) && c != '-')
+        if (!isdigit(static_cast<unsigned char>(arg[i])))
             return FALSE;
     }
 
@@ -821,24 +852,6 @@ std::string one_argument(const std::string& input, std::string& arg_first)
     arg_first = std::move(result.first);
     return result.second;
 }
-/*
-char* one_argument(char* argument, char* arg_first)
-{
-    static std::string remainder_storage;
-
-    if (!argument || !arg_first)
-        return argument;
-
-    auto result = one_argument_std(argument);
-
-    std::strncpy(arg_first, result.first.c_str(), MAX_INPUT_LENGTH - 1);
-    arg_first[MAX_INPUT_LENGTH - 1] = '\0';
-
-    remainder_storage = std::move(result.second);
-    return remainder_storage.empty() ? const_cast<char*>("")
-                                     : remainder_storage.data();
-}
-*/
 
 /*
  * Pick off one argument from a string and return the rest.
@@ -902,48 +915,6 @@ std::string one_argument2(const std::string& input, std::string& arg_first)
     return std::string(argument);
 }
 
-char *one_argument(char *argument, char *arg_first)
-{
-    static thread_local char remainders[16][MAX_INPUT_LENGTH];
-    static thread_local int slot = 0;
-
-    if (!argument || !arg_first)
-        return argument;
-
-    std::string first;
-    std::string rest = one_argument(std::string(argument), first);
-
-    std::strncpy(arg_first, first.c_str(), MAX_INPUT_LENGTH - 1);
-    arg_first[MAX_INPUT_LENGTH - 1] = '\0';
-
-    slot = (slot + 1) % 16;
-    std::strncpy(remainders[slot], rest.c_str(), MAX_INPUT_LENGTH - 1);
-    remainders[slot][MAX_INPUT_LENGTH - 1] = '\0';
-
-    return remainders[slot];
-}
-
-char *one_argument2(char *argument, char *arg_first)
-{
-    static thread_local char remainders[16][MAX_INPUT_LENGTH];
-    static thread_local int slot = 0;
-
-    if (!argument || !arg_first)
-        return argument;
-
-    std::string first;
-    std::string rest = one_argument2(std::string(argument), first);
-
-    std::strncpy(arg_first, first.c_str(), MAX_INPUT_LENGTH - 1);
-    arg_first[MAX_INPUT_LENGTH - 1] = '\0';
-
-    slot = (slot + 1) % 16;
-    std::strncpy(remainders[slot], rest.c_str(), MAX_INPUT_LENGTH - 1);
-    remainders[slot][MAX_INPUT_LENGTH - 1] = '\0';
-
-    return remainders[slot];
-}
-
 int number_argument(char *argument, char *arg)
 {
     if (!argument || !arg)
@@ -958,78 +929,20 @@ int number_argument(char *argument, char *arg)
     return number;
 }
 
-/*
-char *one_argument2(char *argument, char *arg_first)
-{
-    char cEnd;
-    size_t count = 0;
-
-    if (!argument || !arg_first)
-        return argument;  // safety check
-
-    // Skip leading spaces
-    while (*argument && isspace_utf8(argument))
-        UTF8_NEXT(argument);
-
-    // Determine delimiter
-    cEnd = ' ';
-    if (*argument == '\'' || *argument == '"')
-        cEnd = *argument++;
-
-    // Copy argument safely
-    while (*argument != '\0')
-    {
-        // UTF-8 FIX: ASCII-safe delimiter checks 
-        if ((unsigned char)*argument == (unsigned char)cEnd ||
-            (unsigned char)*argument == (unsigned char)'-')
-            break;
-
-        size_t char_len = utf8_char_len_safe(argument); 
-
-        // Prevent overflow (respect multibyte) 
-        if (count + char_len >= MAX_INPUT_LENGTH - 1) 
-            break;
-
-        if (char_len == 1) // ASCII 
-        {
-            *arg_first++ = tolower((unsigned char)*argument);
-        }
-        else // UTF-8 multibyte
-        {
-            memcpy(arg_first, argument, char_len); 
-            arg_first += char_len;
-        }
-
-        argument += char_len;  
-        count += char_len;     
-    }
-
-    // Skip closing delimiter or '-' if present
-    if (*argument == cEnd || *argument == '-')
-        argument++;
-
-    *arg_first = '\0';  // null terminate
-
-    // Skip trailing spaces
-    while (*argument && isspace_utf8(argument))
-        UTF8_NEXT(argument);
-
-    return argument;
-}
-*/
 void do_timecmd( CHAR_DATA *ch, char *argument )
 {
   struct timeval stime;
   struct timeval etime;
   static bool timing;
   extern CHAR_DATA *timechar;
-  char arg[MAX_INPUT_LENGTH];
+  std::string arg;
+  const std::string input = argument ? argument : "";
   
   send_to_char("Timing\n",ch);
   if ( timing )
     return;
-  one_argument(argument, arg);
-  if ( !*arg )
+  one_argument( input, arg );
+  if ( arg.empty() )
   {
     send_to_char( "No command to time.\n", ch );
     return;
@@ -1049,14 +962,16 @@ void do_timecmd( CHAR_DATA *ch, char *argument )
   send_to_char( "Starting timer.\n", ch );
   timing = TRUE;
   gettimeofday(&stime, NULL);
-  interpret(ch, argument);
+  interpret(ch, input);
   gettimeofday(&etime, NULL);
   timing = FALSE;
+  if ( char_died( ch ) )
+    return;
   set_char_color(AT_PLAIN, ch);
   send_to_char( "Timing complete.\n", ch );
   subtract_times(&etime, &stime);
-  ch_printf( ch, "Timing took %ld.%06ld seconds.\n",
-      etime.tv_sec, etime.tv_usec );
+  ch_printf( ch, "Timing took %lld.%06lld seconds.\n",
+      static_cast<long long>( etime.tv_sec ), static_cast<long long>( etime.tv_usec ) );
   return;
 }
 
@@ -1064,7 +979,7 @@ void start_timer(struct timeval *stime)
 {
   if ( !stime )
   {
-    bug( "Start_timer: NULL stime.", 0 );
+    bug( "Start_timer: NULL stime." );
     return;
   }
   gettimeofday(stime, NULL);
@@ -1079,7 +994,7 @@ time_t end_timer(struct timeval *stime)
   gettimeofday(&etime, NULL);
   if ( !stime || (!stime->tv_sec && !stime->tv_usec) )
   {
-    bug( "End_timer: bad stime.", 0 );
+    bug( "End_timer: bad stime." );
     return 0;
   }
   subtract_times(&etime, stime);
@@ -1090,18 +1005,16 @@ time_t end_timer(struct timeval *stime)
 
 void send_timer(struct timerset *vtime, CHAR_DATA *ch)
 {
-  struct timeval ntime;
-  int carry;
-  
   if ( vtime->num_uses == 0 )
     return;
-  ntime.tv_sec  = vtime->total_time.tv_sec / vtime->num_uses;
-  carry = (vtime->total_time.tv_sec % vtime->num_uses) * 1000000;
-  ntime.tv_usec = (vtime->total_time.tv_usec + carry) / vtime->num_uses;
+  const long long avg_seconds = vtime->total_time.tv_sec / vtime->num_uses;
+  const long long carry = (vtime->total_time.tv_sec % vtime->num_uses) * 1000000LL;
+  const long long avg_microseconds = (vtime->total_time.tv_usec + carry) / vtime->num_uses;
   ch_printf(ch, "Has been used %d times this boot.\n", vtime->num_uses);
-  ch_printf(ch, "Time (in secs): min %ld.%0.6ld; avg: %ld.%0.6d; max %d.%0.6d"
-      "\n", vtime->min_time.tv_sec, vtime->min_time.tv_usec, ntime.tv_sec,
-      ntime.tv_usec, vtime->max_time.tv_sec, vtime->max_time.tv_usec);
+  ch_printf(ch, "Time (in secs): min %lld.%06lld; avg: %lld.%06lld; max %lld.%06lld\n",
+      static_cast<long long>( vtime->min_time.tv_sec ), static_cast<long long>( vtime->min_time.tv_usec ),
+      avg_seconds, avg_microseconds,
+      static_cast<long long>( vtime->max_time.tv_sec ), static_cast<long long>( vtime->max_time.tv_usec ) );
   return;
 }
 
