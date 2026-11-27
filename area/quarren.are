@@ -215,7 +215,7 @@ The mine ore dealer, Ketson stands here ready to give you a bad deal!
 15 0 0 0 16777217 16777216 0
 0 0 0 0 1050624 0 0 0
 0 0 0 0 0 0 0 0
-> all_greet_prog ~
+> all_greet_prog 0~
 say &B Come over miner, if you have some goods. I'll Buy.
 ~
 |
@@ -1058,7 +1058,7 @@ A &R Gateway to Heurkea stands here.~
 13 0 1
 0 0 0 0
 1 0 0
-> greet_prog ~
+> greet_prog 0~
 &B ^B Say Please come agian $n!
 ~
 |
@@ -3911,10 +3911,6 @@ D1
 ~
 ~
 0 -1 6881
-D2
-~
-~
-0 -1 21055
 D3
 ~
 ~
@@ -4621,10 +4617,6 @@ D2
 ~
 ~
 0 -1 6942
-D3
-~
-~
-0 -1 21016
 S
 #6906
 End of Dock~
@@ -4683,10 +4675,6 @@ into one of the two suns you can see the black shadow of a indigenice bird
 To the east is the land and city of Akatamer
 ~
 0 4 2
-D1
-~
-~
-0 -1 21081
 D3
 ~
 ~
@@ -5503,7 +5491,7 @@ M 1 6807 8 6847
 M 1 6804 1 6866
 G 1 301 1
 G 1 10314 1
-G 1 31522 1
+* Unavailable prototype: G 1 31522 1
 G 1 6814 1
 G 1 6815 1
 O 1 6803 1 6866
@@ -5594,19 +5582,19 @@ M 1 6829 3 6894
 M 1 6829 4 6901
 M 1 6833 1 6918
 D 0 6933 0 2
-O 1 21115 1 6931
-O 1 21116 1 6931
+* Unavailable prototype: O 1 21115 1 6931
+* Unavailable prototype: O 1 21116 1 6931
 D 0 6931 2 2
 M 1 6828 4 6934
 D 0 6934 0 2
-O 1 21115 1 6932
-O 1 21116 1 6932
+* Unavailable prototype: O 1 21115 1 6932
+* Unavailable prototype: O 1 21116 1 6932
 D 0 6932 2 2
 M 1 6834 1 6930
 E 1 10311 1 0
 E 1 32269 1 12
-O 1 21115 1 6930
-O 1 21116 1 6930
+* Unavailable prototype: O 1 21115 1 6930
+* Unavailable prototype: O 1 21116 1 6930
 D 0 6930 2 2
 O 1 6821 1 6929
 D 0 6929 0 2

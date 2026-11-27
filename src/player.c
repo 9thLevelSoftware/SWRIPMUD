@@ -35,11 +35,20 @@ void do_gold(CHAR_DATA * ch, char *argument)
    set_char_color( AT_GOLD, ch );
    ch_printf( ch,  "You have %d credits", ch->gold );
    if( ch->pcdata )
-     ch_printf( ch, ", and %d credits in the bank", ch->pcdata->bank );
+     ch_printf( ch, ", and %ld credits in the bank", ch->pcdata->bank );
    ch_printf( ch, ".\n" );
    return;
 }
 
+
+static std::string score_time(time_t when)
+{
+    const char *timestamp = ctime(&when);
+    std::string result = timestamp ? timestamp : "(unknown)";
+    if ( !result.empty() && result.back() == '\n' )
+        result.pop_back();
+    return result;
+}
 
 /*
  * New score command by Haus
@@ -50,12 +59,16 @@ void do_score(CHAR_DATA * ch, char *argument)
     AFFECT_DATA    *paf;
     int iLang, drug;
 
-    if (IS_NPC(ch))
+    if ( !ch )
+        return;
+
+    if (IS_NPC(ch) || !ch->pcdata)
     {
 	do_oldscore(ch, argument);
 	return;
     }
 
+    if ( ch->desc )
 	gmcp_force_resync(ch);
 
     set_char_color(AT_SCORE, ch);
@@ -63,7 +76,7 @@ void do_score(CHAR_DATA * ch, char *argument)
 	if (!str_cmp(argument, "lang"))
 	{
 		buf = ("&cLanguages: &c");
-		int race_lang = race_table[ch->race].language;
+		int race_lang = (ch->race >= 0 && ch->race < MAX_RACE) ? race_table[ch->race].language : LANG_COMMON;
 		for (iLang = 0; iLang < LANG_MAX; ++iLang)
 		{
 			if (!VALID_LANG(iLang))
@@ -99,14 +112,14 @@ ch_printf(ch, "\n%s\n", buf.c_str());
 		send_to_char("&C----------------------------------------------------------------------------\n", ch);
 
 		ch_printf(ch,   "&cRace: %-17.10s                &cLog In:  &C%s\n",
-		capitalize(get_race(ch)).c_str(), ( IS_NPC(ch) ? "(null)" : ctime(&(ch->pcdata->logon)) ) );
+		capitalize(get_race(ch)).c_str(), score_time(ch->pcdata->logon).c_str() );
 
 		ch_printf(ch,   "&cHitroll: &C%-2.2d  &cDamroll: &C%-2.2d   &cArmor: &C%-4d        &cSaved:  &C%s\n",
 			GET_HITROLL(ch), GET_DAMROLL(ch), GET_AC(ch),
-			(ch->pcdata && ch->pcdata->save_time) ? ctime(&(ch->pcdata->save_time)) : "no\n" );
+			ch->pcdata->save_time ? score_time(ch->pcdata->save_time).c_str() : "no" );
 
 		ch_printf(ch,   "&cAlign: &C%-5d    &cWimpy: &C%-3d                    &cTime:   &C%s\n",
-			ch->alignment, ch->wimpy  , ctime(&current_time) );
+			ch->alignment, ch->wimpy  , score_time(current_time).c_str() );
 		return;
 	}
     ch_printf(ch, "\n&CScore for %s.\n", ch->pcdata->title);
@@ -117,14 +130,14 @@ ch_printf(ch, "\n%s\n", buf.c_str());
     send_to_char("&C----------------------------------------------------------------------------\n", ch);
 
     ch_printf(ch,   "&cRace: %-17.10s                &cLog In:  &C%s\n",
-	capitalize(get_race(ch)).c_str(), ( IS_NPC(ch) ? "(null)" : ctime(&(ch->pcdata->logon)) ) );
+	capitalize(get_race(ch)).c_str(), score_time(ch->pcdata->logon).c_str() );
 
     ch_printf(ch,   "&cHitroll: &C%-2.2d  &cDamroll: &C%-2.2d   &cArmor: &C%-4d        &cSaved:  &C%s\n",
 		GET_HITROLL(ch), GET_DAMROLL(ch), GET_AC(ch),
-		(ch->pcdata && ch->pcdata->save_time) ? ctime(&(ch->pcdata->save_time)) : "no\n" );
+		ch->pcdata->save_time ? score_time(ch->pcdata->save_time).c_str() : "no" );
 
     ch_printf(ch,   "&cAlign: &C%-5d    &cWimpy: &C%-3d                    &cTime:   &C%s\n",
-		ch->alignment, ch->wimpy  , ctime(&current_time) );
+		ch->alignment, ch->wimpy  , score_time(current_time).c_str() );
 
     if ( ch->skill_level[FORCE_ABILITY] > 1
     || IS_IMMORTAL(ch) )
@@ -145,7 +158,7 @@ ch_printf(ch, "\n%s\n", buf.c_str());
 
        for ( ability = 0 ; ability < MAX_RL_ABILITY ; ability++ )
           if ( ability != FORCE_ABILITY || ch->skill_level[FORCE_ABILITY] > 1 )
-            ch_printf( ch, "&c%-15s   &CLevel: %-3d   Max: %-3d   Exp: %-10ld   Next: %-10ld\n",
+            ch_printf( ch, "&c%-15s   &CLevel: %-3d   Max: %-3d   Exp: %-10ld   Next: %-10d\n",
             ability_name[ability], ch->skill_level[ability], max_level(ch, ability), ch->experience[ability],
             exp_level( ch->skill_level[ability]+1 ) );
           else
@@ -162,7 +175,7 @@ ch_printf(ch, "\n%s\n", buf.c_str());
 
     ch_printf(ch, "&cWeight: &C%5.5d &c(&Cmax %7.7d&c)    Items: &C%5.5d &c(&Cmax %5.5d&c)\n",
 	ch->carry_weight, can_carry_w(ch) , ch->carry_number, can_carry_n(ch));
-    ch_printf(ch, "&cTime Played: &C%d Hours &C%d Minutes.\n",
+    ch_printf(ch, "&cTime Played: &C%lld Hours &C%lld Minutes.\n",
 	ch->pcdata->played/3600,(ch->pcdata->played%3600)/60);
     ch_printf(ch, "&cPager: &C(%c) %3d   &cAutoExit(&C%c&c)  AutoLoot(&C%c&c)  Autosac(&C%c&c)\n",
 	BV_IS_SET(ch->pcdata->flags, PCFLAG_PAGERON) ? 'X' : ' ',
@@ -270,7 +283,7 @@ ch_printf(ch, "\n%s\n", buf.c_str());
 										ch->pcdata->addiction[drug] );
 		}
 	buf =  "\n&cLanguages: &c";
-	int race_lang = race_table[ch->race].language;
+	int race_lang = (ch->race >= 0 && ch->race < MAX_RACE) ? race_table[ch->race].language : LANG_COMMON;
 	for (iLang = 0; iLang < LANG_MAX; ++iLang)
 	{
 		if (!VALID_LANG(iLang))
@@ -312,10 +325,14 @@ ch_printf(ch, "\n%s\n", buf.c_str());
 	ch_printf(ch, "&cIMMORTAL DATA:  Wizinvis [&C%s&c]  Wizlevel (&C%d&c)\n",
 		BV_IS_SET(ch->act, PLR_WIZINVIS) ? "X" : " ", ch->pcdata->wizinvis );
 
-	ch_printf(ch, "&cBamfin:  &C%s\n", (ch->pcdata->bamfin[0] != '\0')
-		? ch->pcdata->bamfin : "%s appears in a swirling mist.", ch->name);
-	ch_printf(ch, "&cBamfout: &C%s\n", (ch->pcdata->bamfout[0] != '\0')
-		? ch->pcdata->bamfout : "%s leaves in a swirling mist.", ch->name);
+	{
+	    std::string default_bamfin = str_printf("%s appears in a swirling mist.", ch->name);
+	    std::string default_bamfout = str_printf("%s leaves in a swirling mist.", ch->name);
+	    ch_printf(ch, "&cBamfin:  &C%s\n", (ch->pcdata->bamfin && ch->pcdata->bamfin[0] != '\0')
+		? ch->pcdata->bamfin : default_bamfin.c_str());
+	    ch_printf(ch, "&cBamfout: &C%s\n", (ch->pcdata->bamfout && ch->pcdata->bamfout[0] != '\0')
+		? ch->pcdata->bamfout : default_bamfout.c_str());
+	}
 
 
 	/* Area Loaded info - Scryn 8/11*/
@@ -680,7 +697,7 @@ void do_level( CHAR_DATA *ch, char *argument )
     
        for ( ability = 0 ; ability < MAX_RL_ABILITY ; ability++ )
           if ( ability != FORCE_ABILITY || ch->skill_level[FORCE_ABILITY] > 1 )
-            ch_printf( ch, "%-15s   Level: %-3d   Max: %-3d   Exp: %-10ld   Next: %-10ld\n",
+            ch_printf( ch, "%-15s   Level: %-3d   Max: %-3d   Exp: %-10ld   Next: %-10d\n",
             ability_name[ability], ch->skill_level[ability], max_level(ch, ability), ch->experience[ability],
             exp_level( ch->skill_level[ability]+1 ) );
           else
@@ -772,7 +789,8 @@ void do_inventory( CHAR_DATA *ch, char *argument )
 void do_equipment( CHAR_DATA *ch, char *argument )
 {
     OBJ_DATA *obj;
-    int iWear, dam;
+    int iWear;
+    long long dam;
     bool found;
     char buf[MAX_STRING_LENGTH];
     
@@ -796,11 +814,11 @@ void do_equipment( CHAR_DATA *ch, char *argument )
 	                break;
 
 	                case ITEM_ARMOR:
-	    		    if ( obj->value[1] == 0 )
-	      			obj->value[1] = obj->value[0];
-	    		    if ( obj->value[1] == 0 )
-	      			obj->value[1] = 1;
-	    		    dam = (sh_int) ((obj->value[0] * 10) / obj->value[1]);
+	                {
+	                    int original = obj->value[1] ? obj->value[1] : obj->value[0];
+	                    if ( original == 0 )
+	                        original = 1;
+	                    dam = (10LL * obj->value[0]) / original;
 			    if (dam >= 10) STRAPP( buf, " (superb) ");
 			    else if (dam >=  7) STRAPP( buf, " (good) ");
  		            else if (dam >=  5) STRAPP( buf, " (worn) ");
@@ -810,14 +828,16 @@ void do_equipment( CHAR_DATA *ch, char *argument )
                   	    send_to_char( buf, ch );
 	                    break;
 
+	                }
+
 	                 case ITEM_WEAPON:
-	                   dam = INIT_WEAPON_CONDITION - obj->value[0];
+	                   dam = static_cast<long long>(INIT_WEAPON_CONDITION) - obj->value[0];
 	                   if (dam < 2) STRAPP( buf, " (superb) ");
                            else if (dam < 4) STRAPP( buf, " (good) ");
                            else if (dam < 7) STRAPP( buf, " (worn) ");
                            else if (dam < 10) STRAPP( buf, " (poor) ");
                            else if (dam < 12) STRAPP( buf, " (awful) ");
-                           else if (dam ==  12) STRAPP( buf, " (broken) ");
+                           else STRAPP( buf, " (broken) ");
                 	   send_to_char( buf, ch );
 	                   if (BV_IS_SET(obj->objflags, WEAPON_BLASTER) )
 	                   {
@@ -865,7 +885,7 @@ void set_title(CHAR_DATA *ch, const std::string& title)
 
     if (IS_NPC(ch))
     {
-        bug("Set_title: NPC.", 0);
+        bug("Set_title: NPC.");
         return;
     }
 
@@ -881,7 +901,8 @@ void set_title(CHAR_DATA *ch, const std::string& title)
 
     STRFREE(ch->pcdata->title);
     ch->pcdata->title = STRALLOC(buf);
-    gmcp_evt_char_status(ch);
+    if ( ch->desc )
+        gmcp_evt_char_status(ch);
     return;
 }
 
@@ -976,16 +997,16 @@ void do_description( CHAR_DATA *ch, char *argument )
 	return;	  
     }
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
-	bug( "do_description: no descriptor", 0 );
+	bug( "do_description: no descriptor" );
 	return;
     }
 
     switch( ch->substate )
     {
 	default:
-	   bug( "do_description: illegal substate", 0 );
+	   bug( "do_description: illegal substate" );
 	   return;
 
 	case SUB_RESTRICTED:
@@ -1015,16 +1036,16 @@ void do_bio( CHAR_DATA *ch, char *argument )
 	return;	  
     }
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
-	bug( "do_bio: no descriptor", 0 );
+	bug( "do_bio: no descriptor" );
 	return;
     }
 
     switch( ch->substate )
     {
 	default:
-	   bug( "do_bio: illegal substate", 0 );
+	   bug( "do_bio: illegal substate" );
 	   return;
 	  	   
 	case SUB_RESTRICTED:
@@ -1076,7 +1097,7 @@ void do_report( CHAR_DATA *ch, char *argument )
 void do_prompt( CHAR_DATA *ch, char *argument )
 {
   std::string arg;
-  std::string argstr = argument;
+  std::string argstr = argument ? argument : "";
   
   if ( IS_NPC(ch) )
   {
@@ -1094,22 +1115,19 @@ void do_prompt( CHAR_DATA *ch, char *argument )
   if (ch->pcdata->prompt)
     STRFREE(ch->pcdata->prompt);
 
-  if ( argstr.length() > 128 )
-    argstr = argstr.substr(0, 128);
-
   /* Can add a list of pre-set prompts here if wanted.. perhaps
      'prompt 1' brings up a different, pre-set prompt */
   if ( !str_cmp(arg, "default") )
     ch->pcdata->prompt = STRALLOC("");
   else
-    ch->pcdata->prompt = STRALLOC(argstr);
+    ch->pcdata->prompt = STRALLOC(prompt_text_prefix(argstr));
   send_to_char( "Ok.\n", ch );
   return;
 }
 
 void set_target( CHAR_DATA *ch, const std::string& target )
 {
-    if (ch->pcdata->target && ch->pcdata->target[0] != '\0')
+    if (ch->pcdata->target)
      	STRFREE( ch->pcdata->target ); 
     ch->pcdata->target = STRALLOC( target );
     return;
@@ -1119,8 +1137,8 @@ void set_target( CHAR_DATA *ch, const std::string& target )
 
 void do_focusalias( CHAR_DATA *ch, char *argument)
 {
-  std::string arg, buf;
-  std::string argstr = argument;
+  std::string arg;
+  std::string argstr = argument ? argument : "";
   
   smash_tilde(argstr);
   one_argument( argstr, arg );
@@ -1131,7 +1149,7 @@ void do_focusalias( CHAR_DATA *ch, char *argument)
     return;
   }
   
-  if ( arg[0] == '\0' )
+  if ( arg.empty() )
   {
   	
   	if ( ch->pcdata->target && ch->pcdata->target[0] != '\0' ) 
@@ -1160,14 +1178,14 @@ void do_unfocusalias(CHAR_DATA *ch, char *argument)
    	return;
    }
   
-   if ( ch->pcdata->target && ch->pcdata->target[0] == '\0' )
+   if ( !ch->pcdata->target || ch->pcdata->target[0] == '\0' )
    {
    	send_to_char("Your alias focus is not defined at the moment.\n", ch);
    	return;
    }
    
    send_to_char("You remove your current alias focus.\n", ch);
-   ch->pcdata->target = STRALLOC("");
+   set_target(ch, "");
    return;
 
 }

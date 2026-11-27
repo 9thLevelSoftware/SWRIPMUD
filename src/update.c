@@ -62,24 +62,6 @@ OBJ_DATA *	gobj_prev;
 
 CHAR_DATA *	timechar;
 
-char * corpse_descs[] =
-   { 
-     "The corpse of %s will soon be gone.", 
-     "The corpse of %s lies here.",
-     "The corpse of %s lies here.",
-     "The corpse of %s lies here.",
-     "The corpse of %s lies here."
-   };
-
-char * d_corpse_descs[] =
-   { 
-     "The shattered remains %s will soon be gone.", 
-     "The shattered remains %s are here.",
-     "The shattered remains %s are here.",
-     "The shattered remains %s are here.",
-     "The shattered remains %s are here."
-   };
-
 extern int      top_exit;
 
 /*
@@ -90,6 +72,7 @@ extern void do_game(GameContext *game);
 extern int in_start_arena;
 extern int num_gladiators;
 extern int ppl_challenged;
+extern int time_left_in_game;
 
 bool is_droid( CHAR_DATA *ch )
 {
@@ -525,11 +508,7 @@ int move_gain( CHAR_DATA *ch )
 
 void gain_addiction( CHAR_DATA *ch )
 {
-    short drug;
-//    ch_ret retcode;
-    AFFECT_DATA af;
-    
-    for ( drug=0 ; drug <= 9 ; drug ++ )
+    for ( int drug = 0; drug < SPICE_MAX; ++drug )
     {
        
        if ( ch->pcdata->addiction[drug] < ch->pcdata->drug_level[drug] )
@@ -537,57 +516,53 @@ void gain_addiction( CHAR_DATA *ch )
   
        if ( ch->pcdata->addiction[drug] > ch->pcdata->drug_level[drug]+150 )
        {
-          switch (ch->pcdata->addiction[drug])
+          AFFECT_DATA af{};
+          af.type = -1;
+          af.duration = ch->pcdata->addiction[drug];
+          af.bitvector = AFF_WEAKEN;
+          switch (drug)
           {
-              default:
               case SPICE_GLITTERSTIM:
-                  if ( !IS_AFFECTED( ch, AFF_BLIND ) )
-	          {
-	             	af.type      = gsn_blindness;
-	      		af.location  = APPLY_AC;
-	      		af.modifier  = 10;
-	      		af.duration  = ch->pcdata->addiction[drug];
-	      		af.bitvector = AFF_BLIND;
-	      		affect_to_char( ch, &af );
-	   	  }    
+                  af.type = gsn_blindness;
+                  af.location = APPLY_AC;
+                  af.modifier = 10;
+                  af.bitvector = AFF_BLIND;
+                  break;
               case SPICE_CARSANUM:
-                  if ( !IS_AFFECTED( ch, AFF_WEAKEN ) )
-	          {
-	             	af.type      = -1;
-	      		af.location  = APPLY_DAMROLL;
-	      		af.modifier  = -10;
-	      		af.duration  = ch->pcdata->addiction[drug];
-	      		af.bitvector = AFF_WEAKEN;
-	      		affect_to_char( ch, &af );
-	   	  }
+                  af.location = APPLY_DAMROLL;
+                  af.modifier = -10;
+                  break;
               case SPICE_RYLL:
-                  if ( !IS_AFFECTED( ch, AFF_WEAKEN ) )
-	          {
-	             	af.type      = -1;
-	      		af.location  = APPLY_DEX;
-	      		af.modifier  = -5;
-	      		af.duration  = ch->pcdata->addiction[drug];
-	      		af.bitvector = AFF_WEAKEN;
-	      		affect_to_char( ch, &af );
-	   	  }
+                  af.location = APPLY_DEX;
+                  af.modifier = -5;
+                  break;
               case SPICE_ANDRIS:
-                  if ( !IS_AFFECTED( ch, AFF_WEAKEN ) )
-	          {
-	             	af.type      = -1;
-	      		af.location  = APPLY_CON;
-	      		af.modifier  = -5;
-	      		af.duration  = ch->pcdata->addiction[drug];
-	      		af.bitvector = AFF_WEAKEN;
-	      		affect_to_char( ch, &af );
-	   	  }
+                  af.location = APPLY_CON;
+                  af.modifier = -5;
+                  break;
+              default:
+                  af.bitvector = AFF_NONE;
+                  break;
+          }
+          if ( af.bitvector == AFF_BLIND && !IS_AFFECTED(ch, AFF_BLIND) )
+              affect_to_char(ch, &af);
+          else if ( af.bitvector == AFF_WEAKEN )
+          {
+              const AFFECT_DATA *existing = ch->first_affect;
+              for ( ; existing; existing = existing->next )
+                  if ( existing->bitvector == AFF_WEAKEN && existing->location == af.location )
+                      break;
+              if ( !existing )
+                  affect_to_char(ch, &af);
           }
        }
   
        if ( ch->pcdata->addiction[drug] > ch->pcdata->drug_level[drug]+200 )
        {      
-           ch_printf ( ch, "You feel like you are going to die. You NEED %s\n.",   get_flag_name(spice_table, drug, SPICE_MAX) );
+           ch_printf ( ch, "You feel like you are going to die. You NEED %s.\n", get_flag_name(spice_table, drug, SPICE_MAX) );
            worsen_mental_state( ch, 2 );
-           damage(ch, ch, 5, TYPE_UNDEFINED);
+           if ( damage(ch, ch, 5, TYPE_UNDEFINED) == rCHAR_DIED || char_died(ch) )
+               return;
        }
        else if ( ch->pcdata->addiction[drug] > ch->pcdata->drug_level[drug]+100 )
        {      
@@ -781,7 +756,7 @@ void mobile_update( GameContext *game )
 	set_cur_char( ch );
 	if ( ch == first_char && ch->prev )
 	{
-	    bug( "mobile_update: first_char->prev != NULL... fixed", 0 );
+	    bug( "mobile_update: first_char->prev != NULL... fixed" );
 	    ch->prev = NULL;
 	}
 	  
@@ -791,10 +766,10 @@ void mobile_update( GameContext *game )
 	{
 	    bug("FATAL: Mobile_update: %s->prev->next doesn't point to ch.",
 		ch->name );
-	    bug( "Short-cutting here", 0 );
+	    bug( "Short-cutting here" );
 	    gch_prev = NULL;
 	    ch->prev = NULL;
-	    do_shout( ch, "Thoric says, 'Prepare for the worst!'" );
+	    return;
 	}
 
 	if ( !IS_NPC(ch) )
@@ -872,15 +847,12 @@ void mobile_update( GameContext *game )
 	}
 
 	/* Check for mudprogram script on mob */
-	if ( IS_SET( ch->pIndexData->progtypes, SCRIPT_PROG ) )
-	{
-	    mprog_script_trigger( ch );
+	if ( IS_SET( ch->pIndexData->progtypes, SCRIPT_PROG ) && mprog_script_trigger(ch) )
 	    continue;
-	}
 
 	if ( ch != cur_char )
 	{
-	    bug( "Mobile_update: ch != cur_char after spec_fun", 0 );
+	    bug( "Mobile_update: ch != cur_char after spec_fun" );
 	    continue;
 	}
 
@@ -902,7 +874,7 @@ void mobile_update( GameContext *game )
 
 
 	/* MOBprogram random trigger */
-	if ( ch->in_room->area->nplayer > 0 )
+	if ( ch->in_room && ch->in_room->area && ch->in_room->area->nplayer > 0 )
 	{
 	    mprog_random_trigger( ch );
 	    if ( char_died(ch) )
@@ -993,6 +965,7 @@ void mobile_update( GameContext *game )
 	{
 	    CHAR_DATA *rch;
 	    bool found;
+	    ROOM_INDEX_DATA *origin = ch->in_room;
 
 	    found = FALSE;
 	    for ( rch  = ch->in_room->first_person;
@@ -1017,12 +990,18 @@ void mobile_update( GameContext *game )
 			  break;
 		    }
 		    do_yell( ch, buf );
+		    if ( char_died(ch) || ch->in_room != origin )
+			break;
 		    found = TRUE;
 		    break;
 		}
 	    }
-	    if ( found )
+	    if ( found && !char_died(ch) )
+	    {
 		retcode = move_char( ch, pexit, 0 );
+		if ( char_died(ch) )
+		    continue;
+	    }
 	}
     }
 
@@ -1070,10 +1049,11 @@ void update_taxes( GameContext *game )
     
 	for ( d = first_descriptor; d; d = d->next )
 	{
-        if ( d && d->character && d->character->pcdata && d->connected == CON_PLAYING && d->character->pcdata->bank <= INTERESTCUTOFF ) /* Interest */
+        if ( d->connected != CON_PLAYING || !d->character || !d->character->pcdata )
+          continue;
+        if ( d->character->pcdata->bank <= INTERESTCUTOFF ) /* Interest */
           d->character->pcdata->bank = (long int) ( d->character->pcdata->bank*1.0071428571428571 );
-        if ( ( d->connected == CON_PLAYING )
-        &&   ( d->character->pcdata->salary > 0 )
+        if ( ( d->character->pcdata->salary > 0 )
         &&   ( d->character->pcdata->clan )
         &&   ( d->character->pcdata->clan->funds >= d->character->pcdata->salary ) )
         {
@@ -1149,16 +1129,28 @@ void weather_update( GameContext *game )
 
     if ( buf[0] != '\0' )
     {
+	std::vector<DESCRIPTOR_DATA *> targets;
 	for ( d = first_descriptor; d; d = d->next )
 	{
-	    if ( d->connected == CON_PLAYING
-	    &&   IS_OUTSIDE(d->character)
-	    &&   IS_AWAKE(d->character)
-	    &&   d->character->in_room
-	    &&   d->character->in_room->sector_type != SECT_UNDERWATER
-	    &&   d->character->in_room->sector_type != SECT_OCEANFLOOR 
-	    &&   d->character->in_room->sector_type != SECT_UNDERGROUND ) 
-		act( AT_TEMP, buf, d->character, 0, 0, TO_CHAR );
+	    if ( comm_desc_alive( d ) && d->connected == CON_PLAYING )
+		targets.push_back( d );
+	}
+	for ( DESCRIPTOR_DATA *td : targets )
+	{
+	    if ( !comm_desc_alive( td ) || td->connected != CON_PLAYING )
+		continue;
+	    if ( td->character
+	    &&   !char_died(td->character)
+	    &&   td->character->in_room
+	    &&   IS_OUTSIDE(td->character)
+	    &&   IS_AWAKE(td->character)
+	    &&   td->character->in_room->sector_type != SECT_UNDERWATER
+	    &&   td->character->in_room->sector_type != SECT_OCEANFLOOR 
+	    &&   td->character->in_room->sector_type != SECT_UNDERGROUND ) 
+	    {
+		MOBtrigger = FALSE;
+		act( AT_TEMP, buf, td->character, 0, 0, TO_CHAR );
+	    }
 	}
         buf[0] = '\0';
     }
@@ -1244,12 +1236,25 @@ void weather_update( GameContext *game )
 
     if ( buf[0] != '\0' )
     {
+	std::vector<DESCRIPTOR_DATA *> targets;
 	for ( d = first_descriptor; d; d = d->next )
 	{
-	    if ( d->connected == CON_PLAYING
-	    &&   IS_OUTSIDE(d->character)
-	    &&   IS_AWAKE(d->character) )
-		act( AT_TEMP, buf, d->character, 0, 0, TO_CHAR );
+	    if ( comm_desc_alive( d ) && d->connected == CON_PLAYING )
+		targets.push_back( d );
+	}
+	for ( DESCRIPTOR_DATA *td : targets )
+	{
+	    if ( !comm_desc_alive( td ) || td->connected != CON_PLAYING )
+		continue;
+	    if ( td->character
+	    &&   !char_died(td->character)
+	    &&   td->character->in_room
+	    &&   IS_OUTSIDE(td->character)
+	    &&   IS_AWAKE(td->character) )
+	    {
+		MOBtrigger = FALSE;
+		act( AT_TEMP, buf, td->character, 0, 0, TO_CHAR );
+	    }
 	}
     }
 
@@ -1276,14 +1281,14 @@ void char_update( GameContext *game )
 
 	if ( ch == first_char && ch->prev )
 	{
-	    bug( "char_update: first_char->prev != NULL... fixed", 0 );
+	    bug( "char_update: first_char->prev != NULL... fixed" );
 	    ch->prev = NULL;
 	}
 	gch_prev = ch->prev;
 	set_cur_char( ch );
 	if ( gch_prev && gch_prev->next != ch )
 	{
-	    bug( "char_update: ch->prev->next != ch", 0 );
+	    bug( "char_update: ch->prev->next != ch" );
 	    return;
 	}
 
@@ -1328,10 +1333,12 @@ void char_update( GameContext *game )
        /*
          * If player has force let them know.
          */
-         if (!IS_NPC(ch) && ch->pcdata->played >= 72000 && ch->perm_frc > 0 &&
+         if (!IS_NPC(ch) && ch->pcdata && ch->pcdata->played >= 72000 && ch->perm_frc > 0 &&
              ch->skill_level[FORCE_ABILITY] == 1) {
+	   int sn = skill_lookup( "meditate" );
 	   ch->skill_level[FORCE_ABILITY] = 2;
-	   ch->pcdata->learned[skill_lookup( "meditate" )] = 20;
+	   if ( sn >= 0 && sn < MAX_SKILL )
+	     ch->pcdata->learned[sn] = 20;
 	   send_to_char("The universe suddenly feels very different to you.\n",ch);
 	 }        
 
@@ -1367,6 +1374,9 @@ void char_update( GameContext *game )
         
         if ( ch->pcdata )
               gain_addiction( ch );
+
+        if ( char_died( ch ) )
+              continue;
             
         
 	if ( !IS_NPC(ch) && ch->top_level < LEVEL_IMMORTAL )
@@ -1379,7 +1389,8 @@ void char_update( GameContext *game )
 	    {
 		if ( --obj->value[2] == 0 && ch->in_room )
 		{
-		    ch->in_room->light -= obj->count;
+		    if ( ch->in_room->light > 0 )
+		      --ch->in_room->light;
 		    act( AT_ACTION, "$p goes out.", ch, obj, NULL, TO_ROOM );
 		    act( AT_ACTION, "$p goes out.", ch, obj, NULL, TO_CHAR );
 		    if ( obj->serial == cur_obj )
@@ -1567,8 +1578,10 @@ void char_update( GameContext *game )
 	    
 	    if ( !IS_NPC (ch) )
 	    {
-	     if ( ++ch->timer > 15 && !ch->desc )
+	     if ( ++ch->timer > 15 && !ch->desc && !ch->switched )
              {
+                if ( ch->fighting )
+                    stop_fighting( ch, TRUE );
                 if ( ch->in_room )
 		     		char_from_room( ch );
 
@@ -1612,20 +1625,20 @@ void obj_update( GameContext *game )
 
 	if ( obj == first_object && obj->prev )
 	{
-	    bug( "obj_update: first_object->prev != NULL... fixed", 0 );
+	    bug( "obj_update: first_object->prev != NULL... fixed" );
 	    obj->prev = NULL;
 	}
 	gobj_prev = obj->prev;
 	if ( gobj_prev && gobj_prev->next != obj )
 	{
-	    bug( "obj_update: obj->prev->next != obj", 0 );
+	    bug( "obj_update: obj->prev->next != obj" );
 	    return;
 	}
 	set_cur_obj( obj );
 	if ( obj->carried_by )
 	  oprog_random_trigger( obj ); 
 	else
-	if( obj->in_room && obj->in_room->area->nplayer > 0 )
+	if( obj->in_room && obj->in_room->area && obj->in_room->area->nplayer > 0 )
 	  oprog_random_trigger( obj ); 
 
         if( obj_extracted(obj) )
@@ -1693,7 +1706,6 @@ void obj_update( GameContext *game )
 
 	  	if ( obj->timer > 0 && obj->value[2] > timerfrac )
 	  	{
-            char buf[MAX_STRING_LENGTH]; // Used for runtime sprintf.
 			std::string rest;
 			std::string name;
 
@@ -1703,15 +1715,15 @@ void obj_update( GameContext *game )
 
 	    separate_obj(obj);
             obj->value[2] = timerfrac;
-            if ( obj->item_type == ITEM_DROID_CORPSE )
-              SPRINTF_RUNTIME( buf, d_corpse_descs[ UMIN( timerfrac - 1, 4 ) ], 
-                          rest.c_str() ); 
-            else 
-              SPRINTF_RUNTIME( buf, corpse_descs[ UMIN( timerfrac - 1, 4 ) ], 
-                          capitalize( rest ).c_str() ); 
-
+            const bool droid = obj->item_type == ITEM_DROID_CORPSE;
+            std::string description = droid ? "The shattered remains " + rest
+                                            : "The corpse of " + capitalize(rest);
+            if ( timerfrac == 1 )
+                description += " will soon be gone.";
+            else
+                description += droid ? " are here." : " lies here.";
             STRFREE( obj->description );
-            obj->description = STRALLOC( buf ); 
+            obj->description = STRALLOC(description.substr(0, MAX_STRING_LENGTH - 1));
           }  
         }
        
@@ -1746,7 +1758,7 @@ void obj_update( GameContext *game )
 	         for (xit = obj->in_room->first_exit; xit; xit = xit->next )
         	   if ( xit->vdir == DIR_DOWN )
           		break;
-      		 if ( !xit )
+                 if ( !xit || !xit->to_room )
          	   continue;               	
                  new_room = xit->to_room;
                	
@@ -1758,7 +1770,9 @@ void obj_update( GameContext *game )
                   }
 
                obj_from_room(obj);
-               obj_to_room(obj, new_room);
+               obj = obj_to_room(obj, new_room);
+               if (obj_extracted(obj) || !obj->in_room)
+                   continue;
 
                if (( rch = obj->in_room->first_person) != NULL )
                   {
@@ -1781,7 +1795,7 @@ void obj_update( GameContext *game )
 	 
 	 case ITEM_GRENADE:
 	   explode( obj );
-	   return;
+	   continue;
 	   break;
 	                   
 	 case ITEM_PORTAL:
@@ -1823,8 +1837,6 @@ void obj_update( GameContext *game )
            AT_TEMP = AT_OBJECT;
 	   break;
 	 case ITEM_FIRE:
-	   if (obj->in_room)
-	     --obj->in_room->light;
 	   message = "$p burns out.";
 	   AT_TEMP = AT_FIRE;
 	 }
@@ -1841,6 +1853,8 @@ void obj_update( GameContext *game )
             act( AT_TEMP, message, rch, obj, NULL, TO_CHAR );
 	  }
  
+	if ( obj_extracted(obj) )
+	  continue;
 	if ( obj->serial == cur_obj )
 	  global_objcode = rOBJ_EXPIRED;
 	extract_obj( obj );
@@ -1906,6 +1920,7 @@ void char_check( GameContext *game )
 
 		if ( !BV_IS_SET(ch->act, ACT_SENTINEL)
 		&&   !BV_IS_SET(ch->act, ACT_PROTOTYPE)
+		&&   ch->in_room
 		&& ( door = number_bits( 4 ) ) <= 9
 		&& ( pexit = get_exit(ch->in_room, door) ) != NULL
 		&&   pexit->to_room
@@ -1996,6 +2011,26 @@ void char_check( GameContext *game )
 }
 
 
+static CHAR_DATA *upd_find_char( const CHAR_DATA *ptr )
+{
+    if ( !ptr )
+        return NULL;
+    for ( CHAR_DATA *ch = first_char; ch; ch = ch->next )
+        if ( ch == ptr )
+            return ch;
+    return NULL;
+}
+
+static OBJ_DATA *upd_find_obj( const OBJ_DATA *ptr )
+{
+    if ( !ptr )
+        return NULL;
+    for ( OBJ_DATA *obj = first_object; obj; obj = obj->next )
+        if ( obj == ptr )
+            return obj;
+    return NULL;
+}
+
 /*
  * Aggress.
  *
@@ -2016,7 +2051,6 @@ void aggr_update( GameContext *game )
     
     CHAR_DATA *ch;
     CHAR_DATA *ch_next;
-    CHAR_DATA *victim;
     CHAR_DATA *wch_next;
     struct act_prog_data *apdtmp;
 
@@ -2047,29 +2081,69 @@ void aggr_update( GameContext *game )
 #endif
 
     /* check mobprog act queue */
-    while ( (apdtmp = mob_act_list) != NULL )
+    int mob_act_iters = 1024;
+    while ( mob_act_iters > 0 && (apdtmp = mob_act_list) != NULL )
     {
-	wch = (CHAR_DATA *) mob_act_list->vo;
-	if ( !char_died(wch) && wch->mpactnum > 0 )
+	wch = (CHAR_DATA *) apdtmp->vo;
+	mob_act_list = apdtmp->next;
+	DISPOSE( apdtmp );
+	if ( !upd_find_char(wch) )
 	{
-	    MPROG_ACT_LIST * tmp_act;
-
+	    --mob_act_iters;
+	    continue;
+	}
+	if ( char_died(wch) )
+	{
+	    MPROG_ACT_LIST *tmp_act;
 	    while ( (tmp_act = wch->mpact) != NULL )
 	    {
-		if ( tmp_act->obj && obj_extracted(tmp_act->obj) )
-		  tmp_act->obj = NULL;
-		if ( tmp_act->ch && !char_died(tmp_act->ch) )
-		  mprog_wordlist_check( tmp_act->buf, wch, tmp_act->ch,
-					tmp_act->obj, tmp_act->vo, ACT_PROG );
 		wch->mpact = tmp_act->next;
-		STR_DISPOSE(tmp_act->buf);
+		if ( tmp_act->buf )
+		  STR_DISPOSE(tmp_act->buf);
 		DISPOSE(tmp_act);
 	    }
 	    wch->mpactnum = 0;
-	    wch->mpact    = NULL;
+	    --mob_act_iters;
+	    continue;
+	}
+	if ( wch->mpactnum > 0 || wch->mpact != NULL )
+	{
+	    MPROG_ACT_LIST * tmp_act;
+	    bool ran_act = false;
+
+	    while ( mob_act_iters > 0 && upd_find_char(wch) && (tmp_act = wch->mpact) != NULL )
+	    {
+		--mob_act_iters;
+		ran_act = true;
+		wch->mpact = tmp_act->next;
+		if ( wch->mpactnum > 0 )
+		  wch->mpactnum--;
+		if ( tmp_act->obj && (!upd_find_obj(tmp_act->obj) || obj_extracted(tmp_act->obj)) )
+		  tmp_act->obj = NULL;
+		if ( !char_died(wch) && tmp_act->ch && upd_find_char(tmp_act->ch) && !char_died(tmp_act->ch) )
+		  mprog_wordlist_check( tmp_act->buf ? tmp_act->buf : "", wch, tmp_act->ch,
+					tmp_act->obj, tmp_act->vo, ACT_PROG );
+		if ( tmp_act->buf )
+		  STR_DISPOSE(tmp_act->buf);
+		DISPOSE(tmp_act);
+	    }
+	    if ( mob_act_iters <= 0 && upd_find_char(wch) && wch->mpact )
+	    {
+		while ( (tmp_act = wch->mpact) != NULL )
+		{
+		    wch->mpact = tmp_act->next;
+		    if ( tmp_act->buf )
+		      STR_DISPOSE(tmp_act->buf);
+		    DISPOSE(tmp_act);
+		}
+	    }
+	    if ( upd_find_char(wch) && !wch->mpact )
+		wch->mpactnum = 0;
+	    if ( !ran_act )
+		--mob_act_iters;
         }
-	mob_act_list = apdtmp->next;
-	DISPOSE( apdtmp );
+	else
+	    --mob_act_iters;
     }
 
 
@@ -2097,67 +2171,54 @@ void aggr_update( GameContext *game )
 	    ||   ( BV_IS_SET(ch->act, ACT_WIMPY) ) )
 		continue;
    	
-	    if ( !BV_IS_SET(ch->act, ACT_AGGRESSIVE)
+	    if ( !ch->in_room
+	    ||   !BV_IS_SET(ch->act, ACT_AGGRESSIVE)
 	    ||    BV_IS_SET(ch->act, ACT_MOUNTED)
 	    ||    BV_IS_SET(ch->in_room->room_flags, ROOM_SAFE ) )
 		continue;
 
 	for ( wch = ch->in_room->first_person; wch; wch = ch_next )
 	{
-	    int count = 0;
-
 	    ch_next	= wch->next_in_room;
 
+	    if ( char_died(wch) || IS_NPC(wch) || wch->top_level >= LEVEL_IMMORTAL
+	    ||   wch->in_room != ch->in_room || !can_see(ch, wch)
+	    ||   get_timer(wch, TIMER_RECENTFIGHT) > 0 )
+		continue;
 
 	    if ( is_hating( ch, wch ) )
 	    {
-			found_prey( ch, wch );
-			continue;
+		ROOM_INDEX_DATA *origin = ch->in_room;
+		found_prey(ch, wch);
+		if ( char_died(ch) || ch->fighting || ch->in_room != origin )
+		    break;
+		continue;
 	    }
 
-	    if ( char_died(wch)
-	    ||   wch->top_level >= LEVEL_IMMORTAL
-	    ||  !wch->in_room 
-    	    ||   !can_see( ch, wch ) )
-	      continue;
-
-	    if ( BV_IS_SET(wch->act, ACT_AGGRESSIVE) )
-			continue;
-	    victim = wch;
-
-	    if ( !victim )
-	    {
-			bug( "Aggr_update: null victim.", count );
-			continue;
-	    }
-
-		if ( get_timer(victim, TIMER_RECENTFIGHT) > 0 )
-			continue;
-
-	    if ( IS_NPC(ch) && IS_SET(ch->attacks, ATCK_BACKSTAB ) )
+	    if ( IS_SET(ch->attacks, ATCK_BACKSTAB) )
 	    {
 		OBJ_DATA *obj;
 		if ( !ch->mount
     		&& (obj = get_eq_char( ch, WEAR_WIELD )) != NULL
     		&& ( BV_IS_SET(obj->objflags,WEAPON_VIBRO_BLADE) || BV_IS_SET(obj->objflags,WEAPON_BLADE)  )
-		&& !victim->fighting
-		&& victim->hit >= victim->max_hit )
+		&& !wch->fighting
+		&& wch->hit >= wch->max_hit )
 		{
 		    WAIT_STATE( ch, skill_table[gsn_backstab]->beats );
-		    if ( !IS_AWAKE(victim)
+		    if ( !IS_AWAKE(wch)
 		    ||   number_percent( )+5 < ch->top_level )
 		    {
-			global_retcode = multi_hit( ch, victim, gsn_backstab );
-			continue;
+			global_retcode = multi_hit( ch, wch, gsn_backstab );
 		    }
 		    else
 		    {
-			global_retcode = damage( ch, victim, 0, gsn_backstab );
-			continue;
+			global_retcode = damage( ch, wch, 0, gsn_backstab );
 		    }
+		    break;
 		}
 	    }
-	    global_retcode = multi_hit( ch, victim, TYPE_UNDEFINED );
+	    global_retcode = multi_hit( ch, wch, TYPE_UNDEFINED );
+	    break;
 	}
     }
 
@@ -2178,7 +2239,7 @@ void drunk_randoms( CHAR_DATA *ch )
     sh_int drunk;
     sh_int position;
 
-    if( !ch )
+    if( !ch || !ch->in_room )
       return;
 
     if ( IS_NPC( ch ) || !ch->pcdata || ch->pcdata->condition[COND_DRUNK] <= 0 )
@@ -2387,7 +2448,7 @@ void update_handler( GameContext *game )
       start_arena(game);
     }
 
-    if(num_gladiators)
+    if((num_gladiators || time_left_in_game > 0) && !in_start_arena && !ppl_challenged)
     if(( --pulse_arena <= 0))
     {
       pulse_arena = PULSE_ARENA;
@@ -2424,7 +2485,7 @@ void remove_portal( OBJ_DATA *portal )
 
     if ( !portal )
     {
-	bug( "remove_portal: portal is NULL", 0 );
+	bug( "remove_portal: portal is NULL" );
 	return;
     }
 
@@ -2432,7 +2493,7 @@ void remove_portal( OBJ_DATA *portal )
     found = FALSE;
     if ( !fromRoom )
     {
-	bug( "remove_portal: portal->in_room is NULL", 0 );
+	bug( "remove_portal: portal->in_room is NULL" );
 	return;
     }
 
@@ -2453,7 +2514,7 @@ void remove_portal( OBJ_DATA *portal )
 	bug( "remove_portal: exit in dir %d != DIR_PORTAL", pexit->vdir );
 
     if ( ( toRoom = pexit->to_room ) == NULL )
-      bug( "remove_portal: toRoom is NULL", 0 );
+      bug( "remove_portal: toRoom is NULL" );
  
     extract_exit( fromRoom, pexit );
     /* rendunancy */
@@ -2474,7 +2535,7 @@ void remove_portal( OBJ_DATA *portal )
 
 void reboot_check( GameContext *game, time_t reset )
 {
-  static char *tmsg[] =
+  static const char *const tmsg[] =
   { "SYSTEM: Reboot in 10 seconds.",
     "SYSTEM: Reboot in 30 seconds.",
     "SYSTEM: Reboot in 1 minute.",
@@ -2517,14 +2578,29 @@ void reboot_check( GameContext *game, time_t reset )
     
     if ( auction->item )
     {
-      buf = str_printf( "Sale of %s has been stopped by mud.", auction->item->short_descr);
-      talk_auction(buf);
-      obj_to_char(auction->item, auction->seller);
+      OBJ_DATA *item = auction->item;
+      CHAR_DATA *seller = auction->seller;
+      CHAR_DATA *buyer = auction->buyer;
+      int bet = auction->bet;
+
       auction->item = NULL;
-      if ( auction->buyer && auction->buyer != auction->seller )
+      auction->seller = NULL;
+      auction->buyer = NULL;
+      auction->bet = 0;
+      auction->going = 0;
+      auction->pulse = 0;
+      auction->starting = 0;
+
+      buf = str_printf( "Sale of %s has been stopped by mud.", item->short_descr);
+      talk_auction(buf);
+      if ( seller && !char_died(seller) )
+        obj_to_char(item, seller);
+      else if ( !obj_extracted(item) )
+        extract_obj(item);
+      if ( buyer && buyer != seller && !char_died(buyer) )
       {
-        auction->buyer->gold += auction->bet;
-        send_to_char("Your money has been returned.\n", auction->buyer);
+        buyer->gold += bet;
+        send_to_char("Your money has been returned.\n", buyer);
       }
     }
     echo_to_all(AT_YELLOW, "You are forced from these realms by a strong "
@@ -2747,8 +2823,38 @@ void auction_update (GameContext *game)
     int tax, pay;
     std::string buf;
 
+	if (!auction || !auction->item)
+	    return;
+
 	if (!auction->game)
 	    auction->game = game;
+
+	if (!auction->seller || char_died(auction->seller) || !auction->seller->in_room)
+	{
+	    OBJ_DATA *item = auction->item;
+	    CHAR_DATA *seller = auction->seller;
+	    CHAR_DATA *buyer = auction->buyer;
+	    int bet = auction->bet;
+
+	    auction->item = NULL;
+	    auction->seller = NULL;
+	    auction->buyer = NULL;
+	    auction->bet = 0;
+	    auction->going = 0;
+	    auction->pulse = 0;
+	    auction->starting = 0;
+
+	    if (buyer && buyer != seller && !char_died(buyer))
+	    {
+		buyer->gold += bet;
+		send_to_char("Your money has been returned.\n", buyer);
+	    }
+	    talk_auction(str_printf("Sale of %s has been cancelled.",
+		item->short_descr ? item->short_descr : "an item"));
+	    if (!obj_extracted(item))
+		extract_obj(item);
+	    return;
+	}
 
     switch (++auction->going) /* increase the going state */
     {
@@ -2770,76 +2876,101 @@ void auction_update (GameContext *game)
 		bug( "Auction code reached SOLD, with NULL buyer, but %d gold bid", auction->bet );
 		auction->bet = 0;
 	    }
-	    if (auction->bet > 0 && auction->buyer != auction->seller)
+	    if (auction->bet > 0 && auction->buyer && auction->buyer != auction->seller
+	     && !char_died(auction->buyer) && auction->buyer->in_room)
 	    {
+		OBJ_DATA *item = auction->item;
+		CHAR_DATA *buyer = auction->buyer;
+		CHAR_DATA *seller = auction->seller;
+		int bet = auction->bet;
+
+		auction->item = NULL;
+		auction->seller = NULL;
+		auction->buyer = NULL;
+		auction->bet = 0;
+		auction->going = 0;
+		auction->pulse = 0;
+		auction->starting = 0;
+
 		buf = str_printf("%s sold to %s for %d.",
-			auction->item->short_descr,
-			IS_NPC(auction->buyer) ? auction->buyer->short_descr : auction->buyer->name,
-			auction->bet);
+			item->short_descr,
+			IS_NPC(buyer) ? buyer->short_descr : buyer->name,
+			bet);
 		talk_auction(buf);
 
 		act(AT_ACTION, "The auctioneer materializes before you, and hands you $p.",
-			auction->buyer, auction->item, NULL, TO_CHAR);
+			buyer, item, NULL, TO_CHAR);
 		act(AT_ACTION, "The auctioneer materializes before $n, and hands $m $p.",
-			auction->buyer, auction->item, NULL, TO_ROOM);
+			buyer, item, NULL, TO_ROOM);
 
-		if ( (auction->buyer->carry_weight 
-		+     get_obj_weight( auction->item ))
-		>     can_carry_w( auction->buyer ) )
+		if ( (buyer->carry_weight 
+		+     get_obj_weight( item ))
+		>     can_carry_w( buyer ) )
 		{
-		    act( AT_PLAIN, "$p is too heavy for you to carry with your current inventory.", auction->buyer, auction->item, NULL, TO_CHAR );
-    		    act( AT_PLAIN, "$n is carrying too much to also carry $p, and $e drops it.", auction->buyer, auction->item, NULL, TO_ROOM );
-		    obj_to_room( auction->item, auction->buyer->in_room );
+		    act( AT_PLAIN, "$p is too heavy for you to carry with your current inventory.", buyer, item, NULL, TO_CHAR );
+    		    act( AT_PLAIN, "$n is carrying too much to also carry $p, and $e drops it.", buyer, item, NULL, TO_ROOM );
+		    obj_to_room( item, buyer->in_room );
 		}
 		else
-		    obj_to_char( auction->item, auction->buyer );
-	        pay = (int) (auction->bet * 0.9 );
-		tax = (int) (auction->bet * 0.1 );
-		boost_economy( auction->seller->in_room->area, tax );
-                auction->seller->gold += pay; /* give him the money, tax 10 % */
+		    obj_to_char( item, buyer );
+	        pay = (int) (bet * 0.9 );
+		tax = (int) (bet * 0.1 );
+		if ( seller->in_room && seller->in_room->area )
+		    boost_economy( seller->in_room->area, tax );
+                seller->gold += pay; /* give him the money, tax 10 % */
 		buf = str_printf("The auctioneer pays you %d gold, charging an auction fee of %d.\n", pay, tax);
-		send_to_char(buf, auction->seller);
-                auction->item = NULL; /* reset item */
+		send_to_char(buf, seller);
 		if ( BV_IS_SET( game->get_sysdata()->save_flags, SV_AUCTION ) )
 		{
-		    save_char_obj( auction->buyer );
-		    save_char_obj( auction->seller );
+		    save_char_obj( buyer );
+		    save_char_obj( seller );
 		}
             }
             else /* not sold */
             {
-                buf = str_printf("No bids received for %s - object has been removed from auction\n.",auction->item->short_descr);
+                OBJ_DATA *item = auction->item;
+                CHAR_DATA *seller = auction->seller;
+
+                auction->item = NULL;
+                auction->seller = NULL;
+                auction->buyer = NULL;
+                auction->bet = 0;
+                auction->going = 0;
+                auction->pulse = 0;
+                auction->starting = 0;
+
+                buf = str_printf("No bids received for %s - object has been removed from auction\n.",item->short_descr);
                 talk_auction(buf);
                 act (AT_ACTION, "The auctioneer appears before you to return $p to you.",
-                      auction->seller,auction->item,NULL,TO_CHAR);
+                      seller,item,NULL,TO_CHAR);
                 act (AT_ACTION, "The auctioneer appears before $n to return $p to $m.",
-                      auction->seller,auction->item,NULL,TO_ROOM);
-		if ( (auction->seller->carry_weight
-		+     get_obj_weight( auction->item ))
-		>     can_carry_w( auction->seller ) )
+                      seller,item,NULL,TO_ROOM);
+		if ( (seller->carry_weight
+		+     get_obj_weight( item ))
+		>     can_carry_w( seller ) )
 		{
 		    act( AT_PLAIN, "You drop $p as it is just too much to carry"
-			" with everything else you're carrying.", auction->seller,
-			auction->item, NULL, TO_CHAR );
+			" with everything else you're carrying.", seller,
+			item, NULL, TO_CHAR );
 		    act( AT_PLAIN, "$n drops $p as it is too much extra weight"
-			" for $m with everything else.", auction->seller,
-			auction->item, NULL, TO_ROOM );
-		    obj_to_room( auction->item, auction->seller->in_room );
+			" for $m with everything else.", seller,
+			item, NULL, TO_ROOM );
+		    obj_to_room( item, seller->in_room );
 		}
 		else
-		    obj_to_char (auction->item,auction->seller);
-		tax = (int) ( auction->item->cost * 0.05 );
-		boost_economy( auction->seller->in_room->area, tax );
+		    obj_to_char (item,seller);
+		tax = (int) ( item->cost * 0.05 );
+		if ( seller->in_room && seller->in_room->area )
+		    boost_economy( seller->in_room->area, tax );
 		buf = str_printf("The auctioneer charges you an auction fee of %d.\n", tax );
-		send_to_char(buf, auction->seller);
-		if ((auction->seller->gold - tax) < 0)
-		  auction->seller->gold = 0;
+		send_to_char(buf, seller);
+		if ((seller->gold - tax) < 0)
+		  seller->gold = 0;
 		else
-		  auction->seller->gold -= tax;
+		  seller->gold -= tax;
 		if ( BV_IS_SET( game->get_sysdata()->save_flags, SV_AUCTION ) )
-		    save_char_obj( auction->seller );
+		    save_char_obj( seller );
 	    } /* else */
-	    auction->item = NULL; /* clear auction */
     } /* switch */
 } /* func */
 

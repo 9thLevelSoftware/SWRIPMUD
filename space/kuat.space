@@ -1,0 +1,16 @@
+#SPACE
+Name         Kuat~
+Filename     kuat.space~
+Type         1
+Locationa    Public Landing Pad~
+Doca         23082
+Locationb    Kuat Shipyard~
+Docb         32055
+Locationc    North Docking Platform~
+Docc         32050
+Xpos         4206
+Ypos         2711
+Zpos         9023
+End
+
+#END

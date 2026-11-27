@@ -1,0 +1,16 @@
+#SPACE
+Name         Tatooine~
+Filename     tatooine.space~
+Type         1
+Locationa    Mos Espa Space Port~
+Doca         3300
+Locationb    ~
+Docb         0
+Locationc    ~
+Docc         0
+Xpos         2799
+Ypos         -3279
+Zpos         -4166
+End
+
+#END

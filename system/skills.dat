@@ -10,7 +10,7 @@ End
 
 #SKILL
 Name         dispel dark~
-Type         unknown
+Type         Spell
 Flags        134217728
 Target       1
 Minpos       7
@@ -24,26 +24,6 @@ Wearoff      !Dispel Evil!~
 Teachers     50~
 Alignment   1001
 Minlevel     105
-End
-
-#SKILL
-Name         stun~
-Type         unknown
-Flags        134217728
-Guild        0
-Code         spell_smaug
-Dammsg       ~
-Minlevel     105
-End
-
-#SKILL
-Name         unknown~
-Type         unknown
-Flags        134217728
-Guild        0
-Code         spell_smaug
-Dammsg       ~
-Minlevel     101
 End
 
 #SKILL
@@ -79,10 +59,10 @@ Wearoff      You are suddenly less alert.~
 Hitvict      You suddenly feel alert.~
 Hitroom      $N's eyes dart about the room in an alert manner.~
 Teachers     50 605~
-AffectEx       'l*15' 28 '32' -1
-AffectEx       'l*15' 27 '8' -1
-AffectEx       'l*15' 27 '1024' -1
-AffectEx       'l*15' 27 '4194304' -1
+AffectEx       'l*15' 28 '5' -1
+AffectEx       'l*15' 27 '3' -1
+AffectEx       'l*15' 27 '10' -1
+AffectEx       'l*15' 27 '22' -1
 Minlevel     26
 End
 
@@ -102,7 +82,7 @@ Hitchar      $N's lungs take on the ability to breathe water...~
 Hitvict      Your lungs take on the ability to breathe water...~
 Hitroom      $N's lungs take on the ability to breathe water...~
 Teachers     50 605~
-AffectEx       'l*23' 26 'aqua breath' 0
+AffectEx       'l*23' 0 '' 31
 Alignment   100
 Minlevel     101
 End
@@ -208,7 +188,7 @@ Hitroom      $N's eyelids seem heavy for a moment.~
 Dice         none~
 Value        30
 Teachers     50 605~
-AffectEx       'l*5' 28 '8' -1
+AffectEx       'l*5' 28 '3' -1
 Minlevel     75
 End
 
@@ -327,7 +307,7 @@ Wearoff      You stop focusing on the Dark Side.~
 Hitvict      Traces of red outline all those who abuse the Force.~
 Hitroom      A tint of red appears in $N's eyes, mirroring his own vision.~
 Teachers     50 7310~
-AffectEx       'l*24' 26 'detect evil' 2
+AffectEx       'l*24' 0 '' 2
 Alignment   1001
 Minlevel     5
 End
@@ -348,7 +328,7 @@ Wearoff      The blue outlines disappear from your vision.~
 Hitvict      Traces of blue outline objects touched by the Force.~
 Hitroom      A tint of blue in $N's eyes mirrors $S own perception.~
 Teachers     50 605 6112 7310~
-AffectEx       'l*24' 26 'detect magic' 4
+AffectEx       'l*24' 0 '' 4
 Minlevel     5
 End
 
@@ -385,7 +365,7 @@ Wearoff      You no longer see invisible objects.~
 Hitvict      Your eyes fixate as they gain the ability to see the unseen.~
 Hitroom      $N's eyes fixate as they gain the ability to see the unseen.~
 Teachers     50 605 6112 7310~
-AffectEx       'l*24' 26 'detect invis' 3
+AffectEx       'l*24' 0 '' 3
 Minlevel     4
 End
 
@@ -422,7 +402,7 @@ Wearoff      You feel less aware of the dangers about you.~
 Hitvict      You suddenly grow aware of the dangers about you.~
 Hitroom      $N peers about the room, intent on finding all manner of danger.~
 Teachers     50 605~
-AffectEx       'l*24' 26 'detect traps' 23
+AffectEx       'l*24' 0 '' 23
 Minlevel     13
 End
 
@@ -528,7 +508,7 @@ Hitvict      You suddenly grow very tired and drowsy.~
 Hitroom      $N suddenly appears very tired and drowsy.~
 Immchar      Mysteriously, $N was not affected by your spell.~
 Teachers     605~
-AffectEx       'l*15' 29 '1024' -1
+AffectEx       'l*15' 29 '10' -1
 Alignment   -1001
 Minlevel     46
 End
@@ -551,7 +531,7 @@ Hitvict      You grow feeble from a powerful curse.~
 Hitroom      $n lays a curse of feebleness upon $N.~
 Immchar      $N is not affected by your spell.~
 Teachers     605~
-AffectEx       'l*19' 29 '512' -1
+AffectEx       'l*19' 29 '9' -1
 Alignment   -1001
 Minlevel     80
 End
@@ -609,7 +589,7 @@ Hitchar      $N begins to float in mid-air...~
 Hitvict      You begin to float in mid-air...~
 Hitroom      $N begins to float in mid-air...~
 Teachers     50 605~
-AffectEx       'l*24' 26 'float' 21
+AffectEx       'l*24' 0 '' 21
 Minlevel     10
 End
 
@@ -628,7 +608,7 @@ Dice         44*W~
 Participants 3
 Components   V@43~
 Teachers     605~
-AffectEx       '6' 26 'blindness' 0
+AffectEx       '6' 0 '' 0
 Alignment   -1001
 Minlevel     50
 End
@@ -668,7 +648,17 @@ Hitvict      A shimmering translucent shell forms about you.~
 Hitroom      A shimmering translucent shell forms about $N.~
 Teachers     50~
 AffectEx       'l*20' 17 '-80' -1
-AffectEx       'l*24' 27 '2907151' -1
+AffectEx       'l*24' 27 '0' -1
+AffectEx       'l*24' 27 '1' -1
+AffectEx       'l*24' 27 '2' -1
+AffectEx       'l*24' 27 '3' -1
+AffectEx       'l*24' 27 '10' -1
+AffectEx       'l*24' 27 '11' -1
+AffectEx       'l*24' 27 '12' -1
+AffectEx       'l*24' 27 '14' -1
+AffectEx       'l*24' 27 '18' -1
+AffectEx       'l*24' 27 '19' -1
+AffectEx       'l*24' 27 '21' -1
 Alignment   1001
 Minlevel     90
 End
@@ -691,7 +681,7 @@ Hitvict      An aura surrounds you, channeling violent energies in your directio
 Hitroom      A Force funnel forms about $N...~
 Immchar      The Force funnel dissipates before it reaches $N.~
 Teachers     605~
-AffectEx       'l*23' 29 '8' -1
+AffectEx       'l*23' 29 '3' -1
 Alignment   -1001
 Minlevel     43
 End
@@ -731,7 +721,7 @@ Hitvict      You fade from the mundane energy continuum.~
 Hitroom      A shield of Force divides $N from the mundane energy continuum.~
 Teachers     50~
 AffectEx       'l*20' 17 '-50' -1
-AffectEx       'l*24' 27 '1048576' -1
+AffectEx       'l*24' 27 '20' -1
 Alignment   1001
 Minlevel     80
 End
@@ -753,7 +743,7 @@ Hitchar      $N's eyes dart about as they grow accustomed to Force sight.~
 Hitvict      Heat appears red through your eyes.~
 Hitroom      $N's eyes dart about as they grow accustomed to Force sight.~
 Teachers     50 605 6112 7310~
-AffectEx       'l*24' 26 'infravision' 9
+AffectEx       'l*24' 0 '' 9
 Minlevel     4
 End
 
@@ -836,7 +826,7 @@ Wearoff      You are no longer masked.~
 Hitvict      You fade from existence.~
 Hitroom      $N fades from existence.~
 Teachers     50 605~
-AffectEx       'l*11' 26 'mass invis' 1
+AffectEx       'l*11' 0 '' 1
 Minlevel     43
 End
 
@@ -874,7 +864,7 @@ Hitroom      $N's face hardens.~
 Teachers     605~
 AffectEx       'l*30' 5 '4' -1
 AffectEx       'l*30' 13 'l*4' -1
-AffectEx       'l*30' 27 '8192' -1
+AffectEx       'l*30' 27 '13' -1
 Alignment   -1001
 Minlevel     55
 End
@@ -934,7 +924,7 @@ Wearoff      You feel less aware of your surroundings.~
 Hitvict      Your senses are heightened to those of an animal.~
 Hitroom      $N's senses are heightened to those of an animal.~
 Teachers     50 605~
-AffectEx       'l*24' 26 'detect hidden' 5
+AffectEx       'l*24' 0 '' 5
 Minlevel     15
 End
 
@@ -976,7 +966,7 @@ Hitroom      $N's face hardens.~
 Teachers     50~
 AffectEx       'l*20' 5 '5' -1
 AffectEx       'l*30' 13 'l*4' -1
-AffectEx       'l*30' 27 '8192' -1
+AffectEx       'l*30' 27 '13' -1
 Alignment   1001
 Minlevel     55
 End
@@ -1031,7 +1021,7 @@ Hitchar      A momentary lapse in attention, and $N is out of sight.~
 Hitvict      You fade from existence.~
 Hitroom      A momentary lapse in attention, and $N is out of sight.~
 Teachers     50 605 6112 7310~
-AffectEx       'l*11' 26 'invis' -1
+AffectEx       'l*11' 0 '' 1
 Minlevel     5
 End
 
@@ -1086,7 +1076,7 @@ Wearoff      You feel less protected from the Dark Side.~
 Hitvict      You are blessed with a protection from the Dark Side.~
 Hitroom      $N is blessed with a protection from the Dark Side.~
 Teachers     50~
-AffectEx       'l*10' 26 'protection' 13
+AffectEx       'l*10' 0 '' 13
 Alignment   1001
 Minlevel     12
 End
@@ -1182,7 +1172,7 @@ Hitchar      A luminous aura spreads slowly over $N's body.~
 Hitvict      A luminous aura spreads slowly over your body.~
 Hitroom      A luminous aura spreads slowly over $N's body.~
 Teachers     50~
-AffectEx       '(l*4)+30' 26 'sanctuary' 7
+AffectEx       '(l*4)+30' 0 '' 7
 Minlevel     75
 End
 
@@ -1260,7 +1250,7 @@ Wearoff      The torrents of cascading energy suddenly fade away.~
 Hitvict      Torrents of cascading energy form around you.~
 Hitroom      Torrents of cascading energy form around $N.~
 Teachers     605~
-AffectEx       '(l*3)+14' 26 'shockshield' 26
+AffectEx       '(l*3)+14' 0 '' 26
 Alignment   -1001
 Minlevel     75
 End
@@ -1300,7 +1290,6 @@ Hitroom      $N suddenly appears more agile...~
 Teachers     50~
 AffectEx       'l*24' 2 '1+(l/17)' -1
 AffectEx       'l*20' 40 'l/8' -1
-AffectEx       '' 40 '' -1
 Minlevel     18
 End
 
@@ -1320,7 +1309,7 @@ Wearoff      Your vision descends to the material plane.~
 Hitvict      Your vision is elevated to the highest plane.~
 Hitroom      $N's eyes begin to glow a soft white.~
 Teachers     50 605~
-AffectEx       'l*5' 26 'truesight' 22
+AffectEx       'l*5' 0 '' 22
 Minlevel     77
 End
 
@@ -1342,8 +1331,8 @@ Hitvict      Your defenses are unravelled before your very eyes.~
 Hitroom      $N's eyes widen in fear as $S defenses are unravelled.~
 Immchar      Your spell has no effect upon $N.~
 Teachers     50 605~
-AffectEx       '(l*3)+25' 29 '1048576' -1
-AffectEx       '(l*3)+25' 29 '8192' -1
+AffectEx       '(l*3)+25' 29 '20' -1
+AffectEx       '(l*3)+25' 29 '13' -1
 Minlevel     66
 End
 
@@ -1396,7 +1385,7 @@ Hitchar      You focus your senses to find those that would hide from you.~
 Hitvict      &cYou focus your senses to find those that would hide from you.&R&W~
 Misschar     &RYou fail to focus your senses.&R&W~
 Teachers     32050 3006~
-AffectEx       'l*5' 26 'detect hidden' 5
+AffectEx       'l*5' 0 '' 5
 Minlevel     50
 End
 
@@ -1838,7 +1827,7 @@ Type         Skill
 Flags        0
 Minpos       5
 Guild        2
-Code         do_gemcutting
+Code         spell_null
 Dammsg       ~
 Wearoff      !done!~
 Teachers     32010 206~
@@ -1925,7 +1914,7 @@ Flags        0
 Minpos       8
 Rounds       12
 Guild        0
-Code         spell_null
+Code         do_hitall
 Dammsg       hit~
 Wearoff      !HitAll!~
 Teachers     32012 32011 412 10509 9757 9718~
@@ -1947,10 +1936,10 @@ Hitchar      You harden yourself against pain.~
 Hitvict      &cYou harden yourself against all pain.&R&W~
 Misschar     &RYou fail to focus your energy.&R&W~
 Teachers     32050~
-AffectEx       'l*10' 27 '8' -1
-AffectEx       'l*10' 27 '2097152' -1
-AffectEx       'l*10' 27 '8192' -1
-AffectEx       'l*10' 27 '32' -1
+AffectEx       'l*10' 27 '3' -1
+AffectEx       'l*10' 27 '21' -1
+AffectEx       'l*10' 27 '13' -1
+AffectEx       'l*10' 27 '5' -1
 AffectEx       'l*10' 5 '1+(l/50)' -1
 Minlevel     80
 End
@@ -2086,7 +2075,7 @@ Type         Skill
 Flags        134217728
 Minpos       5
 Guild        2
-Code         do_makebowcaster
+Code         spell_null
 Dammsg       ~
 Teachers     29919 ~
 Minlevel     40
@@ -2136,7 +2125,7 @@ Name         makefurniture~
 Type         Skill
 Flags        0
 Guild        2
-Code         do_say
+Code         spell_null
 Dammsg       ~
 Teachers     28607 32010 206~
 Minlevel     101
@@ -2198,7 +2187,7 @@ Type         Skill
 Flags        0
 Minpos       5
 Guild        2
-Code         do_makeshield
+Code         spell_null
 Dammsg       ~
 Wearoff      !done!~
 Teachers     32010 206~
@@ -2535,7 +2524,7 @@ Hitchar      You focus your senses in an effort to detect the unseen.~
 Hitvict      &cYou focus your senses in an effort to detect the unseen.&R&W~
 Misschar     &RYou fail to focus your mind.&R&W~
 Teachers     32050 3006~
-AffectEx       'l*5' 26 'detect invis' 3
+AffectEx       'l*5' 0 '' 3
 Minlevel     60
 End
 
@@ -2623,12 +2612,12 @@ Target       3
 Minpos       8
 Rounds       1
 Guild        4
-Code         spell_smaug
+Code         do_sneak
 Dammsg       ~
 Hitvict      You attempt to move silently.~
 Misschar     You attempt to move silently.~
 Teachers     32009 410 1983~
-AffectEx       'l*23' 26 'sneak' 15
+AffectEx       'l*23' 0 '' 15
 Minlevel     5
 End
 
@@ -2761,7 +2750,7 @@ Wearoff      You are no longer hidden.~
 Hitvict      You attempt to hide.~
 Misschar     You attempt to hide.~
 Teachers     32009 410 1983~
-AffectEx       'l*23' 26 'hide' -1
+AffectEx       'l*23' 0 '' 16
 Minlevel     50
 End
 
@@ -2810,7 +2799,7 @@ Flags        0
 Minpos       6
 Rounds       3
 Guild        0
-Code         spell_null
+Code         do_throw
 Dammsg       ~
 Wearoff      !throw!~
 Teachers     32012 32011 412 10509 9757 9718~
@@ -3287,6 +3276,110 @@ Flags        0
 Code         spell_null
 Dammsg       ~
 Minlevel     0
+End
+
+#SKILL
+Name         bite~
+Type         Skill
+Flags        0
+Minpos       7
+Code         spell_null
+Dammsg       bite~
+Minlevel     105
+End
+
+#SKILL
+Name         claw~
+Type         Skill
+Flags        0
+Minpos       7
+Code         spell_null
+Dammsg       claw~
+Minlevel     105
+End
+
+#SKILL
+Name         sting~
+Type         Skill
+Flags        0
+Minpos       7
+Code         spell_null
+Dammsg       sting~
+Minlevel     105
+End
+
+#SKILL
+Name         tail~
+Type         Skill
+Flags        0
+Minpos       7
+Code         spell_null
+Dammsg       tail~
+Minlevel     105
+End
+
+#SKILL
+Name         brew~
+Type         Skill
+Flags        0
+Minpos       5
+Code         spell_null
+Dammsg       ~
+Minlevel     105
+End
+
+#SKILL
+Name         clan~
+Type         Tongue
+Flags        0
+Code         spell_null
+Dammsg       ~
+Minlevel     105
+End
+
+#SKILL
+Name         divine~
+Type         Tongue
+Flags        0
+Code         spell_null
+Dammsg       ~
+Minlevel     105
+End
+
+#SKILL
+Name         ancient~
+Type         Tongue
+Flags        0
+Code         spell_null
+Dammsg       ~
+Minlevel     105
+End
+
+#SKILL
+Name         droidspeak~
+Type         Tongue
+Flags        0
+Code         spell_null
+Dammsg       ~
+Minlevel     105
+End
+
+#SKILL
+Name         spiritual~
+Type         Tongue
+Flags        0
+Code         spell_null
+Dammsg       ~
+Minlevel     105
+End
+
+#SKILL
+Name         magical~
+Type         Tongue
+Flags        0
+Code         spell_null
+Dammsg       ~
+Minlevel     105
 End
 
 #END

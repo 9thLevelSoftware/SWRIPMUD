@@ -22,16 +22,28 @@
 #include <sys/types.h>
 #include <stdio.h>
 #include <string.h>
+#include <charconv>
+#include <vector>
 #include "mud.h"
 
 bool	MOBtrigger;
 
+static bool mc_is_valid_char( const CHAR_DATA *target )
+{
+    if ( !target )
+        return false;
+    for ( CHAR_DATA *wch = first_char; wch; wch = wch->next )
+        if ( wch == target )
+            return !char_died( wch );
+    return false;
+}
+
 void transfer_char( CHAR_DATA *ch, CHAR_DATA *victim, ROOM_INDEX_DATA *location );
-char *	mprog_type_to_name	args( ( int type ) );
+char *	mprog_type_to_name	args( ( uint32_t type ) );
 ch_ret	simple_damage( CHAR_DATA *ch, CHAR_DATA *victim, int dam, int dt );
 CHAR_DATA * get_char_room_mp  args( ( CHAR_DATA *ch, const std::string& argument ) );
 
-char *mprog_type_to_name( int type )
+char *mprog_type_to_name( uint32_t type )
 {
     switch ( type )
     {
@@ -80,6 +92,9 @@ void do_mpstat( CHAR_DATA *ch, char *argument )
     MPROG_DATA *mprg;
     CHAR_DATA  *victim;
 
+    if ( !ch )
+        return;
+
     one_argument( argument, arg );
 
     if ( arg.empty() )
@@ -94,7 +109,7 @@ void do_mpstat( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    if ( !IS_NPC( victim ) )
+    if ( !IS_NPC( victim ) || !victim->pIndexData )
     {
 	send_to_char( "Only Mobiles can have MobPrograms!\n", ch);
 	return;
@@ -108,11 +123,11 @@ void do_mpstat( CHAR_DATA *ch, char *argument )
     }
 
     ch_printf( ch, "Name: %s.  Vnum: %d.\n",
-	victim->name, victim->pIndexData->vnum );
+	victim->name ? victim->name : "", victim->pIndexData->vnum );
 
     ch_printf( ch, "Short description: %s.\nLong  description: %s",
-	    victim->short_descr,
-	    victim->long_descr[0] != '\0' ?
+	    victim->short_descr ? victim->short_descr : "",
+	    ( victim->long_descr && victim->long_descr[0] != '\0' ) ?
 	    victim->long_descr : "(none).\n" );
 
     ch_printf( ch, "Hp: %d/%d.  Mana: %d/%d.  Move: %d/%d. \n",
@@ -128,8 +143,8 @@ void do_mpstat( CHAR_DATA *ch, char *argument )
     for ( mprg = victim->pIndexData->mudprogs; mprg; mprg = mprg->next )
 	ch_printf( ch, ">%s %s\n%s\n",
 		mprog_type_to_name( mprg->type ),
-		mprg->arglist,
-		mprg->comlist );
+		mprg->arglist ? mprg->arglist : "",
+		mprg->comlist ? mprg->comlist : "" );
     return;
 }
 
@@ -139,6 +154,9 @@ void do_opstat( CHAR_DATA *ch, char *argument )
     std::string        arg;
     MPROG_DATA *mprg;
     OBJ_DATA   *obj;
+
+    if ( !ch )
+        return;
 
     one_argument( argument, arg );
 
@@ -154,23 +172,23 @@ void do_opstat( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    if ( !( obj->pIndexData->progtypes ) )
+    if ( !obj->pIndexData || !( obj->pIndexData->progtypes ) )
     {
 	send_to_char( "That object has no programs set.\n", ch);
 	return;
     }
 
     ch_printf( ch, "Name: %s.  Vnum: %d.\n",
-	obj->name, obj->pIndexData->vnum );
+	obj->name ? obj->name : "", obj->pIndexData->vnum );
 
     ch_printf( ch, "Short description: %s.\n",
-	    obj->short_descr );
+	    obj->short_descr ? obj->short_descr : "" );
 
     for ( mprg = obj->pIndexData->mudprogs; mprg; mprg = mprg->next )
 	ch_printf( ch, ">%s %s\n%s\n",
 		mprog_type_to_name( mprg->type ),
-		mprg->arglist,
-		mprg->comlist );
+		mprg->arglist ? mprg->arglist : "",
+		mprg->comlist ? mprg->comlist : "" );
 
     return;
 
@@ -181,6 +199,9 @@ void do_rpstat( CHAR_DATA *ch, char *argument )
 {
     MPROG_DATA *mprg;
 
+    if ( !ch || !ch->in_room )
+        return;
+
     if ( !( ch->in_room->progtypes ) )
     {
 	send_to_char( "This room has no programs set.\n", ch);
@@ -188,13 +209,13 @@ void do_rpstat( CHAR_DATA *ch, char *argument )
     }
 
     ch_printf( ch, "Name: %s.  Vnum: %d.\n",
-	ch->in_room->name, ch->in_room->vnum );
+	ch->in_room->name ? ch->in_room->name : "", ch->in_room->vnum );
 
     for ( mprg = ch->in_room->mudprogs; mprg; mprg = mprg->next )
 	ch_printf( ch, ">%s %s\n%s\n",
 		mprog_type_to_name( mprg->type ),
-		mprg->arglist,
-		mprg->comlist );
+		mprg->arglist ? mprg->arglist : "",
+		mprg->comlist ? mprg->comlist : "" );
     return;
 }
 
@@ -205,9 +226,9 @@ void do_mpasound( CHAR_DATA *ch, char *argument )
     EXIT_DATA       *pexit;
     FLAG_SET	     actflags;
 
-    if (!ch )
+    if (!ch || !ch->in_room)
     {
-	bug("Nonexistent ch in do_mpasound!",0);
+	bug("Nonexistent ch in do_mpasound!");
 	return;
     }
 
@@ -251,12 +272,12 @@ void do_mpkill( CHAR_DATA *ch, char *argument )
     std::string        arg;
     CHAR_DATA *victim;
 
-    if (!ch )
+    if (!ch || !ch->in_room)
     {
-	bug( "Nonexistent ch in do_mpkill!", 0 );
+	bug( "Nonexistent ch in do_mpkill!" );
 	return;
     }
-    
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
 
@@ -312,6 +333,9 @@ void do_mpjunk( CHAR_DATA *ch, char *argument )
     std::string        arg;
     OBJ_DATA *obj;
     OBJ_DATA *obj_next;
+
+    if ( !ch )
+        return;
 
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
@@ -396,6 +420,9 @@ void do_mpechoaround( CHAR_DATA *ch, char *argument )
     FLAG_SET   actflags;
     sh_int     color;
  
+    if ( !ch || !ch->in_room )
+        return;
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
 	return;
  
@@ -407,7 +434,7 @@ void do_mpechoaround( CHAR_DATA *ch, char *argument )
  
     argstr = one_argument( argstr, arg );
     
-    if ( arg.empty() )
+    if ( arg.empty() || argstr.empty() )
     {
 	progbug( "Mpechoaround - No argument", ch );
 	return;
@@ -422,7 +449,7 @@ void do_mpechoaround( CHAR_DATA *ch, char *argument )
     actflags = ch->act;
     BV_REMOVE_BIT(ch->act, ACT_SECRETIVE);
 
-    if ( (color = get_color(argument)) )
+    if ( (color = get_color(argstr)) )
     {
 	argstr = one_argument( argstr, arg );
 	act( color, argstr, ch, NULL, victim, TO_NOTVICT );
@@ -444,6 +471,9 @@ void do_mpechoat( CHAR_DATA *ch, char *argument )
     FLAG_SET   actflags;
     sh_int     color;
  
+    if ( !ch || !ch->in_room )
+        return;
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
 	return;
  
@@ -470,7 +500,7 @@ void do_mpechoat( CHAR_DATA *ch, char *argument )
     actflags = ch->act;
     BV_REMOVE_BIT(ch->act, ACT_SECRETIVE);
 
-    if ( (color = get_color(argument)) )
+    if ( (color = get_color(argstr)) )
     {
 	argstr = one_argument( argstr, arg );
 	act( color, argstr, ch, NULL, victim, TO_VICT );
@@ -491,10 +521,13 @@ void do_mpecho( CHAR_DATA *ch, char *argument )
     sh_int     color;
     FLAG_SET   actflags;
  
+    if ( !ch || !ch->in_room )
+        return;
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
 	return;
  
-    if ( !IS_NPC(ch) )
+    if ( !ch || !IS_NPC(ch) )
     {
 	send_to_char( "Huh?\n", ch );
 	return;
@@ -531,6 +564,9 @@ void do_mpmload( CHAR_DATA *ch, char *argument )
     std::string argstr = argument;
     MOB_INDEX_DATA *pMobIndex;
     CHAR_DATA      *victim;
+
+    if ( !ch || !ch->in_room )
+        return;
 
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
@@ -575,6 +611,9 @@ void do_mpoload( CHAR_DATA *ch, char *argument )
     OBJ_DATA       *obj;
     int             level;
     int		    timer = 0;
+
+    if ( !ch || !ch->in_room )
+        return;
 
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
@@ -654,6 +693,9 @@ void do_mppurge( CHAR_DATA *ch, char *argument )
     CHAR_DATA *victim;
     OBJ_DATA  *obj;
 
+    if ( !ch || !ch->in_room )
+        return;
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
 
@@ -673,7 +715,10 @@ void do_mppurge( CHAR_DATA *ch, char *argument )
 	for ( victim = ch->in_room->first_person; victim; victim = vnext )
 	{
 	    vnext = victim->next_in_room;
-	    if ( IS_NPC( victim ) && victim != ch )
+	    if ( IS_NPC( victim )
+	    &&   victim != ch
+	    &&   victim != supermob
+	    &&   ( !victim->pIndexData || victim->pIndexData->vnum != MOB_VNUM_SUPERMOB ) )
 	      extract_char( victim, TRUE );
 	}
 	while ( ch->in_room->first_content )
@@ -703,7 +748,8 @@ void do_mppurge( CHAR_DATA *ch, char *argument )
     	return;
     }
 
-    if ( IS_NPC( victim ) && victim->pIndexData->vnum == MOB_VNUM_SUPERMOB )
+    if ( IS_NPC( victim )
+    &&   ( victim == supermob || ( victim->pIndexData && victim->pIndexData->vnum == MOB_VNUM_SUPERMOB ) ) )
     {
         progbug( "Mppurge: trying to purge supermob", ch );
 	return;
@@ -772,6 +818,9 @@ void do_mpgoto( CHAR_DATA *ch, char *argument )
     std::string arg;
     ROOM_INDEX_DATA *location;
 
+    if ( !ch || !ch->in_room )
+        return;
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
 
@@ -813,6 +862,9 @@ void do_mpat( CHAR_DATA *ch, char *argument )
     ROOM_INDEX_DATA *original;
     CHAR_DATA       *wch;
 
+    if ( !ch || !ch->in_room )
+        return;
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
 
@@ -846,7 +898,7 @@ void do_mpat( CHAR_DATA *ch, char *argument )
      * Handles 'at XXXX quit' case.
      */
     for ( wch = first_char; wch; wch = wch->next )
-	if ( wch == ch )
+	if ( wch == ch && !char_died( ch ) )
 	{
 	    char_from_room( ch );
 	    char_to_room( ch, original );
@@ -857,10 +909,6 @@ void do_mpat( CHAR_DATA *ch, char *argument )
 }
 
 /* allow a mobile to advance a player's level... very dangerous */
-void do_mpadvance( CHAR_DATA *ch, char *argument )
-{
-    return;
-}
 
 
 
@@ -874,7 +922,9 @@ void do_mptransfer( CHAR_DATA *ch, char *argument )
     std::string argstr = argument;
     ROOM_INDEX_DATA *location;
     CHAR_DATA       *victim;
-    CHAR_DATA       *nextinroom;
+
+    if ( !ch || !ch->in_room )
+        return;
 
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
     {
@@ -918,17 +968,25 @@ void do_mptransfer( CHAR_DATA *ch, char *argument )
         }
     }
 
-    /* Put in the variable nextinroom to make this work right. -Narn */
     if ( !str_cmp( arg1, "all" ) )
     {
-	for ( victim = ch->in_room->first_person; victim; victim = nextinroom )
+	ROOM_INDEX_DATA *start_room = ch->in_room;
+	std::vector<CHAR_DATA *> targets;
+
+	for ( victim = start_room->first_person; victim; victim = victim->next_in_room )
+	    targets.push_back( victim );
+
+	for ( CHAR_DATA *t : targets )
 	{
-        nextinroom = victim->next_in_room;
-	    if ( victim != ch
-	    &&   !NOT_AUTHED(victim)
-	    &&   can_see( ch, victim ) )
+	    if ( !mc_is_valid_char( ch ) || ch->in_room != start_room )
+		break;
+	    if ( !mc_is_valid_char( t ) || t->in_room != start_room )
+		continue;
+	    if ( t != ch
+	    &&   !NOT_AUTHED(t)
+	    &&   can_see( ch, t ) )
 	    {
-            transfer_char( ch, victim, location );
+		transfer_char( ch, t, location );
 	    }
 	}
 	return;
@@ -972,6 +1030,9 @@ void do_mpforce( CHAR_DATA *ch, char *argument )
     std::string arg;
     std::string argstr = argument;
 
+    if ( !ch || !ch->in_room )
+        return;
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
 
@@ -991,11 +1052,24 @@ void do_mpforce( CHAR_DATA *ch, char *argument )
 
     if ( !str_cmp( arg, "all" ) )
     {
-	CHAR_DATA *vch;
+	ROOM_INDEX_DATA *start_room = ch->in_room;
+	std::vector<CHAR_DATA *> targets;
 
-	for ( vch = ch->in_room->first_person; vch; vch = vch->next_in_room )
+	for ( CHAR_DATA *vch = start_room->first_person; vch; vch = vch->next_in_room )
+	    targets.push_back( vch );
+
+	for ( CHAR_DATA *vch : targets )
+	{
+	    if ( !mc_is_valid_char( ch ) || ch->in_room != start_room )
+		break;
+	    if ( !mc_is_valid_char( vch ) || vch->in_room != start_room || vch == ch )
+		continue;
+	    if ( IS_IMMORTAL( vch )
+	    ||   ( vch->desc && vch->desc->original && IS_IMMORTAL( vch->desc->original ) ) )
+		continue;
 	    if ( get_trust( vch ) < get_trust( ch ) && can_see( ch, vch ) )
 		interpret( vch, argstr );
+	}
     }
     else
     {
@@ -1013,14 +1087,18 @@ void do_mpforce( CHAR_DATA *ch, char *argument )
 	    return;
 	}
 
-	if ( !IS_NPC( victim )
-	&& ( !victim->desc )
-	&& IS_IMMORTAL( victim ) )
+	if ( IS_IMMORTAL( victim )
+	||   ( victim->desc && victim->desc->original && IS_IMMORTAL( victim->desc->original ) ) )
 	{
-	    progbug( "Mpforce - Attempting to force link dead immortal", ch );
+	    progbug( "Mpforce - Attempting to force immortal", ch );
 	    return;
 	}
 
+	if ( get_trust( victim ) >= get_trust( ch ) )
+	{
+	    progbug( "Mpforce - Attempting to force target of equal or higher trust", ch );
+	    return;
+	}
 
 	interpret( victim, argstr );
     }
@@ -1039,16 +1117,14 @@ void do_mpforce( CHAR_DATA *ch, char *argument )
  * syntax:  mppractice victim spell_name max%
  *
  */
-void do_mp_practice( CHAR_DATA *ch, char *argument )
-{
-}
 
 /*
  * syntax: mpslay (character)
  */
 void do_mp_slay( CHAR_DATA *ch, char *argument )
 {
-    if( ch->top_level >= 103 )
+    if ( ch && ch->in_room && IS_NPC(ch) && !ch->desc
+    &&   !IS_AFFECTED(ch, AFF_CHARM) && ch->top_level >= 103 )
       do_slay( ch, argument );
       
     return;
@@ -1064,6 +1140,9 @@ void do_mp_damage( CHAR_DATA *ch, char *argument )
     std::string argstr = argument;
     CHAR_DATA *victim;
     int dam;
+
+    if ( !ch || !ch->in_room )
+        return;
 
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
@@ -1142,6 +1221,9 @@ void do_mp_restore( CHAR_DATA *ch, char *argument )
     CHAR_DATA *victim;
     int hp;
 
+    if ( !ch || !ch->in_room )
+        return;
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
 
@@ -1182,9 +1264,11 @@ void do_mp_restore( CHAR_DATA *ch, char *argument )
        progbug( "Mprestore: invalid (nonexistent?) argument", ch );
        return;
     }
-    hp += victim->hit;
-    victim->hit = (hp > 32000 || hp < 0 || hp > victim->max_hit) ?
-                  victim->max_hit : hp;
+    {
+        long long new_hp = static_cast<long long>( victim->hit ) + hp;
+        victim->hit = ( new_hp > 32000 || new_hp < 0 || new_hp > victim->max_hit ) ?
+                      victim->max_hit : static_cast<int>( new_hp );
+    }
 }
 
 void  do_mpgain( CHAR_DATA *ch, char *argument )
@@ -1196,6 +1280,9 @@ void  do_mpgain( CHAR_DATA *ch, char *argument )
     CHAR_DATA *victim;
     long exp;
     int  ability;
+
+    if ( !ch || !ch->in_room )
+        return;
 
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
@@ -1277,6 +1364,9 @@ void do_mp_open_passage( CHAR_DATA *ch, char *argument )
     ROOM_INDEX_DATA *targetRoom, *fromRoom;
     int targetRoomVnum, fromRoomVnum, exit_num;
     EXIT_DATA *pexit;
+
+    if ( !ch )
+        return;
 
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
@@ -1374,6 +1464,9 @@ void do_mp_close_passage( CHAR_DATA *ch, char *argument )
     int fromRoomVnum, exit_num;
     EXIT_DATA *pexit;
 
+    if ( !ch )
+        return;
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
 
@@ -1446,6 +1539,9 @@ void do_mp_close_passage( CHAR_DATA *ch, char *argument )
  */
 void do_mpnothing( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
 
@@ -1468,6 +1564,9 @@ void do_mpdream( CHAR_DATA *ch, char *argument )
     std::string arg1;
     std::string argstr = argument;
     CHAR_DATA *vict;
+
+    if ( !ch )
+        return;
 
     if ( IS_AFFECTED( ch, AFF_CHARM ) )
       return;
@@ -1498,6 +1597,9 @@ void do_mpapply( CHAR_DATA *ch, char *argument )
 {
   CHAR_DATA *victim;
 
+  if ( !ch || !ch->in_room )
+    return;
+
   if ( !IS_NPC( ch ) )
   {
     send_to_char( "Huh?\n", ch );
@@ -1522,15 +1624,18 @@ void do_mpapply( CHAR_DATA *ch, char *argument )
    return;
   }
 
-  if( !NOT_AUTHED(victim) )
+  if( !NOT_AUTHED(victim) || !victim->pcdata )
     return;
   
   if( victim->pcdata->auth_state >= 1 )
     return;
-  log_channelf(CHANNEL_MONITOR, "Monitor", LEVEL_IMMORTAL,
-                  "%s@%s new %s applying for authorization...", 
-           victim->name, victim->desc->host, 
-           race_table[victim->race].race_name);
+  {
+    const char *rname = ( victim->race >= 0 && victim->race < MAX_RACE )
+                        ? race_table[victim->race].race_name : "unknown";
+    log_channelf(CHANNEL_MONITOR, "Monitor", LEVEL_IMMORTAL,
+                    "%s@%s new %s applying for authorization...", 
+             victim->name, victim->desc->host, rname);
+  }
   victim->pcdata->auth_state = 1;
   return;
 }
@@ -1538,6 +1643,9 @@ void do_mpapply( CHAR_DATA *ch, char *argument )
 void do_mpapplyb( CHAR_DATA *ch, char *argument )
 {
   CHAR_DATA *victim;
+
+  if ( !ch || !ch->in_room )
+    return;
 
   if ( !IS_NPC( ch ) )
   {
@@ -1563,7 +1671,7 @@ void do_mpapplyb( CHAR_DATA *ch, char *argument )
    return;
   }
 
-  if( !NOT_AUTHED(victim) )
+  if( !NOT_AUTHED(victim) || !victim->pcdata )
     return;
   
   if ( get_timer(victim, TIMER_APPLIED) >= 1)
@@ -1575,9 +1683,12 @@ void do_mpapplyb( CHAR_DATA *ch, char *argument )
   case 1:   
   default:
   send_to_char( "You attempt to regain the gods' attention.\n", victim);
-  log_channelf( CHANNEL_MONITOR, "Monitor", LEVEL_IMMORTAL, "%s@%s new %s applying for authorization...",                      
-                    victim->name, victim->desc->host,
-                    race_table[victim->race].race_name);
+  {
+    const char *rname = ( victim->race >= 0 && victim->race < MAX_RACE )
+                        ? race_table[victim->race].race_name : "unknown";
+    log_channelf( CHANNEL_MONITOR, "Monitor", LEVEL_IMMORTAL, "%s@%s new %s applying for authorization...",                      
+                      victim->name, victim->desc->host, rname);
+  }
   add_timer(victim, TIMER_APPLIED, 10, NULL, 0);
   victim->pcdata->auth_state = 1;
   break; 
@@ -1592,11 +1703,17 @@ void do_mpapplyb( CHAR_DATA *ch, char *argument )
         BV_REMOVE_BIT(victim->pcdata->flags, PCFLAG_UNAUTHED);
         if ( victim->fighting )
           stop_fighting( victim, TRUE );
-        char_from_room(victim);
-        char_to_room(victim, get_room_index(ROOM_VNUM_SCHOOL));
-        act( AT_WHITE, "$n enters this world from within a column of blinding light!",
-            victim, NULL, NULL, TO_ROOM );
-        do_look(victim, "auto");
+        {
+          ROOM_INDEX_DATA *school = get_room_index( ROOM_VNUM_SCHOOL );
+          if ( school )
+          {
+            char_from_room(victim);
+            char_to_room(victim, school);
+            act( AT_WHITE, "$n enters this world from within a column of blinding light!",
+                victim, NULL, NULL, TO_ROOM );
+            do_look(victim, "auto");
+          }
+        }
   break;
   }
 
@@ -1606,26 +1723,36 @@ void do_mpapplyb( CHAR_DATA *ch, char *argument )
 /*
  * Deposit some gold into the current area's economy		-Thoric
  */
-void do_mp_deposit( CHAR_DATA *ch, char *argument )
+static int positive_prog_credits( const std::string &argument )
 {
     std::string arg;
-    int gold;
+    one_argument(argument, arg);
+    const char *begin = arg.data();
+    const char *end = begin + arg.size();
+    if ( begin != end && *begin == '+' )
+        ++begin;
+    int gold = 0;
+    const auto result = std::from_chars(begin, end, gold);
+    return result.ec == std::errc() && result.ptr == end && gold > 0 ? gold : 0;
+}
 
-    if ( !IS_NPC(ch) )
+void do_mp_deposit( CHAR_DATA *ch, char *argument )
+{
+    if ( !ch )
+        return;
+    if ( !IS_NPC(ch) || IS_AFFECTED(ch, AFF_CHARM) )
     {
 	send_to_char("Huh?\n", ch);
 	return;
     }
 
-    one_argument(argument, arg);
-
-    if ( arg.empty() )
+    const int gold = positive_prog_credits(argument);
+    if ( !gold )
     {
 	progbug("Mpdeposit - bad syntax", ch );
 	return;
     }
-    gold = strtoi( arg );
-    if ( gold <= ch->gold && ch->in_room )
+    if ( gold <= ch->gold && ch->in_room && ch->in_room->area )
     {
 	ch->gold -= gold;
 	boost_economy( ch->in_room->area, gold );
@@ -1638,23 +1765,20 @@ void do_mp_deposit( CHAR_DATA *ch, char *argument )
  */
 void do_mp_withdraw( CHAR_DATA *ch, char *argument )
 {
-    std::string arg;
-    int gold;
-
-    if ( !IS_NPC(ch) )
+    if ( !ch )
+        return;
+    if ( !IS_NPC(ch) || IS_AFFECTED(ch, AFF_CHARM) )
     {
 	send_to_char("Huh?\n", ch);
 	return;
     }
 
-    one_argument(argument, arg);
-
-    if ( arg.empty() )
+    const int gold = positive_prog_credits(argument);
+    if ( !gold )
     {
 	progbug("Mpwithdraw - bad syntax", ch );
 	return;
     }
-    gold = strtoi( arg );
     if ( ch->gold < 1000000000 && gold < 1000000000 && ch->in_room
     &&   economy_has( ch->in_room->area, gold ) )
     {
@@ -1664,12 +1788,6 @@ void do_mp_withdraw( CHAR_DATA *ch, char *argument )
 }
 
 
-void do_mppkset( CHAR_DATA *ch, char *argument )
-{
-    send_to_char("mppkset has been zapped into the realm of useless old code.\n", ch);
-    return;
-  
-}
 
 
 
@@ -1690,7 +1808,7 @@ ch_ret simple_damage( CHAR_DATA *ch, CHAR_DATA *victim, int dam, int dt )
 
     if ( !ch )
     {
-	bug( "Damage: null ch!", 0 );
+	bug( "Damage: null ch!" );
 	return rERROR;
     }
     if ( !victim )
@@ -1770,6 +1888,8 @@ ch_ret simple_damage( CHAR_DATA *ch, CHAR_DATA *victim, int dam, int dt )
 	  {
 	     set_cur_obj(damobj);
 	     damage_obj(damobj);
+	     if ( char_died( victim ) )
+		return rVICT_DIED;
 	  }
 	}
     }
@@ -1841,7 +1961,7 @@ ch_ret simple_damage( CHAR_DATA *ch, CHAR_DATA *victim, int dam, int dt )
 	    log_channelf( CHANNEL_MONITOR, "Monitor", LEVEL_IMMORTAL, "%s killed by %s at %d",
             victim->name,
             (IS_NPC(ch) ? ch->short_descr : ch->name),
-            victim->in_room->vnum );
+            victim->in_room ? victim->in_room->vnum : 0 );
 	}
 	set_cur_char(victim);
 	raw_kill( ch, victim );
@@ -1890,7 +2010,8 @@ ch_ret simple_damage( CHAR_DATA *ch, CHAR_DATA *victim, int dam, int dt )
     if ( !npcvict && BV_IS_SET( victim->act, PLR_FLEE ) )
 	do_flee( victim, "" );
 
-    tail_chain( ch->game );
+    if ( !char_died( ch ) )
+        tail_chain( ch->game );
     return rNONE;
 }
 
@@ -1899,6 +2020,9 @@ CHAR_DATA *get_char_room_mp( CHAR_DATA *ch, const std::string& argument )
     std::string arg;
     CHAR_DATA *rch;
     int number, count, vnum;
+
+    if ( !ch || !ch->in_room )
+        return NULL;
 
     number = number_argument( argument, arg );
     if ( !str_cmp( arg, "self" ) )
@@ -1912,8 +2036,8 @@ CHAR_DATA *get_char_room_mp( CHAR_DATA *ch, const std::string& argument )
     count  = 0;
 
     for ( rch = ch->in_room->first_person; rch; rch = rch->next_in_room )
-	if ( (nifty_is_name( arg, rch->name )
-	||  (IS_NPC(rch) && vnum == rch->pIndexData->vnum)) )
+	if ( (nifty_is_name( arg, rch->name ? rch->name : "" )
+	||  (IS_NPC(rch) && rch->pIndexData && vnum == rch->pIndexData->vnum)) )
 	{
 	    if ( number == 0 && !IS_NPC(rch) )
 		return rch;
@@ -1927,7 +2051,7 @@ CHAR_DATA *get_char_room_mp( CHAR_DATA *ch, const std::string& argument )
     count  = 0;
     for ( rch = ch->in_room->first_person; rch; rch = rch->next_in_room )
     {
-	if ( !nifty_is_name_prefix( arg, rch->name ) )
+	if ( !nifty_is_name_prefix( arg, rch->name ? rch->name : "" ) )
 	    continue;
 	if ( number == 0 && !IS_NPC(rch) )
 	    return rch;

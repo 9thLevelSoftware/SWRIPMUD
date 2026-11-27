@@ -38,7 +38,7 @@ mppurge mobslave
 ~
 > speech_prog water canteen~
 mpmload 329
-mpforce mobslave mpoload 31506
+mpforce mobslave mpoload 10314
 mpforce mobslave drop canteen
 mppurge mobslave
 ~
@@ -162,7 +162,7 @@ D1
 D3
 ~
 ~
-8388647 777 5109
+8388647 -1 5109
 S
 #5109
 The Garden Foyer~
@@ -180,7 +180,7 @@ D0
 D1
 ~
 ~
-7 777 5108
+7 -1 5108
 D2
 ~
 ~

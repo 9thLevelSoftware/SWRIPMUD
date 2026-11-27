@@ -37,43 +37,70 @@
 #include <arpa/telnet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <unistd.h>
 #include "mud.h"
 
 extern int   maxdesc;
-extern int   write   args( ( int fd, char *buf, int nbyte ) );
-extern int   read    args( ( int fd, char *buf, int nbyte ) );
-extern int   close   args( ( int fd ) );
-void  nonblock     args( ( int s ) );
+static bool  nonblock     args( ( int s ) );
 void  start_auth   args( ( struct descriptor_data *d ) );
 void  read_auth    args( ( struct descriptor_data *d ) );
 void  send_auth    args( ( struct descriptor_data *d ) );
-bool flush_buffer( DESCRIPTOR_DATA *d, bool fPrompt );
-void write_to_buffer( DESCRIPTOR_DATA *d, const char *txt, int length );;
 /*
- * Initiate an IDENT commention
+ * Initiate an IDENT connection
  */
 void  start_auth( struct descriptor_data *d )
 {
    struct  sockaddr_in	 sock;
    struct  servent	*serv;
-   int     err, tlen;
-   
+   int     err;
+   socklen_t tlen;
+
+   if ( !d || d->descriptor < 0 )
+     return;
+
    d->auth_fd = socket( AF_INET, SOCK_STREAM, 0 );
    err = errno;
-   
-   if ( d->auth_fd < 0 && err == EAGAIN )
-     bug( "Can't allocate fd for authorization check", 0 );
-   nonblock( d->auth_fd );
-   
+
+   if ( d->auth_fd < 0 )
+   {
+     if ( err == EAGAIN || err == EMFILE || err == ENFILE )
+       bug( "Can't allocate fd for authorization check (%s)", strerror( err ) );
+     d->auth_fd = -1;
+     d->auth_state = 0;
+     if ( d->atimes < 20 )
+       d->atimes++;
+     return;
+   }
+
+   if ( !nonblock( d->auth_fd ) )
+   {
+     closed( d->auth_fd );
+     d->auth_fd = -1;
+     d->auth_state = 0;
+     if ( d->atimes < 20 )
+       d->atimes++;
+     return;
+   }
+
+   memset( &sock, 0, sizeof( sock ) );
    tlen = sizeof( sock );
-   getpeername( d->descriptor, ( struct sockaddr * )&sock, (socklen_t *) &tlen );
+   if ( getpeername( d->descriptor, ( struct sockaddr * )&sock, &tlen ) == -1 )
+   {
+     closed( d->auth_fd );
+     d->auth_fd = -1;
+     d->auth_state = 0;
+     if ( d->atimes < 20 )
+       d->atimes++;
+     return;
+   }
+
    serv = getservbyname( "ident", "tcp" );
    if ( !serv )
      sock.sin_port = htons( 113 );
    else
      sock.sin_port = serv->s_port;
    sock.sin_family = AF_INET;
-     
+
    if ( connect( d->auth_fd, ( struct sockaddr *)&sock, sizeof(sock)) == -1
        && errno != EINPROGRESS )
    {
@@ -82,12 +109,16 @@ void  start_auth( struct descriptor_data *d )
      closed( d->auth_fd );
      d->auth_fd = -1;
      d->auth_state = 0;
+     if ( d->atimes < 20 )
+       d->atimes++;
      return;
    }
-   
+
+   d->auth_inc = 0;
+   d->abuf[0] = '\0';
    d->auth_state |= ( FLAG_WRAUTH|FLAG_AUTH ); /* Successful, but not sent */
-   if ( d->auth_fd > maxdesc ) maxdesc = d->auth_fd; 
-     return;
+   if ( d->auth_fd > maxdesc ) maxdesc = d->auth_fd;
+   return;
 }
 
 /* send_auth */
@@ -96,42 +127,61 @@ void  send_auth( struct descriptor_data *d )
 {
     struct  sockaddr_in  us, them;
     char    authbuf[32];
-    int     ulen, tlen;
-    bool    z = FALSE;
-    
+    socklen_t ulen, tlen;
+    size_t  len, sent = 0;
+    ssize_t n;
+
+    if ( !d || d->auth_fd < 0 || d->descriptor < 0 )
+      return;
+
+    memset( &us, 0, sizeof( us ) );
+    memset( &them, 0, sizeof( them ) );
     tlen = ulen = sizeof( us );
-  
-    if ( getsockname( d->descriptor, ( struct sockaddr *)&us, (socklen_t *) &ulen )
-    ||   getpeername( d->descriptor, ( struct sockaddr *)&them, (socklen_t *) &tlen ) )
+
+    if ( getsockname( d->descriptor, ( struct sockaddr *)&us, &ulen ) != 0
+    ||   getpeername( d->descriptor, ( struct sockaddr *)&them, &tlen ) != 0 )
     {
-	bug( "auth getsockname error", 0 );
+	bug( "auth getsockname error" );
 	goto authsenderr;
     }
-  
+
     /* compose request */
-    SPRINTF( authbuf, "%u , %u\n", 
+    SPRINTF( authbuf, "%u , %u\r\n",
 	(unsigned int)ntohs(them.sin_port),
 	(unsigned int)ntohs(us.sin_port));
 
-	write_to_buffer( d, authbuf, strlen(authbuf) );
-  flush_buffer(d,FALSE);
-  
-//    z = write( d->auth_fd, authbuf, strlen( authbuf ) ); - Removed for C++.
-  
-    if ( !z )
+    len = strlen( authbuf );
+    while ( sent < len )
     {
-	if (d->atimes >= 19)
+	n = write( d->auth_fd, authbuf + sent, len - sent );
+	if ( n < 0 )
 	{
-//	  log_printf( "auth request, broken pipe [%d/%d]", z, errno );
-	  perror("send_auth");
+	    if ( errno == EINTR )
+		continue;
+	    if ( ( errno == EWOULDBLOCK || errno == EAGAIN ) && sent == 0 )
+		return;
+	    break;
 	}
+	if ( n == 0 )
+	    break;
+	sent += static_cast<size_t>( n );
+    }
+
+    if ( sent < len )
+    {
+	if ( d->atimes >= 19 )
+	  perror( "send_auth" );
 	authsenderr:
-	closed( d->auth_fd );
-	if ( d->auth_fd == maxdesc ) maxdesc--; 
-	d->auth_fd = -1;
-	d->auth_state &= ~FLAG_AUTH;    /* Failure/Continue */
+	if ( d->auth_fd >= 0 )
+	{
+	    closed( d->auth_fd );
+	    if ( d->auth_fd == maxdesc ) maxdesc--;
+	    d->auth_fd = -1;
+	}
+	d->auth_state &= ~( FLAG_AUTH | FLAG_WRAUTH ); /* Failure/Continue */
 	d->auth_inc = 0;
 	if ( d->atimes < 20 ) d->atimes++;
+	return;
     }
     d->auth_state &= ~FLAG_WRAUTH;  /* Successfully sent request */
     return;
@@ -144,70 +194,110 @@ void  read_auth( struct descriptor_data *d )
     int      len;                    /* length read */
     char     ruser[20], system[8];   /* remote userid */
     u_short  remp = 0, locp = 0;     /* remote port, local port */
+    int      avail;
+
+    if ( !d || d->auth_fd < 0 )
+      return;
+
    *system = *ruser = '\0';
-  
+
    /*
     * Can't allow any other reads from client fd while waiting on the
     * authfd to return a full valid string.  Use the client's input buffer
     * to buffer the authd reply.  May take more than one read.
     */
-   
-    if ( ( len = readd( d->auth_fd, d->abuf + d->auth_inc,
-     			sizeof( d->abuf ) - 1 - d->auth_inc ) ) >= 0 )
+
+    avail = static_cast<int>( sizeof( d->abuf ) ) - 1 - d->auth_inc;
+    len = ( avail > 0 ) ? readd( d->auth_fd, d->abuf + d->auth_inc, avail ) : 0;
+
+    if ( len > 0 )
     {
 	d->auth_inc += len;
 	d->abuf[d->auth_inc] = '\0';
     }
-    
-    if ( ( len > 0 ) && ( d->auth_inc != ( sizeof( d->abuf ) - 1 ) )
-    &&   (sscanf( d->abuf, "%hd , %hd : USERID : %*[^:]: %10s",
+    else if ( len < 0 )
+    {
+	if ( errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR )
+	    return;
+    }
+
+    if ( ( len > 0 ) && ( d->auth_inc < static_cast<int>( sizeof( d->abuf ) ) - 1 )
+    &&   ( sscanf( d->abuf, "%hu , %hu : USERID : %*[^:]: %19s",
           &remp, &locp, ruser ) == 3 ) )
     {
-	s = rindex( d->abuf, ':');
-	*s++ = '\0';
-	for ( t = ( rindex( d->abuf, ':' ) + 1 ); *t; t++ )
-	  if ( !isspace(*t) )
-	    break;
-	strncpy( system, t, sizeof( system ) );
-      
-	for ( t = ruser; *s && ( t < ruser + sizeof( ruser ) ); s++ )
-	  if ( !isspace( *s ) && *s != ':' )
-	    *t++ = *s;
-	*t = '\0';
- 
-	log_printf_plus( LOG_COMM, LEVEL_GOD, "auth reply ok, incoming user: [%s]", ruser );
-/*      STRFREE(d->user);
-      d->user = STRALLOC(ruser);*/
+	s = strrchr( d->abuf, ':' );
+	if ( s )
+	{
+	    *s++ = '\0';
+	    char *colon2 = strrchr( d->abuf, ':' );
+	    if ( colon2 )
+	    {
+		for ( t = colon2 + 1; *t; t++ )
+		  if ( !isspace( static_cast<unsigned char>( *t ) ) )
+		    break;
+		snprintf( system, sizeof( system ), "%s", t );
+		(void)system;
+	    }
+
+	    for ( t = ruser; *s && ( t < ruser + sizeof( ruser ) - 1 ); s++ )
+	      if ( !isspace( static_cast<unsigned char>( *s ) ) && *s != ':' )
+		*t++ = *s;
+	    *t = '\0';
+	    smash_tilde( ruser );
+
+	    log_printf_plus( LOG_COMM, LEVEL_GOD, "auth reply ok, incoming user: [%s]", ruser );
+	}
+	else
+	{
+	    ruser[0] = '\0';
+	}
     }
-    else if ( len != 0 )
+    else if ( len > 0 )
     {
-	if (!index( d->abuf, '\n' ) && !index( d->abuf, '\r' ) ) return;
+	if ( !strchr( d->abuf, '\n' ) && !strchr( d->abuf, '\r' )
+	&&   d->auth_inc < static_cast<int>( sizeof( d->abuf ) ) - 1 )
+	    return;
 	log_printf_plus( LOG_COMM, LEVEL_GOD, "bad auth reply: %s", d->abuf );
 	ruser[0] = '\0';
     }
     closed( d->auth_fd );
     if ( d->auth_fd == maxdesc )
-      --maxdesc; 
+      --maxdesc;
     d->auth_inc = 0;
     *d->abuf = '\0';
     d->auth_fd = -1;
     d->auth_state = 0;
 
-    if (ruser[0] == '\0' ) 
-      SPRINTF(ruser, "(no auth)" );
+    if ( ruser[0] == '\0' )
+      SPRINTF( ruser, "(no auth)" );
 
-    STRFREE(d->user);
-    d->user = STRALLOC(ruser);
+    if ( d->user )
+        STRFREE( d->user );
+    d->user = STRALLOC( ruser );
     return;
 }
 
-void nonblock( int s )
+static bool nonblock( int s )
 {
-  if ( fcntl( s, F_SETFL, FNDELAY ) == -1 )
+  int flags;
+
+  if ( s < 0 )
+    return false;
+
+  flags = fcntl( s, F_GETFL, 0 );
+  if ( flags == -1 )
   {
-    perror( "Noblock" );
-    exit(2);
+    perror( "Noblock: F_GETFL" );
+    return false;
   }
+
+  if ( fcntl( s, F_SETFL, flags | O_NONBLOCK ) == -1 )
+  {
+    perror( "Noblock: F_SETFL" );
+    return false;
+  }
+
+  return true;
 }
 
 /*

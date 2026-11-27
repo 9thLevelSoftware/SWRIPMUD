@@ -113,7 +113,7 @@ mpat 10299 mppurge
 say There. I must go call off the bounty I set on him. 
 mpecho Koh'shak walks a little ways off and gets out his comlink. 
 endif 
-if ovnuminv(24611) == 1
+if rand(0)
 smile $n
 say My customer was wondering if you would get
 these.
@@ -416,7 +416,7 @@ say Hello there, $n.  Can I get you something?  Some alcohol perhaps?
 mpechoat $n Is that Ryll in her cloak pocket?
 ~
 > act_prog gives~
-if ovnuminv(2100) >= 1
+if rand(0)
 'Ah, my special Ry...um, Ale.
 giggle
 mpwithdraw 5000
@@ -629,7 +629,7 @@ D0
 ~
 ~
 0 -1 808
-> all_greet_prog ~
+> all_greet_prog 0~
 ~
 > all_greet_prog 100~
 mpechoat $n The Fat Banker snickers under his breath.

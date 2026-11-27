@@ -285,7 +285,7 @@ say The Queen Mother of Hapes! Ha!
 say I'd pay anyone who got them enormously though.
 ~
 > act_prog royal~
-if ovnuminv(24611) == 1
+if rand(0)
 smile $n
 say My customer was wondering if you would get
 these.
@@ -2412,7 +2412,7 @@ open hallway. &R&W
 D0
 ~
 ~
-7 225 23071
+7 -1 23071
 D1
 ~
 ~
@@ -2435,7 +2435,7 @@ open hallway. &R&W
 D0
 ~
 ~
-7 225 23072
+7 -1 23072
 D1
 ~
 ~
@@ -2522,7 +2522,7 @@ base of KDY. &R&W
 D2
 ~
 ~
-7 225 23065
+7 -1 23065
 S
 #23072
 A Small Apartment~
@@ -2536,7 +2536,7 @@ as the KDY ground terminal. &R&W
 D2
 ~
 ~
-7 225 23066
+7 -1 23066
 S
 #23073
 A Narrow Hallway~
@@ -2706,7 +2706,7 @@ hundreds of people disembarking.  This seems to be a large popular place.
 Examining the Serin schedule will give you an idea on when the next 
 transport will arrive.&R&W
 ~
-0 4 1
+0 20 1
 D1
 ~
 ~
@@ -3228,15 +3228,15 @@ durasteel is the only decoration in the hallways.&R&W
 D0
 ~
 ~
-1 23113 23113
+1 -1 23113
 D1
 ~
 ~
-7 23115 23115
+7 -1 23115
 D2
 ~
 ~
-7 23114 23114
+7 -1 23114
 D3
 ~
 ~

@@ -24,6 +24,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <cstdint>
+#include <filesystem>
+#include <unordered_map>
 #include "mud.h"
 
 
@@ -32,6 +36,17 @@ extern int	top_reset;
 extern int	top_ed;
 extern bool	fBootDb;
 #define BIT_NOTFOUND ((size_t)-1)
+
+static uint64_t s_editor_seq = 0;
+static std::unordered_map<const EDITOR_DATA *, uint64_t> s_editor_ids;
+
+static uint64_t get_editor_id( const EDITOR_DATA *edit )
+{
+    if ( !edit )
+        return 0;
+    auto it = s_editor_ids.find( edit );
+    return ( it != s_editor_ids.end() ) ? it->second : 0;
+}
 
 extern bool olc_set_dirty(CHAR_DATA *ch);
 extern void fwrite_bitset_noCR(FILE *fp, const char *name, const FLAG_SET &bv);
@@ -98,7 +113,7 @@ const char *  const   ex_flags [] =
 "isdoor", "closed", "locked", "secret", "swim", "pickproof", "fly", "climb",
 "dig", "r1", "nopassdoor", "hidden", "passage", "portal", "r2", "r3",
 "can_climb", "can_enter", "can_leave", "auto", "r4", "searchable", 
-"bashed", "bashproof", "nomob", "window", "can_look", nullptr };
+"bashed", "bashproof", "nomob", "window", "can_look", "wilderness", nullptr };
 
 const flag_name r_flags[] =
 {
@@ -313,7 +328,12 @@ const flag_name o_types[] =
     { ITEM_STUNGRENADE,      "stun_grenade" },
     { ITEM_CARGO,            "cargo" },
     { ITEM_TRACKINGDEVICE,   "_tracking device_" },
-	{ ITEM_MAX,				 "_item max_"},
+    { ITEM_RESOURCE,         "resource" },
+    { ITEM_MATERIAL,         "material" },
+    { ITEM_COMPOUND,         "compound" },
+    { ITEM_SPECIMEN,         "specimen" },
+    { ITEM_SALVAGE,          "salvage" },
+    { ITEMTYPE_MAX,          "_item max_" },
 
     { (size_t)-1, nullptr } // terminator	
 };
@@ -378,8 +398,8 @@ const flag_name a_types[] =
     { APPLY_BREW,            "brew" },
     { APPLY_WEARSPELL,       "wearspell" },
     { APPLY_REMOVESPELL,     "removespell" },
-    { APPLY_MENTALSTATE,     "mentalstate" }, 
     { APPLY_EMOTION,         "emotion" },
+    { APPLY_MENTALSTATE,     "mentalstate" },
     { APPLY_STRIPSN,         "stripsn" },
     { APPLY_REMOVE,          "remove" },
     { APPLY_DIG,             "dig" },
@@ -521,9 +541,8 @@ const flag_name wear_locs[] =
     { WEAR_MISSILE_WIELD,  "missile_wield" },
     { WEAR_FLOATING,       "floating" },
     { WEAR_OVER,           "over" },
-	{ MAX_WEAR,				"_max_wear_"},
-	{ WEAR_DISGUISE,        "disguise"},
-    { WEAR_MAX,          "_wear_max_"},	
+    { WEAR_RESERVED,       "_reserved_" },
+    { WEAR_DISGUISE,       "disguise" },
 
     { (size_t)-1, nullptr } // terminator
 };
@@ -608,7 +627,7 @@ char *	const	part_flags [] =
 char *	const	attack_flags [] =
 {
 "bite", "claws", "tail", "sting", "punch", "kick", 
-"trip", "r7", "stun", "r9", "backstab", "r11", "r12", "r13", "r14", "r15", "r16", "r17", 
+"trip", "bash", "stun", "gouge", "backstab", "r11", "r12", "r13", "r14", "r15", "r16", "r17", 
 "r18", "r19", "r20", "r21", "r22", "r23", "r24", "r25", "r26", "r27", "r28", "r29",
 "r30", "r31", nullptr
 };
@@ -643,17 +662,18 @@ char *	const	mprog_flags [] =
 };
 
 
-char *flag_string( int bitvector, char * const flagarray[] )
+char *flag_string( int bitvector, const char * const flagarray[] )
 {
     static char buf[MAX_STRING_LENGTH];
+    uint32_t uvec = static_cast<uint32_t>(bitvector);
     int x;
 
-	if (bitvector < 0 )
-	  return "";
-
     buf[0] = '\0';
-    for ( x = 0; x < 32 ; x++ )
-      if ( IS_SET( bitvector, 1 << x ) )
+    if ( !flagarray )
+      return buf;
+
+    for ( x = 0; x < 32 && flagarray[x] != nullptr; x++ )
+      if ( IS_SET( uvec, 1U << x ) && flagarray[x][0] != '\0' )
       {
 			STRAPP( buf, "%s", flagarray[x] );
 			STRAPP( buf, " " );
@@ -664,16 +684,19 @@ char *flag_string( int bitvector, char * const flagarray[] )
     return buf;
 }
 
-char *flag_string(const FLAG_SET &bv, char * const flagarray[], size_t max_flags)
+char *flag_string(const FLAG_SET &bv, const char * const flagarray[], size_t max_flags)
 {
     static char buf[MAX_STRING_LENGTH];
     buf[0] = '\0';
 
-    for (size_t x = 0; x < max_flags; x++)
+    if (!flagarray)
+        return buf;
+
+    for (size_t x = 0; x < max_flags && flagarray[x] != nullptr; x++)
     {
         if (bv.test(x))
         {
-            if (!flagarray[x] || flagarray[x][0] == '\0')
+            if (flagarray[x][0] == '\0')
                 continue;
 
             STRAPP(buf, "%s", flagarray[x]);
@@ -693,6 +716,9 @@ std::string bitset_to_string(const FLAG_SET &bv, const flag_name *table,
                              size_t max_bit)
 {
     std::string result;
+
+    if (!table)
+        return result;
 
     for (size_t i = 0; table[i].name != nullptr; ++i)
     {
@@ -715,7 +741,7 @@ std::string bitset_to_string(const FLAG_SET &bv, const flag_name *table,
 
 bool string_to_bitset(const std::string& str, FLAG_SET &bv, const flag_name *table, bool clear_first)
 {
-    if (str.empty())
+    if (str.empty() || !table)
         return false;
 
     if (clear_first)
@@ -743,6 +769,9 @@ bool string_to_bitset(const std::string& str, FLAG_SET &bv, const flag_name *tab
 
 const char *flag_bit_name(size_t bit, const flag_name *table)
 {
+    if (!table)
+        return nullptr;
+
     for (size_t i = 0; table[i].name != nullptr; ++i)
     {
         if (table[i].bit == bit)
@@ -817,7 +846,7 @@ void set_weapon_flag(FLAG_SET &bv, size_t new_flag)
 
 bool can_rmodify( CHAR_DATA *ch, ROOM_INDEX_DATA *room )
 {
-	sh_int vnum = room->vnum;
+	int vnum = room->vnum;
 	AREA_DATA *pArea;
 
 	if ( IS_NPC( ch ) )
@@ -839,7 +868,7 @@ bool can_rmodify( CHAR_DATA *ch, ROOM_INDEX_DATA *room )
 
 bool can_omodify( CHAR_DATA *ch, OBJ_DATA *obj )
 {
-	sh_int vnum = obj->pIndexData->vnum;
+	int vnum = obj->pIndexData->vnum;
 	AREA_DATA *pArea;
 	
 	if ( IS_NPC( ch ) )
@@ -861,7 +890,7 @@ bool can_omodify( CHAR_DATA *ch, OBJ_DATA *obj )
 
 bool can_oedit( CHAR_DATA *ch, OBJ_INDEX_DATA *obj )
 {
-	sh_int vnum = obj->vnum;
+	int vnum = obj->vnum;
 	AREA_DATA *pArea;
 
 	if ( IS_NPC( ch ) )
@@ -884,7 +913,7 @@ bool can_oedit( CHAR_DATA *ch, OBJ_INDEX_DATA *obj )
 
 bool can_mmodify( CHAR_DATA *ch, CHAR_DATA *mob )
 {
-	sh_int vnum;
+	int vnum;
 	AREA_DATA *pArea;
 	
 	if ( mob == ch )
@@ -921,7 +950,7 @@ bool can_mmodify( CHAR_DATA *ch, CHAR_DATA *mob )
 
 bool can_medit( CHAR_DATA *ch, MOB_INDEX_DATA *mob )
 {
-	sh_int vnum = mob->vnum;
+	int vnum = mob->vnum;
 	AREA_DATA *pArea;
 
 	if ( IS_NPC( ch ) )
@@ -971,7 +1000,7 @@ int get_trapflag( const std::string& flag )
 {
     int x;
 
-    for ( x = 0; x < 32; x++ )
+    for ( x = 0; x < 32 && trap_flags[x] != nullptr; x++ )
       if ( !str_cmp( flag, trap_flags[x] ) )
         return x;
     return -1;
@@ -997,19 +1026,17 @@ int get_npc_race( const std::string& type )
 
 int get_wearloc( const std::string& type )
 {
-    int x;
-    
-    for ( x = 0; x < MAX_WEAR; x++ )
-      if ( !str_cmp( type, wear_locs[x].name ) )
-        return x;
-    return -1;
+    const flag_name *wear = find_flag( wear_locs, type );
+    if ( !wear || !is_valid_wear_location( wear->bit ) )
+        return WEAR_NONE;
+    return wear->bit;
 }
 
 int get_exflag( const std::string& flag )
 {
     int x;
     
-    for ( x = 0; x <= MAX_EXFLAG; x++ )
+    for ( x = 0; x <= MAX_EXFLAG && ex_flags[x] != nullptr; x++ )
       if ( !str_cmp( flag, ex_flags[x] ) )
         return x;
     return -1;
@@ -1028,7 +1055,7 @@ int get_mpflag( const std::string& flag )
 {
     int x;
     
-    for ( x = 0; x < 32; x++ )
+    for ( x = 0; x < 32 && mprog_flags[x] != nullptr; x++ )
       if ( !str_cmp( flag, mprog_flags[x] ) )
         return x;
     return -1;
@@ -1063,7 +1090,7 @@ int get_areaflag( const std::string& flag )
 {
     int x;
 
-    for ( x = 0; x < 32; x++ )
+    for ( x = 0; x < 32 && area_flags[x] != nullptr; x++ )
       if ( !str_cmp( flag, area_flags[x] ) )
         return x;
     return -1;
@@ -1148,7 +1175,7 @@ int get_partflag( const std::string& flag )
 {
     int x;
 
-    for ( x = 0; x < 32; x++ )
+    for ( x = 0; x < 32 && part_flags[x] != nullptr; x++ )
       if ( !str_cmp( flag, part_flags[x] ) )
         return x;
     return -1;
@@ -1156,14 +1183,21 @@ int get_partflag( const std::string& flag )
 
 size_t get_attackflag( const std::string& flag )
 {
-	return get_flag(flag, obj_attack_table);
+    for ( size_t x = 0; x < 32 && attack_flags[x] != nullptr; ++x )
+      if ( !str_cmp( flag, attack_flags[x] ) )
+        return x;
+    if ( !str_cmp( flag, "r7" ) )
+      return 7;
+    if ( !str_cmp( flag, "r9" ) )
+      return 9;
+    return BIT_NOTFOUND;
 }
 
 int get_defenseflag( const std::string& flag )
 {
     int x;
 
-    for ( x = 0; x < 32; x++ )
+    for ( x = 0; x < 32 && defense_flags[x] != nullptr; x++ )
       if ( !str_cmp( flag, defense_flags[x] ) )
         return x;
     return -1;
@@ -1266,21 +1300,37 @@ void start_editing( CHAR_DATA *ch, const std::string &data )
     sh_int lines, size, lpos;
     char c;
 
-    if ( !ch->desc )
+    if ( !ch )
+        return;
+
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
-        bug( "Fatal: start_editing: no desc", 0 );
+        bug( "Fatal: start_editing: no desc" );
+        stop_editing( ch );
+        ch->last_cmd = NULL;
         return;
     }
 
     if ( ch->substate == SUB_RESTRICTED )
-        bug( "NOT GOOD: start_editing: ch->substate == SUB_RESTRICTED", 0 );
+        bug( "NOT GOOD: start_editing: ch->substate == SUB_RESTRICTED" );
 
     set_char_color( AT_GREEN, ch );
     send_to_char( "Begin entering your text (/? =help /s =save /c =clear /l =list /f =format)\n", ch );
     send_to_char( "--------------------------------------------------------------------------\n> ", ch );
 
-    if ( ch->editor )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
+    {
         stop_editing( ch );
+        ch->last_cmd = NULL;
+        return;
+    }
+
+    if ( ch->editor )
+    {
+        s_editor_ids.erase( ch->editor );
+        DISPOSE( ch->editor );
+        ch->editor = NULL;
+    }
 
     CREATE( edit, EDITOR_DATA, 1 );
     edit->numlines = 0;
@@ -1302,11 +1352,12 @@ void start_editing( CHAR_DATA *ch, const std::string &data )
         }
         else if ( c == '\n' || lpos > 78 )
         {
-            edit->line[lines][lpos] = '\0';
+            if ( lines < MAX_EDITOR_LINES - 1 )
+                edit->line[lines][lpos] = '\0';
             lines++;
             lpos = 0;
 
-            if ( lines >= 49 )
+            if ( lines >= MAX_EDITOR_LINES - 1 )
                 break;
 
             /* If wrapping because of width, keep current char when not newline */
@@ -1318,57 +1369,56 @@ void start_editing( CHAR_DATA *ch, const std::string &data )
             edit->line[lines][lpos++] = c;
         }
 
-        if ( lines >= 49 || size > 4096 )
+        if ( lines >= MAX_EDITOR_LINES - 1 || size > 4096 )
         {
-            edit->line[lines][lpos] = '\0';
-
-            if ( lpos > 0 && lines < 50 )
+            if ( lpos > 0 && lines < MAX_EDITOR_LINES - 1 )
+            {
+                edit->line[lines][lpos] = '\0';
                 lines++;
-
+                lpos = 0;
+            }
             break;
         }
     }
 
-    if ( lpos > 0 || lines == 0 )
+    if ( (lpos > 0 || lines == 0) && lines < MAX_EDITOR_LINES - 1 )
     {
         edit->line[lines][lpos] = '\0';
-        if ( lines < 50 )
-            lines++;
+        lines++;
     }
 
     edit->numlines = lines;
     edit->size = size;
     edit->on_line = lines;
     ch->editor = edit;
+    s_editor_ids[edit] = ++s_editor_seq;
     ch->desc->connected = CON_EDITING;
 }
 
 char *copy_buffer( CHAR_DATA *ch )
 {
    std::string buf, tmp;
-   sh_int x, len;
+   sh_int x;
 
    if ( !ch )
    {
-	bug( "copy_buffer: null ch", 0 );
+	bug( "copy_buffer: null ch" );
 	return STRALLOC( "" );
    } 
 
    if ( !ch->editor )
    {
-	bug( "copy_buffer: null editor", 0 );
+	bug( "copy_buffer: null editor" );
 	return STRALLOC( "" );
    }
 
    buf.clear();
    for ( x = 0; x < ch->editor->numlines; x++ )
    {
-	  tmp.clear();
-      tmp = str_printf("%s", ch->editor->line[x]);
+      tmp = ch->editor->line[x];
       smush_tilde( tmp );
-      len = tmp.length();
-      if ( len > 0 && !tmp.empty() && tmp[len-1] == '~' )
-        tmp[len-1] = '\0';
+      if ( !tmp.empty() && tmp.back() == '~' )
+        tmp.pop_back();
       else
         tmp += "\n";
       buf +=  tmp;
@@ -1378,19 +1428,53 @@ char *copy_buffer( CHAR_DATA *ch )
 
 void stop_editing( CHAR_DATA *ch )
 {
-    set_char_color( AT_PLAIN, ch );
-    DISPOSE( ch->editor );
-    ch->editor = NULL;
-    send_to_char( "Done.\n", ch );
+    if ( !ch )
+        return;
+    if ( ch->editor )
+    {
+        s_editor_ids.erase( ch->editor );
+        DISPOSE( ch->editor );
+        ch->editor = NULL;
+    }
     ch->dest_buf  = NULL;
     ch->spare_ptr = NULL;
     ch->substate  = SUB_NONE;
-    if ( !ch->desc )
+    if ( ch->desc )
     {
-	bug( "Fatal: stop_editing: no desc", 0 );
-	return;
+        if ( !ch->desc->closing && !ch->desc->write_failed && ch->desc->descriptor >= 0 )
+        {
+            set_char_color( AT_PLAIN, ch );
+            send_to_char( "Done.\n", ch );
+        }
+        if ( ch->desc->connected == CON_EDITING )
+            ch->desc->connected = CON_PLAYING;
     }
-    ch->desc->connected = CON_PLAYING;
+}
+
+void invalidate_mprog_editors( MPROG_DATA *mprg )
+{
+    if ( !mprg )
+        return;
+
+    olc_invalidate_target( mprg, "The program you were editing was deleted; editing aborted.\n" );
+
+    for ( CHAR_DATA *ech = first_char; ech; ech = ech->next )
+    {
+        if ( ech->dest_buf == mprg &&
+             ( ech->substate == SUB_MPROG_EDIT ||
+               ( ech->substate == SUB_RESTRICTED && ech->desc && ech->desc->connected == CON_EDITING ) ) )
+        {
+            stop_editing( ech );
+            ech->substate = SUB_NONE;
+            ech->dest_buf = NULL;
+            ech->spare_ptr = NULL;
+            ech->last_cmd = NULL;
+            if ( ech->desc && ech->desc->connected == CON_EDITING )
+                ech->desc->connected = CON_PLAYING;
+            if ( ech->desc && !ech->desc->closing && !ech->desc->write_failed && ech->desc->descriptor >= 0 )
+                send_to_char( "The program you were editing was deleted; editing aborted.\n", ech );
+        }
+    }
 }
 
 void do_goto( CHAR_DATA *ch, char *argument )
@@ -1401,7 +1485,7 @@ void do_goto( CHAR_DATA *ch, char *argument )
     CHAR_DATA *fch_next;
     ROOM_INDEX_DATA *in_room;
     AREA_DATA *pArea;
-    sh_int vnum;
+    int vnum;
 
     one_argument( argument, arg );
     if ( arg.empty() )
@@ -1450,7 +1534,7 @@ void do_goto( CHAR_DATA *ch, char *argument )
 	location = make_room( ch->game, vnum );
 	if ( !location )
 	{
-	  bug( "Goto: make_room failed", 0 );
+	  bug( "Goto: make_room failed" );
 	  return;
 	}
 	location->area = ch->pcdata->area;
@@ -1566,7 +1650,7 @@ void do_mset( CHAR_DATA *ch, char *argument )
 	return;    
     }
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
 	send_to_char( "You have no descriptor\n", ch );
 	return;
@@ -1580,7 +1664,7 @@ void do_mset( CHAR_DATA *ch, char *argument )
 	  if ( !ch->dest_buf )
 	  {
 		send_to_char( "Fatal error: report to Darrik.\n", ch );
-		bug( "do_mset: sub_mob_desc: NULL ch->dest_buf", 0 );
+		bug( "do_mset: sub_mob_desc: NULL ch->dest_buf" );
 		ch->substate = SUB_NONE;
 		return;
 	  }
@@ -1610,7 +1694,7 @@ void do_mset( CHAR_DATA *ch, char *argument )
     if ( ch->substate == SUB_REPEATCMD )
     {
 	victim = (CHAR_DATA *)ch->dest_buf;
-	if ( char_died(victim) )
+	if ( !victim || char_died(victim) )
 	{
 	    send_to_char( "Your victim died!\n", ch );
 	    victim = NULL;
@@ -1620,7 +1704,7 @@ void do_mset( CHAR_DATA *ch, char *argument )
 	||   !str_cmp( argstr, "stat" ) )
 	{
 	    if ( victim )
-		do_mstat( ch, victim->name );
+		do_mstat( ch, victim->name ? victim->name : (char*)"" );
 	    else
 	        send_to_char( "No victim selected.  Type '?' for help.\n", ch );
 	    return;
@@ -1629,7 +1713,7 @@ void do_mset( CHAR_DATA *ch, char *argument )
 	{
 	    send_to_char( "Mset mode off.\n", ch );
 	    ch->substate = SUB_NONE;
-	    STR_DISPOSE(ch->dest_buf);
+	    ch->dest_buf = NULL;
 	    if ( ch->pcdata && ch->pcdata->subprompt )
 		STRFREE( ch->pcdata->subprompt );
 	    return;
@@ -1638,7 +1722,7 @@ void do_mset( CHAR_DATA *ch, char *argument )
     if ( victim )
     {
 	lockvictim = TRUE;
-	arg1 = victim->name;
+	arg1 = (victim->name && victim->name[0] != '\0') ? victim->name : "(unnamed)";
 	argstr = one_argument( argstr, arg2 );
 	arg3 = argstr;
     }
@@ -1675,7 +1759,7 @@ void do_mset( CHAR_DATA *ch, char *argument )
 	send_to_char( "  hitroll damroll armor affected level\n",	ch );
 	send_to_char( "  thirst drunk full blood flags\n",		ch );
 	send_to_char( "  pos defpos part (see BODYPARTS)\n",		ch );
-	send_to_char( "  sav1 sav2 sav4 sav4 sav5 (see SAVINGTHROWS)\n", ch );
+	send_to_char( "  sav1 sav2 sav3 sav4 sav5 (see SAVINGTHROWS)\n", ch );
 	send_to_char( "  resistant immune susceptible (see RIS)\n",	ch );
 	send_to_char( "  attack defense numattacks\n",		ch );
 	send_to_char( "  speaking speaks (see LANGUAGES)\n",		ch );
@@ -1709,13 +1793,15 @@ void do_mset( CHAR_DATA *ch, char *argument )
     if ( get_trust(ch) < ch->game->get_sysdata()->level_mset_player && (victim != ch) && !IS_NPC( victim ) )
     {
 	send_to_char( "You can't do that!\n", ch );
-	ch->dest_buf = NULL;
+	if ( ch->substate != SUB_RESTRICTED )
+	    ch->dest_buf = NULL;
 	return;
     }
     if ( get_trust( ch ) < get_trust( victim ) && !IS_NPC( victim ) )
     {
 	send_to_char( "You can't do that!\n", ch );
-	ch->dest_buf = NULL;
+	if ( ch->substate != SUB_RESTRICTED )
+	    ch->dest_buf = NULL;
 	return;
     }
     if ( lockvictim )
@@ -2059,7 +2145,7 @@ void do_mset( CHAR_DATA *ch, char *argument )
             send_to_char( "Not on NPC's.\n", ch );
             return;
         }
-        if (value < 0 || value > MAX_COMMAND_GROUP)
+        if (value < 0 || value >= MAX_COMMAND_GROUP)
         {
           send_to_char("Command Groups: \n",ch);
           for (i = 0; i <  MAX_COMMAND_GROUP; i++) {
@@ -2156,7 +2242,6 @@ void do_mset( CHAR_DATA *ch, char *argument )
 	if ( value < 0 || value > 32000 )
 	{
 	    send_to_char( "Let's be responible, hmm?", ch );
-	    victim->nextquest = 0;
 	    return;
 	}
 	victim->carry_weight = value;
@@ -2755,8 +2840,11 @@ void do_mset( CHAR_DATA *ch, char *argument )
         while ( !argstr.empty() )
 	{
 	   argstr = one_argument( argstr, arg3 );
-	   value = get_wanted_flag( (arg3) );
-	     BV_TOGGLE_BIT( victim->pcdata->wanted_flags, value );
+	   const int flag = get_wanted_flag( arg3 );
+	   if ( flag < 0 || flag >= PLANET_MAX )
+	     ch_printf( ch, "Unknown flag: %s\n", arg3.c_str() );
+	   else
+	     BV_TOGGLE_BIT( victim->pcdata->wanted_flags, flag );
         }
         return;
     }
@@ -2781,11 +2869,11 @@ void do_mset( CHAR_DATA *ch, char *argument )
         while ( !argstr.empty() )
 	{
 	   argstr = one_argument( argstr, arg3 );
-	   value = get_vip_flag( (arg3) );
-//           if ( value < 0 || value > 31 )
-//	     ch_printf( ch, "Unknown flag: %s\n", arg3 );
-//	   else
-	     BV_TOGGLE_BIT( victim->vip_flags, value );
+	   const int flag = get_vip_flag( arg3 );
+	   if ( flag < 0 || flag >= PLANET_MAX )
+	     ch_printf( ch, "Unknown flag: %s\n", arg3.c_str() );
+	   else
+	     BV_TOGGLE_BIT( victim->vip_flags, flag );
         }
         if ( IS_NPC(victim) && BV_IS_SET( victim->act, ACT_PROTOTYPE ) )
 	  		victim->pIndexData->vip_flags = victim->vip_flags; 
@@ -3028,7 +3116,7 @@ void do_mset( CHAR_DATA *ch, char *argument )
 	    if ( value < 0 || value > 31 )
 		ch_printf( ch, "Unknown flag: %s\n", arg3.c_str() );
 	    else
-		TOGGLE_BIT( victim->xflags, 1 << value );
+		TOGGLE_BIT( victim->xflags, 1U << value );
 	}
 	if ( IS_NPC( victim ) && BV_IS_SET( victim->act, ACT_PROTOTYPE ) )
 	    victim->pIndexData->xflags = victim->xflags; 
@@ -3054,11 +3142,11 @@ void do_mset( CHAR_DATA *ch, char *argument )
 	while ( !argstr.empty() )
 	{
 	    argstr = one_argument( argstr, arg3 );
-	    value = get_attackflag( (arg3) );
-	    if ( value < 0 || value > 31 )
+	    size_t atk_val = get_attackflag( (arg3) );
+	    if ( atk_val > 31 )
 		ch_printf( ch, "Unknown flag: %s\n", arg3.c_str() );
 	    else
-		TOGGLE_BIT( victim->attacks, 1 << value );
+		TOGGLE_BIT( victim->attacks, 1U << atk_val );
 	}
 	if ( IS_NPC( victim ) && BV_IS_SET( victim->act, ACT_PROTOTYPE ) )
 	    victim->pIndexData->attacks = victim->attacks; 
@@ -3087,7 +3175,7 @@ void do_mset( CHAR_DATA *ch, char *argument )
 	    if ( value < 0 || value > 31 )
 		ch_printf( ch, "Unknown flag: %s\n", arg3.c_str() );
 	    else
-		TOGGLE_BIT( victim->defenses, 1 << value );
+		TOGGLE_BIT( victim->defenses, 1U << value );
 	}
 	if ( IS_NPC( victim ) && BV_IS_SET( victim->act, ACT_PROTOTYPE ) )
 	    victim->pIndexData->defenses = victim->defenses; 
@@ -3310,6 +3398,12 @@ void do_mset( CHAR_DATA *ch, char *argument )
 	if ( !can_mmodify( ch, victim ) )
 	  return;
 
+	if ( !victim->pcdata || !victim->pcdata->area )
+	{
+	    send_to_char( "They have no assigned area.\n", ch );
+	    return;
+	}
+
 	if ( !IS_SET(victim->pcdata->area->status, AREA_LOADED ) )
 	{
 	    SET_BIT( victim->pcdata->area->status, AREA_LOADED );
@@ -3406,10 +3500,20 @@ void do_mset( CHAR_DATA *ch, char *argument )
      */
     if ( ch->substate == SUB_REPEATCMD )
     {
-		ch->substate = SUB_RESTRICTED;
+		void *saved_dest_buf = ch->dest_buf;
+		ch->substate = SUB_NONE;
 		interpret( ch, origarg );
-		ch->substate = SUB_REPEATCMD;
-		ch->last_cmd = do_mset;
+		if ( char_died( ch ) )
+			return;
+		if ( ch->substate == SUB_NONE
+		&&   ch->editor == nullptr
+		&&   get_timerptr( ch, TIMER_DO_FUN ) == nullptr
+		&&   ch->dest_buf == saved_dest_buf
+		&&   ( !ch->desc || ( ch->desc->connected != CON_EDITING && ch->desc->olc == nullptr ) ) )
+		{
+			ch->substate = SUB_REPEATCMD;
+			ch->last_cmd = do_mset;
+		}
     }
     else
 	do_mset( ch, "" );
@@ -3434,7 +3538,7 @@ void do_oset( CHAR_DATA *ch, char *argument )
 	return;    
     }
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
 	send_to_char( "You have no descriptor\n", ch );
 	return;
@@ -3449,7 +3553,7 @@ void do_oset( CHAR_DATA *ch, char *argument )
 	  if ( !ch->dest_buf )
 	  {
 		send_to_char( "Fatal error: report to Thoric.\n", ch );
-		bug( "do_oset: sub_obj_extra: NULL ch->dest_buf", 0 );
+		bug( "do_oset: sub_obj_extra: NULL ch->dest_buf" );
 		ch->substate = SUB_NONE;
 		return;
 	  }
@@ -3472,7 +3576,7 @@ void do_oset( CHAR_DATA *ch, char *argument )
 	  if ( !ch->dest_buf )
 	  {
 		send_to_char( "Fatal error: report to Thoric.\n", ch );
-		bug( "do_oset: sub_obj_long: NULL ch->dest_buf", 0 );
+		bug( "do_oset: sub_obj_long: NULL ch->dest_buf" );
 		ch->substate = SUB_NONE;
 		return;
 	  }
@@ -3513,7 +3617,7 @@ void do_oset( CHAR_DATA *ch, char *argument )
 	||   !str_cmp( argstr, "stat" ) )
 	{
 	    if ( obj )
-		do_ostat( ch, obj->name );
+		do_ostat( ch, obj->name ? obj->name : (char*)"" );
 	    else
 	        send_to_char( "No object selected.  Type '?' for help.\n", ch );
 	    return;
@@ -3522,7 +3626,7 @@ void do_oset( CHAR_DATA *ch, char *argument )
 	{
 	    send_to_char( "Oset mode off.\n", ch );
 	    ch->substate = SUB_NONE;
-	    STR_DISPOSE(ch->dest_buf);
+	    ch->dest_buf = NULL;
 	    if ( ch->pcdata && ch->pcdata->subprompt )
 		STRFREE( ch->pcdata->subprompt );
 	    return;
@@ -3531,7 +3635,7 @@ void do_oset( CHAR_DATA *ch, char *argument )
     if ( obj )
     {
 	lockobj = TRUE;
-	arg1 = obj->name;
+	arg1 = (obj->name && obj->name[0] != '\0') ? obj->name : "(unnamed)";
 	argstr = one_argument( argstr, arg2 );
 	arg3 = argstr;
     }
@@ -3606,7 +3710,7 @@ void do_oset( CHAR_DATA *ch, char *argument )
     }
     if ( lockobj )
 	ch->dest_buf = obj;
-    else
+    else if ( ch->substate != SUB_RESTRICTED )
         ch->dest_buf = NULL;
 
     separate_obj( obj );
@@ -3672,6 +3776,13 @@ void do_oset( CHAR_DATA *ch, char *argument )
 	obj->value[3] = value;
 	if ( IS_OBJ_STAT( obj, ITEM_PROTOTYPE ) )
 	  obj->pIndexData->value[3] = value;
+	if ( obj->item_type == ITEM_WEAPON && value >= 0
+	&&   static_cast<size_t>(value) + WEAPON_FIRST < WEAPON_MAX )
+	{
+	  set_weapon_flag( obj->objflags, WEAPON_FIRST + static_cast<size_t>(value) );
+	  if ( IS_OBJ_STAT( obj, ITEM_PROTOTYPE ) )
+	    set_weapon_flag( obj->pIndexData->objflags, WEAPON_FIRST + static_cast<size_t>(value) );
+	}
 	return;
     }
 
@@ -3777,18 +3888,18 @@ void do_oset( CHAR_DATA *ch, char *argument )
 						result += " ";
 					result += obj_flag_table[i].name;
 				}
+				send_to_char( result + "\n", ch );
 				return;
 			}			
 
 			while ( !argstr.empty() )
 			{
 				argstr = one_argument( argstr, arg3 );
-				value = get_objflag( arg3 );
-				{
-					BV_TOGGLE_BIT(obj->objflags, value);
-//					if ( value == ITEM_PROTOTYPE )
-//						obj->pIndexData->objflags = obj->objflags;
-				}
+				const size_t flag = get_objflag( arg3 );
+				if ( flag >= ITEM_MAX )
+					ch_printf( ch, "Unknown flag: %s\n", arg3.c_str() );
+				else
+					BV_TOGGLE_BIT( obj->objflags, flag );
 			}
 			if ( IS_OBJ_STAT( obj, ITEM_PROTOTYPE ) )
 				obj->pIndexData->objflags = obj->objflags; 
@@ -3812,6 +3923,7 @@ void do_oset( CHAR_DATA *ch, char *argument )
 						result += " ";
 					result += trig_flags[i].name;
 				}
+				send_to_char( result + "\n", ch );
 				return;
 			}			
 
@@ -3951,11 +4063,14 @@ void do_oset( CHAR_DATA *ch, char *argument )
 	 * if it is not already there.
 	 */
         {
-          if ( str_infix( "rename", obj->name ) )
+          if ( !obj->name || str_infix( "rename", obj->name ) )
           {
-//            SPRINTF( buf, "%s %s", obj->name, "rename" );
-	    STRFREE( obj->name );
-	    obj->name = STRALLOC( str_printf("%s %s", obj->name, "rename") );
+            std::string updated = (obj->name && obj->name[0] != '\0')
+                ? str_printf("%s %s", obj->name, "rename")
+                : std::string("rename");
+            if ( obj->name )
+                STRFREE( obj->name );
+            obj->name = STRALLOC( updated );
           }
         }
 	return;
@@ -4314,7 +4429,7 @@ void do_oset( CHAR_DATA *ch, char *argument )
 
 		new_flag = get_flag_partial(arg3, obj_flag_table, WEAPON_FIRST, WEAPON_MAX);
 
-		if ( new_flag < 0 )
+		if ( new_flag == BIT_NOTFOUND )
 		{
 			send_to_char( "Unknown weapon type.\n", ch );
 			send_to_char( "\nChoices:\n", ch );
@@ -4322,8 +4437,12 @@ void do_oset( CHAR_DATA *ch, char *argument )
 			return;
 		}
 		set_weapon_flag(obj->objflags,new_flag);
+		obj->value[3] = static_cast<int>(new_flag - WEAPON_FIRST);
 		if ( IS_OBJ_STAT( obj, ITEM_PROTOTYPE ) )
+		{
 			set_weapon_flag(obj->pIndexData->objflags, new_flag);
+			obj->pIndexData->value[3] = static_cast<int>(new_flag - WEAPON_FIRST);
+		}
 		return;
 	}
 
@@ -4377,9 +4496,12 @@ void do_oset( CHAR_DATA *ch, char *argument )
 		unsigned int x;
 
 		value = -1;
-		for ( x = 0; x < sizeof( crystal_table ) / sizeof( crystal_table[0] ); x++ )
+		for ( x = 0; x < sizeof( crystal_table ) / sizeof( crystal_table[0] ) && crystal_table[x] != nullptr; x++ )
 		  if ( !str_cmp( arg3, crystal_table[x] ) )
+		  {
 		    value = x;
+		    break;
+		  }
 		if ( value < 0 )
 		{
 		    send_to_char( "Unknown gem type.\n", ch );
@@ -4452,10 +4574,20 @@ void do_oset( CHAR_DATA *ch, char *argument )
      */
     if ( ch->substate == SUB_REPEATCMD )
     {
-	ch->substate = SUB_RESTRICTED;
+	void *saved_dest_buf = ch->dest_buf;
+	ch->substate = SUB_NONE;
 	interpret( ch, origarg );
-	ch->substate = SUB_REPEATCMD;
-	ch->last_cmd = do_oset;
+	if ( char_died( ch ) )
+	    return;
+	if ( ch->substate == SUB_NONE
+	&&   ch->editor == nullptr
+	&&   get_timerptr( ch, TIMER_DO_FUN ) == nullptr
+	&&   ch->dest_buf == saved_dest_buf
+	&&   ( !ch->desc || ( ch->desc->connected != CON_EDITING && ch->desc->olc == nullptr ) ) )
+	{
+	    ch->substate = SUB_REPEATCMD;
+	    ch->last_cmd = do_oset;
+	}
     }
     else
 	do_oset( ch, "" );
@@ -4471,8 +4603,6 @@ void do_rset( CHAR_DATA *ch, char *argument )
     std::string arg1, arg2, arg3;
 	std::string argstr = argument;
 	ROOM_INDEX_DATA *location;
-    int value;
-    bool proto;
 
     smash_tilde( argstr );
     argstr = one_argument( argstr, arg1 );
@@ -4484,7 +4614,7 @@ void do_rset( CHAR_DATA *ch, char *argument )
 	send_to_char( "Syntax: rset <location> <field> value\n",	ch );
 	send_to_char( "\n",						ch );
 	send_to_char( "Field being one of:\n",			ch );
-	send_to_char( "  flags sector\n",				ch );
+	send_to_char( "  flags <flag> [flag]...\n  sector <number>\n", ch );
 	return;
     }
 
@@ -4497,42 +4627,36 @@ void do_rset( CHAR_DATA *ch, char *argument )
     if ( !can_rmodify( ch, location ) )
       return;
 
-    if ( !is_number( arg3 ) )
-    {
-	send_to_char( "Value must be numeric.\n", ch );
-	return;
-    }
-    value = atoi( arg3.c_str() );
-
     /*
      * Set something.
      */
     if ( !str_cmp( arg2, "flags" ) )
     {
-	/*
-	 * Protect from messing up prototype flag
-	 */
-	if ( BV_IS_SET( location->room_flags, ROOM_PROTOTYPE ) )
-	  proto = TRUE;
-	else
-	  proto = FALSE;
-
-	BV_SET_BIT(location->room_flags, value);
-/*	  
-	  int bit = get_rflag(value);
-	  if (bit != BIT_NOTFOUND)
-		BV_SET_BIT(location->room_flags, bit);
-		*/
-	if ( proto )
-
-	  BV_SET_BIT( location->room_flags, ROOM_PROTOTYPE );
-	return;
+        while ( !argstr.empty() )
+        {
+            argstr = one_argument( argstr, arg3 );
+            const size_t flag = get_rflag( arg3 );
+            if ( flag >= ROOM_MAX )
+                ch_printf( ch, "Unknown flag: %s\n", arg3.c_str() );
+            else if ( flag == ROOM_PROTOTYPE && BV_IS_SET( location->room_flags, ROOM_PROTOTYPE ) )
+                send_to_char( "Use redit to remove the prototype flag.\n", ch );
+            else if ( flag == ROOM_PLR_HOME && get_trust(ch) < LEVEL_SUPREME )
+                send_to_char( "If you want to build a player home use the 'empty_home' flag instead.\n", ch );
+            else
+                BV_TOGGLE_BIT( location->room_flags, flag );
+        }
+        return;
     }
 
     if ( !str_cmp( arg2, "sector" ) )
     {
-		location->sector_type	= value;
-		return;
+        if ( !is_number( arg3 ) )
+        {
+            send_to_char( "Value must be numeric.\n", ch );
+            return;
+        }
+        location->sector_type = strtoi( arg3 );
+        return;
     }
 
     /*
@@ -4826,7 +4950,7 @@ void do_redit( CHAR_DATA *ch, char *argument )
     std::string origarg = argument;
 	char buf2[MAX_STRING_LENGTH]; // Used for do_fun command
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
 	send_to_char( "You have no descriptor.\n", ch );
 	return;
@@ -4840,8 +4964,9 @@ void do_redit( CHAR_DATA *ch, char *argument )
 			location = (ROOM_INDEX_DATA *) ch->dest_buf;
 			if ( !location )
 			{
-				bug( "redit: sub_room_desc: NULL ch->dest_buf", 0 );
-				location = ch->in_room;
+				bug( "redit: sub_room_desc: NULL ch->dest_buf" );
+				stop_editing( ch );
+				return;
 			}
 			STRFREE( location->description );
 			location->description = copy_buffer( ch );
@@ -4853,7 +4978,7 @@ void do_redit( CHAR_DATA *ch, char *argument )
 			ed = (EXTRA_DESCR_DATA *) ch->dest_buf;
 			if ( !ed )
 			{
-				bug( "redit: sub_room_extra: NULL ch->dest_buf", 0 );
+				bug( "redit: sub_room_extra: NULL ch->dest_buf" );
 				stop_editing( ch );
 				return;
 			}
@@ -4881,6 +5006,7 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	    if ( ch->pcdata && ch->pcdata->subprompt )
 		STRFREE( ch->pcdata->subprompt );
 	    ch->substate = SUB_NONE;
+	    ch->dest_buf = NULL;
 	    return;
 	}
     }
@@ -4970,6 +5096,7 @@ void do_redit( CHAR_DATA *ch, char *argument )
 
     if ( !str_cmp( arg, "desc" ) )
     {
+	CHECK_SUBRESTRICTED( ch );
 	if ( ch->substate == SUB_REPEATCMD )
 	  ch->tempnum = SUB_REPEATCMD;
 	else
@@ -5070,7 +5197,7 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	{
 	   argstr = one_argument( argstr, arg2 );
 	   value = get_rflag( arg2 );
-	   if ( value < 0 || value == BIT_NOTFOUND )
+	   if ( value == BIT_NOTFOUND )
 	     ch_printf( ch, "Unknown flag: %s\n", arg2.c_str() );
 	   else if ( value == ROOM_PLR_HOME && get_trust(ch) < LEVEL_SUPREME )
 	       send_to_char( "If you want to build a player home use the 'empty_home' flag instead.\n", ch );
@@ -5224,9 +5351,9 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	{
 	   buf = str_printf("Flags for exit direction: %d  Keywords: %s  Key: %d\n[ ",
 	   	xit->vdir, xit->keyword, xit->key );
-	   for ( value = 0; value <= MAX_EXFLAG; value++ )
+	   for ( value = 0; value <= MAX_EXFLAG && ex_flags[value] != nullptr; value++ )
 	   {
-		if ( IS_SET( xit->exit_info, 1 << value ) )
+		if ( IS_SET( xit->exit_info, 1U << value ) )
 		{
 		    buf += ex_flags[value];
 		    buf += " ";
@@ -5239,11 +5366,11 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	while ( !argstr.empty() )
 	{
 	   argstr = one_argument( argstr, arg2 );
-	   value = get_exflag( arg2 );
-	   if ( value < 0 || value > MAX_EXFLAG )
+	   int exval = get_exflag( arg2 );
+	   if ( exval < 0 || exval > MAX_EXFLAG )
 	     ch_printf( ch, "Unknown flag: %s\n", arg2.c_str() );
 	   else
-	     TOGGLE_BIT( xit->exit_info, 1 << value );
+	     TOGGLE_BIT( xit->exit_info, 1U << exval );
 	}
 	return;
     }
@@ -5264,8 +5391,8 @@ void do_redit( CHAR_DATA *ch, char *argument )
            case SUB_NORTH: dir = 'n'; edir = 0; break;
 	}
 
-	value = get_exflag(arg2);
-        if ( value < 0 )
+	int exval = get_exflag(arg2);
+        if ( exval < 0 || exval > MAX_EXFLAG )
 	{
            send_to_char("Bad exit flag. \n", ch);
 	   return;
@@ -5276,7 +5403,9 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	   do_redit(ch,buf2);
 	   xit = get_exit(location,edir);
 	}     
-	TOGGLE_BIT( xit->exit_info, value );
+	if ( !xit )
+	   return;
+	TOGGLE_BIT( xit->exit_info, 1U << exval );
 	return;
     }
 
@@ -5295,7 +5424,7 @@ void do_redit( CHAR_DATA *ch, char *argument )
            case SUB_NORTH: dir = 'n'; edir = 0; break;
 	}
 	evnum = strtoi(arg2);
-	if ( evnum < 1 || evnum > 32766 )
+	if ( evnum < 1 || evnum > 2097152000 )
 	{
 	    send_to_char( "Invalid room number.\n", ch );
 	    return;
@@ -5311,6 +5440,8 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	   do_redit(ch,buf2);
 	   xit = get_exit(location,edir);
 	}     
+	if ( !xit )
+	   return;
 	xit->vnum = evnum;
 	return;
     }
@@ -5334,6 +5465,8 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	   do_redit(ch,buf2);
 	   xit = get_exit(location,edir);
 	}     
+	if ( !xit )
+	   return;
 	xit->key = strtoi( arg2 );
 	return;
     }
@@ -5376,8 +5509,14 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	   if ( (xit = get_exit(location, edir)) == NULL )
 	     return;
 	}     
-	STRFREE( xit->keyword );
-	xit->keyword = STRALLOC( str_printf("%s %s", xit->keyword, argstr.c_str()) );
+	{
+	    std::string updated = (xit->keyword && xit->keyword[0] != '\0')
+	        ? str_printf("%s %s", xit->keyword, argstr.c_str())
+	        : argstr;
+	    if ( xit->keyword )
+	        STRFREE( xit->keyword );
+	    xit->keyword = STRALLOC( updated );
+	}
 	return;
     }
 
@@ -5422,7 +5561,7 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	    send_to_char( "No exit in that direction.\n", ch );
 	    return;
 	}
-	if ( evnum < 1 || evnum > 32766 )
+	if ( evnum < 1 || evnum > 2097152000 )
 	{
 	    send_to_char( "Invalid room number.\n", ch );
 	    return;
@@ -5504,7 +5643,7 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	char rvnum[MAX_INPUT_LENGTH];
 	bool numnotdir;
 
-	argstr = one_argument( argument, arg2 );
+	argstr = one_argument( argstr, arg2 );
 	argstr = one_argument( argstr, arg3 );
 	if ( arg2.empty() )
 	{
@@ -5530,11 +5669,22 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	exnum = edir;
 	if ( numnotdir )
 	{
-	    if ( (xit = get_exit_num(tmploc, edir)) != NULL )
-	      edir = xit->vdir;
+	    xit = get_exit_num(tmploc, edir);
+	    if ( !xit )
+	    {
+	        send_to_char( "No exit with that number.\n", ch );
+	        return;
+	    }
+	    edir = xit->vdir;
 	}
 	else
 	    xit = get_exit(tmploc, edir);
+	if ( edir < DIR_NORTH || edir > DIR_SOMEWHERE )
+	{
+	    send_to_char( "Invalid exit direction.\n", ch );
+	    return;
+	}
+	const char* reverse_direction = dir_name[rev_dir[edir]];
 	rxit = NULL;
 	vnum = 0;
 	rvnum[0] = '\0';
@@ -5548,9 +5698,20 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	    else
 	      rxit = NULL;
 	}
-	int n = snprintf( tmpcmd, MAX_INPUT_LENGTH, "exit %s %s %s", arg2.c_str(), arg3.c_str(), argstr.c_str() );
-	if ( n < 0 || n >= MAX_STRING_LENGTH )
-	    tmpcmd[MAX_INPUT_LENGTH-1] = '\0';
+	int n = snprintf( tmpcmd, sizeof(tmpcmd), "exit %s %s %s", arg2.c_str(), arg3.c_str(), argstr.c_str() );
+	if ( n < 0 || n >= static_cast<int>(sizeof(tmpcmd)) )
+	{
+	    send_to_char( "Exit command is too long.\n", ch );
+	    return;
+	}
+	// The reverse command uses two room numbers and a direction in addition to the arguments.
+	const int reverse_vnum = rxit ? vnum : (arg3.empty() ? vnum : strtoi(arg3));
+	if ( reverse_vnum && argstr.size() + str_printf( "%d redit exit %s %d ",
+	         reverse_vnum, reverse_direction, tmploc->vnum ).size() >= sizeof(tmpcmd) )
+	{
+	    send_to_char( "Reverse exit command is too long.\n", ch );
+	    return;
+	}
 	do_redit( ch, tmpcmd );
 	if ( numnotdir )
 	  xit = get_exit_num(tmploc, exnum);
@@ -5568,13 +5729,16 @@ void do_redit( CHAR_DATA *ch, char *argument )
 	}
 	if ( vnum )
 	{
-	    n = snprintf( tmpcmd, MAX_INPUT_LENGTH, "%d redit exit %d %s %s",
+	    n = snprintf( tmpcmd, sizeof(tmpcmd), "%d redit exit %s %s %s",
 				vnum,
-				rev_dir[edir],
+				reverse_direction,
 				rvnum,
 				argstr.c_str() );
-	    if ( n < 0 || n >= MAX_STRING_LENGTH )
-		tmpcmd[MAX_INPUT_LENGTH-1] = '\0';
+	    if ( n < 0 || n >= static_cast<int>(sizeof(tmpcmd)) )
+	    {
+		send_to_char( "Reverse exit command is too long.\n", ch );
+		return;
+	    }
 	    do_at( ch, tmpcmd );
 	}
 	return;
@@ -5649,10 +5813,20 @@ void do_redit( CHAR_DATA *ch, char *argument )
      */
     if ( ch->substate == SUB_REPEATCMD )
     {
-	ch->substate = SUB_RESTRICTED;
+	void *saved_dest_buf = ch->dest_buf;
+	ch->substate = SUB_NONE;
 	interpret( ch, origarg );
-	ch->substate = SUB_REPEATCMD;
-	ch->last_cmd = do_redit;
+	if ( char_died( ch ) )
+	    return;
+	if ( ch->substate == SUB_NONE
+	&&   ch->editor == nullptr
+	&&   get_timerptr( ch, TIMER_DO_FUN ) == nullptr
+	&&   ch->dest_buf == saved_dest_buf
+	&&   ( !ch->desc || ( ch->desc->connected != CON_EDITING && ch->desc->olc == nullptr ) ) )
+	{
+	    ch->substate = SUB_REPEATCMD;
+	    ch->last_cmd = do_redit;
+	}
     }
     else
 	do_redit( ch, "" );
@@ -5684,7 +5858,7 @@ void do_ocreate( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    if ( vnum < 1 || vnum > 32767 )
+    if ( vnum < 1 || vnum > 2097152000 )
     {
 	send_to_char( "Bad number.\n", ch );
 	return;
@@ -5769,7 +5943,7 @@ void do_mcreate( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    if ( vnum < 1 || vnum > 32767 )
+    if ( vnum < 1 || vnum > 2097152000 )
     {
 	send_to_char( "Bad number.\n", ch );
 	return;
@@ -5888,6 +6062,16 @@ static std::string parse_quoted_token(std::string& s)
 /*
  * Simple but nice and handle line editor.            -Thoric
  */
+static void update_editor_size(EDITOR_DATA* edit)
+{
+    edit->size = 0;
+    for (int i = 0; i < edit->numlines; ++i)
+    {
+        const size_t length = strlen(edit->line[i]);
+        edit->size += length && edit->line[i][length - 1] == '~' ? length - 1 : length + 1;
+    }
+}
+
 void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
 {
     DESCRIPTOR_DATA *d;
@@ -5906,7 +6090,7 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
     if (d->connected != CON_EDITING)
     {
         send_to_char("You can't do that!\n", ch);
-        bug("Edit_buffer: d->connected != CON_EDITING", 0);
+        bug("Edit_buffer: d->connected != CON_EDITING");
         return;
     }
 
@@ -5921,7 +6105,7 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
     if (!ch->editor)
     {
         send_to_char("You can't do that!\n", ch);
-        bug("Edit_buffer: null editor", 0);
+        bug("Edit_buffer: null editor");
         d->connected = CON_PLAYING;
         return;
     }
@@ -6007,6 +6191,7 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
                 editor_store_line(edit->line[x], linebuf);
             }
 
+            update_editor_size(edit);
             ch_printf(ch, "Found and replaced %d occurrence(s).\n> ", count);
             return;
         }
@@ -6180,6 +6365,7 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
                 edit->numlines++;
             }
 
+            update_editor_size(edit);
             if (buffer_full)
                 send_to_char("Buffer full.\n", ch);
 
@@ -6189,26 +6375,28 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
 
         if (cmd.size() > 1 && !str_cmp(cmd.c_str() + 1, "i"))
         {
-            if (edit->numlines >= max_buf_lines)
+            if (edit->numlines >= max_buf_lines || edit->numlines >= MAX_EDITOR_LINES - 1)
                 send_to_char("Buffer is full.\n> ", ch);
             else
             {
 				if (!argument.empty())
-                    line = std::atoi(argument.c_str() + 2) - 1;
+                    line = std::atoi(argument.c_str()) - 1;
                 else
                     line = edit->on_line;
 
-                if (line < 0)
+                if (argument.empty() && line < 0)
                     line = edit->on_line;
 
                 if (line < 0 || line > edit->numlines)
                     send_to_char("Out of range.\n> ", ch);
                 else
                 {
-                    for (x = ++edit->numlines; x > line; x--)
+                    ++edit->numlines;
+                    for (x = edit->numlines - 1; x > line; x--)
                         memmove(edit->line[x], edit->line[x - 1], strlen(edit->line[x - 1]) + 1);
 
                     edit->line[line][0] = '\0';
+                    update_editor_size(edit);
                     send_to_char("Line inserted.\n> ", ch);
                 }
             }
@@ -6222,14 +6410,14 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
             else
             {
 				if (!argument.empty())
-                    line = std::atoi(argument.c_str() + 2) - 1;
+                    line = std::atoi(argument.c_str()) - 1;
                 else
                     line = edit->on_line;
 
-                if (line < 0)
+                if (argument.empty() && line < 0)
                     line = edit->on_line;
 
-                if (line < 0 || line > edit->numlines)
+                if (line < 0 || line >= edit->numlines)
                     send_to_char("Out of range.\n> ", ch);
                 else
                 {
@@ -6252,6 +6440,7 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
                     if (edit->on_line > edit->numlines)
                         edit->on_line = edit->numlines;
 
+                    update_editor_size(edit);
                     send_to_char("Line deleted.\n> ", ch);
                 }
             }
@@ -6294,7 +6483,10 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
             {
                 send_to_char("------------------\n", ch);
                 for (x = 0; x < edit->numlines; x++)
-                    ch_printf(ch, "%2d> %s\n", x + 1, edit->line[x]);
+                {
+                    const char *line = edit->line[x];
+                    ch_printf(ch, "%2d> %s\n", x + 1, line);
+                }
                 send_to_char("------------------\n> ", ch);
             }
             return;
@@ -6310,16 +6502,54 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
         if (get_trust(ch) > LEVEL_IMMORTAL &&
             cmd.size() > 1 && !str_cmp(cmd.c_str() + 1, "!"))
         {
-            DO_FUN *last_cmd;
+            DO_FUN *last_cmd = ch->last_cmd;
             int substate = ch->substate;
+            void *orig_dest_buf = ch->dest_buf;
+            EDITOR_DATA *orig_editor = ch->editor;
+            uint64_t orig_editor_id = get_editor_id(orig_editor);
 
-            last_cmd = ch->last_cmd;
             ch->substate = SUB_RESTRICTED;
             interpret(ch, !argument.empty() ? argument : std::string());
-            ch->substate = substate;
-            ch->last_cmd = last_cmd;
-            set_char_color(AT_GREEN, ch);
-            send_to_char("\n> ", ch);
+
+            bool ch_alive = false;
+            for (CHAR_DATA *wch = first_char; wch; wch = wch->next)
+            {
+                if (wch == ch)
+                {
+                    ch_alive = true;
+                    break;
+                }
+            }
+            if (!ch_alive)
+                return;
+
+            if (ch->editor != nullptr && ch->editor == orig_editor &&
+                orig_editor_id != 0 && get_editor_id(ch->editor) == orig_editor_id &&
+                ch->substate == SUB_RESTRICTED &&
+                ch->desc != nullptr && ch->desc->connected == CON_EDITING &&
+                (orig_dest_buf == nullptr || ch->dest_buf == orig_dest_buf))
+            {
+                ch->substate = substate;
+                ch->last_cmd = last_cmd;
+                set_char_color(AT_GREEN, ch);
+                send_to_char("\n> ", ch);
+            }
+            else if (ch->editor != nullptr &&
+                     (ch->editor != orig_editor || get_editor_id(ch->editor) != orig_editor_id) &&
+                     ch->substate > SUB_PAUSE && ch->substate != SUB_RESTRICTED &&
+                     ch->desc != nullptr && ch->desc->connected == CON_EDITING)
+            {
+                /* A new editor session was opened; do not overwrite it with stale state. */
+            }
+            else
+            {
+                if (ch->editor != nullptr)
+                    stop_editing(ch);
+                ch->substate = SUB_NONE;
+                ch->dest_buf = nullptr;
+                ch->spare_ptr = nullptr;
+                ch->last_cmd = nullptr;
+            }
             return;
         }
 
@@ -6328,11 +6558,13 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
             d->connected = CON_PLAYING;
             if (!ch->last_cmd)
                 return;
-            (*ch->last_cmd)(ch, "");
+            char empty[] = "";
+            (*ch->last_cmd)(ch, empty);
             return;
         }
     }
 
+    update_editor_size(edit);
     if (edit->size + argument.size() + 1 >= MAX_STRING_LENGTH - 1)
     {
         send_to_char("You buffer is full.\n", ch);
@@ -6393,99 +6625,130 @@ void edit_buffer(CHAR_DATA *ch, const std::string& argument_in)
             }
         }
 
-        if (lines_needed > 1 && insert_at < edit->numlines)
+        bool wrap_overflow = false;
+        if (lines_needed > 1)
         {
-            int shift = lines_needed - 1;
+            int shift = (insert_at < edit->numlines) ? (lines_needed - 1) : lines_needed;
+            int available = max_buf_lines - edit->numlines;
+            if (available < 0)
+                available = 0;
 
-            if (edit->numlines + shift > max_buf_lines)
-                shift = max_buf_lines - edit->numlines;
-
-            if (shift < lines_needed - 1)
+            if (available < shift)
             {
                 send_to_char("Buffer full.\n", ch);
                 save = TRUE;
+                wrap_overflow = true;
             }
-
-            for (x = edit->numlines - 1; x > insert_at; x--)
+            else if (insert_at < edit->numlines && shift > 0)
             {
-                if (x + shift >= max_buf_lines)
-                    continue;
-
-                memmove(edit->line[x + shift],
-                        edit->line[x],
-                        strlen(edit->line[x]) + 1);
-            }
-
-            edit->numlines += shift;
-            if (edit->numlines > max_buf_lines)
-                edit->numlines = max_buf_lines;
-        }
-
-        if (clean.empty())
-        {
-            edit->line[insert_at][0] = '\0';
-            insert_at++;
-        }
-        else
-        {
-            size_t pos = 0;
-
-            while (pos < clean.size() && insert_at < max_buf_lines)
-            {
-                if ((clean.size() - pos) <= 75)
+                for (x = edit->numlines - 1; x > insert_at; x--)
                 {
-                    std::string tail = clean.substr(pos);
-                    if (tail.size() > 81 - 1)
-                        tail.resize(81 - 1);
+                    if (x + shift >= max_buf_lines)
+                        continue;
 
-                    editor_store_line(edit->line[insert_at], tail);
-                    insert_at++;
-                    break;
+                    memmove(edit->line[x + shift],
+                            edit->line[x],
+                            strlen(edit->line[x]) + 1);
+                }
+
+                edit->numlines += shift;
+                if (edit->numlines > max_buf_lines)
+                    edit->numlines = max_buf_lines;
+            }
+        }
+
+        if (!wrap_overflow)
+        {
+            if (clean.empty())
+            {
+                if (insert_at >= max_buf_lines)
+                {
+                    send_to_char("Buffer full.\n", ch);
+                    save = TRUE;
                 }
                 else
                 {
-                    size_t breakp = pos + 75;
-
-                    while (breakp > pos && clean[breakp] != ' ')
-                        --breakp;
-
-                    if (breakp == pos)
-                        breakp = pos + 75;
-
-                    std::string out = clean.substr(pos, breakp - pos);
-
-                    while (!out.empty() && out.back() == ' ')
-                        out.pop_back();
-
-                    editor_store_line(edit->line[insert_at], out);
+                    edit->line[insert_at][0] = '\0';
                     insert_at++;
-
-                    pos = breakp;
-                    while (pos < clean.size() && clean[pos] == ' ')
-                        ++pos;
                 }
             }
-        }
+            else
+            {
+                size_t pos = 0;
+                bool hit_full = false;
 
-        edit->on_line = insert_at;
+                if (insert_at >= max_buf_lines)
+                    hit_full = true;
 
-        if (edit->on_line > edit->numlines)
-            edit->numlines = edit->on_line;
+                while (pos < clean.size() && insert_at < max_buf_lines)
+                {
+                    if ((clean.size() - pos) <= 75)
+                    {
+                        std::string tail = clean.substr(pos);
+                        if (tail.size() > 81 - 1)
+                            tail.resize(81 - 1);
 
-        if (edit->numlines > max_buf_lines)
-        {
-            edit->numlines = max_buf_lines;
-            send_to_char("Buffer full.\n", ch);
-            save = TRUE;
+                        editor_store_line(edit->line[insert_at], tail);
+                        insert_at++;
+                        pos = clean.size();
+                        break;
+                    }
+                    else
+                    {
+                        size_t breakp = pos + 75;
+
+                        while (breakp > pos && clean[breakp] != ' ')
+                            --breakp;
+
+                        if (breakp == pos)
+                            breakp = pos + 75;
+
+                        std::string out = clean.substr(pos, breakp - pos);
+
+                        while (!out.empty() && out.back() == ' ')
+                            out.pop_back();
+
+                        editor_store_line(edit->line[insert_at], out);
+                        insert_at++;
+
+                        pos = breakp;
+                        while (pos < clean.size() && clean[pos] == ' ')
+                            ++pos;
+                    }
+                }
+
+                if (pos < clean.size())
+                    hit_full = true;
+
+                if (hit_full)
+                {
+                    send_to_char("Buffer full.\n", ch);
+                    save = TRUE;
+                }
+            }
+
+            edit->on_line = insert_at;
+
+            if (edit->on_line > edit->numlines)
+                edit->numlines = edit->on_line;
+
+            if (edit->numlines > max_buf_lines)
+            {
+                edit->numlines = max_buf_lines;
+                send_to_char("Buffer full.\n", ch);
+                save = TRUE;
+            }
         }
     }
 
+    update_editor_size(edit);
     if (save)
     {
         d->connected = CON_PLAYING;
         if (!ch->last_cmd)
             return;
-        (*ch->last_cmd)(ch, "");
+        char empty[] = "";
+        (*ch->last_cmd)(ch, empty);
         return;
     }
 
@@ -6676,6 +6939,23 @@ bool DelRExtra( ROOM_INDEX_DATA *room, const std::string& keywords )
     }
     if ( !rmed )
       return FALSE;
+    olc_invalidate_target( rmed, "Your room extra description was removed; editing aborted.\n" );
+    for ( CHAR_DATA *ech = first_char; ech; ech = ech->next )
+    {
+        if ( ech->dest_buf == rmed &&
+             ( ech->substate == SUB_ROOM_EXTRA ||
+               ( ech->substate == SUB_RESTRICTED && ech->desc && ech->desc->connected == CON_EDITING ) ) )
+        {
+            stop_editing( ech );
+            ech->substate = SUB_NONE;
+            ech->dest_buf = NULL;
+            ech->spare_ptr = NULL;
+            ech->last_cmd = NULL;
+            if ( ech->desc && ech->desc->connected == CON_EDITING )
+                ech->desc->connected = CON_PLAYING;
+            send_to_char( "Your room extra description was removed; editing aborted.\n", ech );
+        }
+    }
     UNLINK( rmed, room->first_extradesc, room->last_extradesc, next, prev );
     STRFREE( rmed->keyword );
     STRFREE( rmed->description );
@@ -6715,6 +6995,23 @@ bool DelOExtra( OBJ_DATA *obj, const std::string& keywords )
     }
     if ( !rmed )
       return FALSE;
+    olc_invalidate_target( rmed, "Your object extra description was removed; editing aborted.\n" );
+    for ( CHAR_DATA *ech = first_char; ech; ech = ech->next )
+    {
+        if ( ech->dest_buf == rmed &&
+             ( ech->substate == SUB_OBJ_EXTRA ||
+               ( ech->substate == SUB_RESTRICTED && ech->desc && ech->desc->connected == CON_EDITING ) ) )
+        {
+            stop_editing( ech );
+            ech->substate = SUB_NONE;
+            ech->dest_buf = NULL;
+            ech->spare_ptr = NULL;
+            ech->last_cmd = NULL;
+            if ( ech->desc && ech->desc->connected == CON_EDITING )
+                ech->desc->connected = CON_PLAYING;
+            send_to_char( "Your object extra description was removed; editing aborted.\n", ech );
+        }
+    }
     UNLINK( rmed, obj->first_extradesc, obj->last_extradesc, next, prev );
     STRFREE( rmed->keyword );
     STRFREE( rmed->description );
@@ -6754,6 +7051,23 @@ bool DelOExtraProto( OBJ_INDEX_DATA *obj, const std::string& keywords )
     }
     if ( !rmed )
       return FALSE;
+    olc_invalidate_target( rmed, "Your object extra description was removed; editing aborted.\n" );
+    for ( CHAR_DATA *ech = first_char; ech; ech = ech->next )
+    {
+        if ( ech->dest_buf == rmed &&
+             ( ech->substate == SUB_OBJ_EXTRA ||
+               ( ech->substate == SUB_RESTRICTED && ech->desc && ech->desc->connected == CON_EDITING ) ) )
+        {
+            stop_editing( ech );
+            ech->substate = SUB_NONE;
+            ech->dest_buf = NULL;
+            ech->spare_ptr = NULL;
+            ech->last_cmd = NULL;
+            if ( ech->desc && ech->desc->connected == CON_EDITING )
+                ech->desc->connected = CON_PLAYING;
+            send_to_char( "Your object extra description was removed; editing aborted.\n", ech );
+        }
+    }
     UNLINK( rmed, obj->first_extradesc, obj->last_extradesc, next, prev );
     STRFREE( rmed->keyword );
     STRFREE( rmed->description );
@@ -6762,7 +7076,45 @@ bool DelOExtraProto( OBJ_INDEX_DATA *obj, const std::string& keywords )
     return TRUE;
 }
 
-void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
+static bool publish_area_file( const std::string &filename, const std::string &temporary )
+{
+    namespace fs = std::filesystem;
+    const std::string backup = filename + ".bak";
+    const std::string backup_temp = backup + ".tmp";
+    std::error_code error;
+
+    if ( fs::exists( filename, error ) )
+    {
+        fs::copy_file( filename, backup_temp, fs::copy_options::overwrite_existing, error );
+        if ( !error )
+            fs::rename( backup_temp, backup, error );
+    }
+    if ( !error )
+        fs::rename( temporary, filename, error );
+
+    if ( error )
+    {
+        bug( "fold_area: cannot publish %s: %s", filename.c_str(), error.message().c_str() );
+        std::error_code cleanup_error;
+        fs::remove( backup_temp, cleanup_error );
+        return false;
+    }
+
+    const fs::path parent = fs::path( filename ).parent_path();
+    const int directory = open( parent.empty() ? "." : parent.c_str(), O_RDONLY | O_DIRECTORY );
+    if ( directory < 0 )
+        bug( "fold_area: cannot open parent directory for %s: %s", filename.c_str(), strerror(errno) );
+    else
+    {
+        if ( fsync( directory ) != 0 )
+            bug( "fold_area: cannot sync published area %s: %s", filename.c_str(), strerror(errno) );
+        close( directory );
+    }
+    // A published file must remain the in-memory state even if directory sync reports an error.
+    return true;
+}
+
+static bool fold_area_file( AREA_DATA *tarea, const std::string& filename, bool install )
 {
     RESET_DATA		*treset;
     ROOM_INDEX_DATA	*room;
@@ -6773,25 +7125,25 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
     EXTRA_DESCR_DATA	*ed;
     AFFECT_DATA		*paf;
     SHOP_DATA		*pShop;
-    REPAIR_DATA		*pRepair;
 //    char		 buf[MAX_STRING_LENGTH];
     FILE		*fpout;
     int			 vnum;
     int			 val0, val1, val2, val3, val4, val5;
     bool		 complexmob;
 
+    if ( !str_cmp( tarea->filename, "help.are" ) )
+        return false;  /* The help index uses the hset writer. */
+
     log_printf_plus( LOG_ALL, LEVEL_GREATER, "Saving %s...", tarea->filename );
 
-    std::string buf = filename + ".bak";
-    rename( filename.c_str(), buf.c_str() );
+    const std::string buf = filename + ".tmp";
     FCLOSE( fpReserve );
-    buf = filename + ".tmp";
     if ( ( fpout = fopen( buf.c_str(), "w" ) ) == NULL )
     {
-	bug( "fold_area: fopen", 0 );
+	bug( "fold_area: fopen" );
 	perror( buf.c_str() );
 	fpReserve = fopen( NULL_FILE, "r" );
-	return;
+	return false;
     }
     
     fprintf( fpout, "#AREA   %s~\n\n\n\n", tarea->name );
@@ -6819,8 +7171,6 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
     {
 	if ( (pMobIndex = get_mob_index( vnum )) == NULL )
 	  continue;
-	if ( install )
-	  BV_REMOVE_BIT( pMobIndex->act, ACT_PROTOTYPE );
 	if ( pMobIndex->perm_str != 13	||   pMobIndex->perm_int   != 13
 	||   pMobIndex->perm_wis != 13	||   pMobIndex->perm_dex   != 13
 	||   pMobIndex->perm_con != 13	||   pMobIndex->perm_cha   != 13
@@ -6829,7 +7179,7 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
 	||   pMobIndex->race	 != 0
 	||   pMobIndex->attacks	 != 0	||   pMobIndex->defenses   != 0
 	||   pMobIndex->height	 != 0	||   pMobIndex->weight	   != 0
-	||   !pMobIndex->speaks.any()	||   pMobIndex->speaking   != 0
+	||   pMobIndex->speaks.any()	||   pMobIndex->speaking   != 0
 	||   pMobIndex->xflags	 != 0   ||   pMobIndex->numattacks != 1
 	||   pMobIndex->vip_flags.any() )
 	  complexmob = TRUE;
@@ -6846,7 +7196,10 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
 					pMobIndex->alignment,
 					complexmob ? 'Z' : 'S'		);
 		/* C changed to Z for swreality vip_flags  */
-	fwrite_bitset(fpout,NULL, pMobIndex->act);
+	FLAG_SET act_flags = pMobIndex->act;
+	if ( install )
+	  BV_REMOVE_BIT( act_flags, ACT_PROTOTYPE );
+	fwrite_bitset(fpout,NULL, act_flags);
 	fwrite_bitset(fpout,NULL, pMobIndex->affected_by);	
 	fprintf( fpout, "%d %d %d ",	pMobIndex->level,
 					pMobIndex->mobthac0,
@@ -6913,8 +7266,6 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
 	}
     }
     fprintf( fpout, "#0\n\n\n" );
-    if ( install && vnum < tarea->hi_m_vnum )
-      tarea->hi_m_vnum = vnum - 1;
 
     /* save objects */
     fprintf( fpout, "#OBJECTS\n" );
@@ -6922,8 +7273,6 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
     {
 	if ( (pObjIndex = get_obj_index( vnum )) == NULL )
 	  continue;
-	if ( install )
-	  BV_REMOVE_BIT( pObjIndex->objflags, ITEM_PROTOTYPE );
 	fprintf( fpout, "#%d\n",	vnum				);
 	fprintf( fpout, "%s~\n",	pObjIndex->name			);
 	fprintf( fpout, "%s~\n",	pObjIndex->short_descr		);
@@ -6939,7 +7288,10 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
 					-9999,
 					-9999	); 
  	fwrite_bitset(fpout, NULL, pObjIndex->wear_flags);
-	fwrite_bitset(fpout, NULL, pObjIndex->objflags);
+	FLAG_SET object_flags = pObjIndex->objflags;
+	if ( install )
+	  BV_REMOVE_BIT( object_flags, ITEM_PROTOTYPE );
+	fwrite_bitset(fpout, NULL, object_flags);
 	
 	val0 = pObjIndex->value[0];
 	val1 = pObjIndex->value[1];
@@ -7007,8 +7359,6 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
 	}
     }
     fprintf( fpout, "#0\n\n\n" );
-    if ( install && vnum < tarea->hi_o_vnum )
-      tarea->hi_o_vnum = vnum - 1;
 
     /* save rooms   */
     fprintf( fpout, "#ROOMS\n" );
@@ -7016,28 +7366,6 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
     {
 	if ( (room = get_room_index( vnum )) == NULL )
 	  continue;
-	if ( install )
-	{
-	    CHAR_DATA *victim, *vnext;
-	    OBJ_DATA  *obj, *obj_next;
-
-	    /* remove prototype flag from room */
-	    BV_REMOVE_BIT( room->room_flags, ROOM_PROTOTYPE );
-	    /* purge room of (prototyped) mobiles */
-	    for ( victim = room->first_person; victim; victim = vnext )
-	    {
-		vnext = victim->next_in_room;
-		if ( IS_NPC(victim) && BV_IS_SET( victim->act, ACT_PROTOTYPE ) )
-		  extract_char( victim, TRUE );
-	    }
-	    /* purge room of (prototyped) objects */
-	    for ( obj = room->first_content; obj; obj = obj_next )
-	    {
-			obj_next = obj->next_content;
-         	if( BV_IS_SET( obj->objflags, ITEM_PROTOTYPE ) )
-            	extract_obj( obj );
-	    }
-	}
 	fprintf( fpout, "#%d\n",	vnum				);
 	fprintf( fpout, "%s~\n",	room->name			);
 	fprintf( fpout, "%s~\n",	strip_cr( room->description )	);
@@ -7050,7 +7378,12 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
 	else
 	  fprintf( fpout, "0 %d %d\n",	-9999,
 					room->sector_type	);
-	fwrite_bitset(fpout, NULL, room->room_flags);
+	FLAG_SET room_flags = room->room_flags;
+	if ( install )
+	  BV_REMOVE_BIT( room_flags, ROOM_PROTOTYPE );
+	fwrite_bitset(fpout, NULL, room_flags);
+	if ( room->home_generation != 0 )
+	  fprintf( fpout, "G %d\n", room->home_generation );
 	for ( xit = room->first_exit; xit; xit = xit->next )
 	{
 	   if ( IS_SET(xit->exit_info, EX_PORTAL) ) /* don't fold portals */
@@ -7074,14 +7407,11 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
 
 	if ( room->map )   /* maps */
 	{
-#ifdef OLDMAPS
-	   fprintf( fpout, "M\n" );
-	   fprintf( fpout, "%s~\n", strip_cr( room->map )	);
-#endif
+	   char entry_ch = room->map->entry ? room->map->entry : ' ';
 	   fprintf( fpout, "M %d %d %d %c\n",	room->map->vnum
 					      , room->map->x
 					      , room->map->y
-					      , room->map->entry );
+					      , entry_ch );
 	}
 	if ( room->mudprogs )
 	{
@@ -7094,8 +7424,6 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
 	fprintf( fpout, "S\n" );
     }
     fprintf( fpout, "#0\n\n\n" );
-    if ( install && vnum < tarea->hi_r_vnum )
-      tarea->hi_r_vnum = vnum - 1;
 
     /* save resets   */
     fprintf( fpout, "#RESETS\n" );
@@ -7135,34 +7463,18 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
 		 fwrite_bitset_noCR(fpout, NULL, pShop->shop_type);
 	fprintf( fpout, " ");
 		 fwrite_bitset_noCR(fpout, NULL, pShop->buy_type);
-	fprintf( fpout, "   %3d %3d %3d       %2d %2d    ; %s\n",
+	fprintf( fpout, "   %3d %3d %3d       %2d %2d",
 		 pShop->profit_buy,
 		 pShop->profit_sell,
 		 pShop->profit_fix,
 		 pShop->open_hour,
-		 pShop->close_hour,
-		 pMobIndex->short_descr );
-    }
-    fprintf( fpout, "0\n\n\n" );
-
-    /* save repair shops */
-    fprintf( fpout, "#REPAIRS\n" );
-    for ( vnum = tarea->low_m_vnum; vnum <= tarea->hi_m_vnum; vnum++ )
-    {
-	if ( (pMobIndex = get_mob_index( vnum )) == NULL )
-	  continue;
-	if ( (pRepair = pMobIndex->rShop) == NULL )
-	  continue;
-	fprintf( fpout, " %d  S ",
-		 pRepair->keeper);
-		 fwrite_bitset_noCR(fpout, NULL, pRepair->fix_type);		 
-	fprintf( fpout, "          %3d %3d",
-		 pRepair->profit_fix,
-		 pRepair->shop_type );
-	fprintf( fpout, "        %2d %2d    ; %s\n",
-		 pRepair->open_hour,
-		 pRepair->close_hour,
-		 pMobIndex->short_descr );
+		 pShop->close_hour );
+	if ( pShop->separate_repair )
+	{
+	    fprintf( fpout, " F %d %d ", pShop->repair_open_hour, pShop->repair_close_hour );
+	    fwrite_bitset_noCR( fpout, NULL, pShop->repair_type );
+	}
+	fprintf( fpout, "    ; %s\n", pMobIndex->short_descr );
     }
     fprintf( fpout, "0\n\n\n" );
 
@@ -7184,13 +7496,55 @@ void fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
     /* END */
     fprintf( fpout, "#$\n" );
 
-//Code to write to .tmp file before replacing area file... 
-//        prevents corruption on crash - DV 4-22-04
-    rename( buf.c_str(), filename.c_str() );
-    
-    FCLOSE( fpout );
+    bool written = fflush( fpout ) == 0 && !ferror( fpout ) && fsync( fileno(fpout) ) == 0;
+    if ( fclose( fpout ) != 0 )
+        written = false;
     fpReserve = fopen( NULL_FILE, "r" );
-    return;
+
+    if ( !written )
+        bug( "fold_area: could not finish writing %s", buf.c_str() );
+    if ( !written || !publish_area_file( filename, buf ) )
+    {
+        std::error_code cleanup_error;
+        std::filesystem::remove( buf, cleanup_error );
+        return false;
+    }
+
+    if ( install )
+    {
+        for ( vnum = tarea->low_m_vnum; vnum <= tarea->hi_m_vnum; ++vnum )
+            if ( (pMobIndex = get_mob_index( vnum )) != nullptr )
+                BV_REMOVE_BIT( pMobIndex->act, ACT_PROTOTYPE );
+        for ( vnum = tarea->low_o_vnum; vnum <= tarea->hi_o_vnum; ++vnum )
+            if ( (pObjIndex = get_obj_index( vnum )) != nullptr )
+                BV_REMOVE_BIT( pObjIndex->objflags, ITEM_PROTOTYPE );
+        for ( vnum = tarea->low_r_vnum; vnum <= tarea->hi_r_vnum; ++vnum )
+        {
+            room = get_room_index( vnum );
+            if ( !room )
+                continue;
+
+            BV_REMOVE_BIT( room->room_flags, ROOM_PROTOTYPE );
+            for ( CHAR_DATA *victim = room->first_person, *next; victim; victim = next )
+            {
+                next = victim->next_in_room;
+                if ( IS_NPC( victim ) && BV_IS_SET( victim->act, ACT_PROTOTYPE ) )
+                    extract_char( victim, TRUE );
+            }
+            for ( OBJ_DATA *obj = room->first_content, *next; obj; obj = next )
+            {
+                next = obj->next_content;
+                if ( BV_IS_SET( obj->objflags, ITEM_PROTOTYPE ) )
+                    extract_obj( obj );
+            }
+        }
+    }
+    return true;
+}
+
+bool fold_area( AREA_DATA *tarea, const std::string& filename, bool install )
+{
+    return fold_area_file( tarea, filename, install );
 }
 
 void do_savearea( CHAR_DATA *ch, char *argument )
@@ -7243,8 +7597,7 @@ void do_savearea( CHAR_DATA *ch, char *argument )
     }
 
     filename = str_printf("%s%s", BUILD_DIR, tarea->filename);
-    fold_area( tarea, filename, FALSE );
-    send_to_char( "Done.\n", ch );
+    send_to_char( fold_area_file( tarea, filename, FALSE ) ? "Done.\n" : "Area save failed.\n", ch );
 }
 
 void do_loadarea( CHAR_DATA *ch, char *argument )
@@ -7363,12 +7716,14 @@ void do_foldarea( CHAR_DATA *ch, char *argument )
     {
 	if ( !str_cmp( tarea->filename, arg ) )
 	{
+	  if ( !str_cmp( tarea->filename, "help.are" ) )
+	  {
+	    send_to_char( "Save the help index with hset save.\n", ch );
+	    return;
+	  }
 	  send_to_char( "Folding...\n", ch );
-	  if (!str_cmp( argstr, "remproto") )
-	     fold_area( tarea, tarea->filename, TRUE );
-	  else
-	     fold_area( tarea, tarea->filename, FALSE );
-	  send_to_char( "Done.\n", ch );
+	  bool saved = fold_area_file( tarea, tarea->filename, !str_cmp( argstr, "remproto" ) );
+	  send_to_char( saved ? "Done.\n" : "Area save failed.\n", ch );
 	  return;
 	}
     }
@@ -7386,12 +7741,13 @@ void write_area_list( GameContext *game)
     fpout = fopen( AREA_LIST, "w" );
     if ( !fpout )
     {
-	bug( "FATAL: cannot open area.lst for writing!\n", 0 );
+	bug( "FATAL: cannot open area.lst for writing!\n" );
  	return;
     }	  
     fprintf( fpout, "help.are\n" );
     for ( tarea = first_area; tarea; tarea = tarea->next )
-	fprintf( fpout, "%s\n", tarea->filename );
+	if ( str_cmp( tarea->filename, "help.are" ) )
+	    fprintf( fpout, "%s\n", tarea->filename );
     fprintf( fpout, "$\n" );
     FCLOSE( fpout );
 }
@@ -7426,15 +7782,24 @@ void do_installarea( CHAR_DATA *ch, char *argument )
     {
 	if ( !str_cmp( tarea->filename, arg ) )
 	{
+	  char *old_name = tarea->name;
 	  if ( !argstr.empty() )
-	  {
-		STR_DISPOSE( tarea->name );
-		tarea->name = str_dup( argstr );
-	  }
+	    tarea->name = str_dup( argstr );
 
 	  /* Fold area with install flag -- auto-removes prototype flags */
 	  send_to_char( "Saving and installing file...\n", ch );
-	  fold_area( tarea, tarea->filename, TRUE );
+	  if ( !fold_area_file( tarea, tarea->filename, TRUE ) )
+	  {
+	    if ( !argstr.empty() )
+	    {
+	      STR_DISPOSE( tarea->name );
+	      tarea->name = old_name;
+	    }
+	    send_to_char( "Area installation failed.\n", ch );
+	    return;
+	  }
+	  if ( !argstr.empty() )
+	    STR_DISPOSE( old_name );
 
 	  /* Remove from prototype area list */
 	  UNLINK( tarea, first_build, last_build, next, prev );
@@ -7528,13 +7893,13 @@ RESET_DATA *parse_reset( AREA_DATA *tarea, const std::string& argument, CHAR_DAT
 
 	if ( !str_cmp( arg1, "hide" ) )
 	{
-	    if ( !arg2.empty() && !get_obj_index(val1) )
+	    if ( arg2.empty() )
+		val1 = 0;
+	    else if ( !get_obj_index(val1) )
 	    {
 		send_to_char( "Reset: HIDE: no such object\n", ch );
 		return NULL;
 	    }
-	    else
-		val1 = 0;
 	    extra = 1;
 	    val2 = 0;
 	    val3 = 0;
@@ -7547,7 +7912,7 @@ RESET_DATA *parse_reset( AREA_DATA *tarea, const std::string& argument, CHAR_DAT
 	    return NULL;
 	}
 	else
-	if ( val1 < 1 || val1 > 32767 )
+	if ( val1 < 1 || val1 > 2097152000 )
 	{
 	    send_to_char( "Reset: value out of range.\n", ch );
 	    return NULL;
@@ -7611,7 +7976,7 @@ RESET_DATA *parse_reset( AREA_DATA *tarea, const std::string& argument, CHAR_DAT
 	    }
 	    if ( !is_number(arg3) )
 		val2 = get_wearloc(arg3);
-	    if ( val2 < 0 || val2 >= MAX_WEAR )
+	    if ( !is_valid_wear_location( val2 ) )
 	    {
 		send_to_char( "Reset: EQUIP: invalid wear location\n", ch );
 		return NULL;
@@ -7705,7 +8070,7 @@ RESET_DATA *parse_reset( AREA_DATA *tarea, const std::string& argument, CHAR_DAT
 		argstr = one_argument( argstr, arg4 );
 		value = get_trapflag( arg4 );
 		if ( value >= 0 && value < 32 )
-		    SET_BIT( extra, 1 << value );
+		    SET_BIT( extra, 1U << value );
 		else
 		{
 		    send_to_char( "Reset: TRAP: bad flag\n", ch );
@@ -8166,10 +8531,10 @@ void do_aset( CHAR_DATA *ch, char *argument )
 	     ch_printf( ch, "Unknown flag: %s\n", arg3.c_str() );
 	   else
 	   {
-           if ( IS_SET( tarea->flags, 1 << value ) )
-	         REMOVE_BIT( tarea->flags, 1 << value );
+           if ( IS_SET( tarea->flags, 1U << value ) )
+	         REMOVE_BIT( tarea->flags, 1U << value );
 	       else
-	         SET_BIT( tarea->flags, 1 << value );
+	         SET_BIT( tarea->flags, 1U << value );
 	   }
         }
         return;
@@ -8352,9 +8717,9 @@ void do_mlist( CHAR_DATA *ch, char *argument )
 
 void mpedit( CHAR_DATA *ch, MPROG_DATA *mprg, int mptype, std::string& argument )
 {
-	if ( mptype != -1 )
+	if ( mptype >= 0 && mptype < 32 )
 	{
-	  mprg->type = 1 << mptype;
+	  mprg->type = static_cast<int>(1U << mptype);
 	  if ( mprg->arglist )
 	    STRFREE( mprg->arglist );
 	  mprg->arglist = STRALLOC( argument );
@@ -8387,7 +8752,7 @@ void do_mpedit( CHAR_DATA *ch, char *argument )
 	return;    
     }
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
 	send_to_char( "You have no descriptor\n", ch );
 	return;
@@ -8404,7 +8769,7 @@ void do_mpedit( CHAR_DATA *ch, char *argument )
 	  if ( !ch->dest_buf )
 	  {
 		send_to_char( "Fatal error: report to Thoric.\n", ch );
-		bug( "do_mpedit: sub_mprog_edit: NULL ch->dest_buf", 0 );
+		bug( "do_mpedit: sub_mprog_edit: NULL ch->dest_buf" );
 		ch->substate = SUB_NONE;
 		return;
 	  }
@@ -8577,6 +8942,7 @@ void do_mpedit( CHAR_DATA *ch, char *argument )
 		break;
 	   }
 	}
+	invalidate_mprog_editors( mprg_next );
 	STRFREE( mprg_next->arglist );
 	STRFREE( mprg_next->comlist );
 	DISPOSE( mprg_next );
@@ -8608,7 +8974,7 @@ void do_mpedit( CHAR_DATA *ch, char *argument )
 	if ( value == 1 )
 	{
 	   CREATE( mprg, MPROG_DATA, 1 );
-	   victim->pIndexData->progtypes |= ( 1 << mptype );
+	   victim->pIndexData->progtypes |= static_cast<int>( 1U << mptype );
 	   mpedit( ch, mprg, mptype, argstr );
 	   mprg->next = mprog;
 	   victim->pIndexData->mudprogs = mprg;
@@ -8620,7 +8986,7 @@ void do_mpedit( CHAR_DATA *ch, char *argument )
 	   if ( ++cnt == value && mprg->next )
 	   {
 		CREATE( mprg_next, MPROG_DATA, 1 );
-		victim->pIndexData->progtypes |= ( 1 << mptype );
+		victim->pIndexData->progtypes |= static_cast<int>( 1U << mptype );
 		mpedit( ch, mprg_next, mptype, argstr );
 		mprg_next->next = mprg->next;
 		mprg->next	= mprg_next;
@@ -8634,7 +9000,7 @@ void do_mpedit( CHAR_DATA *ch, char *argument )
     if ( !str_cmp( arg2, "add" ) )
     {
 	mptype = get_mpflag( arg3 );
-	if ( mptype == -1 )
+	if ( mptype < 0 || mptype >= 32 )
 	{
 	   send_to_char( "Unknown program type.\n", ch );
 	   return;
@@ -8646,7 +9012,7 @@ void do_mpedit( CHAR_DATA *ch, char *argument )
 	  mprog->next			= mprg;
 	else
 	  victim->pIndexData->mudprogs	= mprg;
-	victim->pIndexData->progtypes	|= ( 1 << mptype );
+	victim->pIndexData->progtypes	|= static_cast<int>( 1U << mptype );
 	mpedit( ch, mprg, mptype, argstr );
 	mprg->next = NULL;
 	return;
@@ -8672,7 +9038,7 @@ void do_opedit( CHAR_DATA *ch, char *argument )
 	return;    
     }
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
 	send_to_char( "You have no descriptor\n", ch );
 	return;
@@ -8689,7 +9055,7 @@ void do_opedit( CHAR_DATA *ch, char *argument )
 	  if ( !ch->dest_buf )
 	  {
 		send_to_char( "Fatal error: report to Thoric.\n", ch );
-		bug( "do_opedit: sub_oprog_edit: NULL ch->dest_buf", 0 );
+		bug( "do_opedit: sub_oprog_edit: NULL ch->dest_buf" );
 		ch->substate = SUB_NONE;
 		return;
 	  }
@@ -8859,6 +9225,7 @@ void do_opedit( CHAR_DATA *ch, char *argument )
 		break;
 	   }
 	}
+	invalidate_mprog_editors( mprg_next );
 	STRFREE( mprg_next->arglist );
 	STRFREE( mprg_next->comlist );
 	DISPOSE( mprg_next );
@@ -8890,7 +9257,7 @@ void do_opedit( CHAR_DATA *ch, char *argument )
 	if ( value == 1 )
 	{
 	   CREATE( mprg, MPROG_DATA, 1 );
-	   obj->pIndexData->progtypes	|= ( 1 << mptype );
+	   obj->pIndexData->progtypes	|= static_cast<int>( 1U << mptype );
 	   mpedit( ch, mprg, mptype, argstr );
 	   mprg->next = mprog;
 	   obj->pIndexData->mudprogs = mprg;
@@ -8902,7 +9269,7 @@ void do_opedit( CHAR_DATA *ch, char *argument )
 	   if ( ++cnt == value && mprg->next )
 	   {
 		CREATE( mprg_next, MPROG_DATA, 1 );
-		obj->pIndexData->progtypes |= ( 1 << mptype );
+		obj->pIndexData->progtypes |= static_cast<int>( 1U << mptype );
 		mpedit( ch, mprg_next, mptype, argstr );
 		mprg_next->next = mprg->next;
 		mprg->next	= mprg_next;
@@ -8916,7 +9283,7 @@ void do_opedit( CHAR_DATA *ch, char *argument )
     if ( !str_cmp( arg2, "add" ) )
     {
 	mptype = get_mpflag( arg3 );
-	if ( mptype == -1 )
+	if ( mptype < 0 || mptype >= 32 )
 	{
 	   send_to_char( "Unknown program type.\n", ch );
 	   return;
@@ -8928,7 +9295,7 @@ void do_opedit( CHAR_DATA *ch, char *argument )
 	  mprog->next			 = mprg;
 	else
 	  obj->pIndexData->mudprogs	 = mprg;
-	obj->pIndexData->progtypes	|= ( 1 << mptype );
+	obj->pIndexData->progtypes	|= static_cast<int>( 1U << mptype );
 	mpedit( ch, mprg, mptype, argstr );
 	mprg->next = NULL;
 	return;
@@ -8944,9 +9311,9 @@ void do_opedit( CHAR_DATA *ch, char *argument )
  */
 void rpedit( CHAR_DATA *ch, MPROG_DATA *mprg, int mptype, std::string& argument )
 {
-	if ( mptype != -1 )
+	if ( mptype >= 0 && mptype < 32 )
 	{
-	  mprg->type = 1 << mptype;
+	  mprg->type = static_cast<int>( 1U << mptype );
 	  if ( mprg->arglist )
 	    STRFREE( mprg->arglist );
 	  mprg->arglist = STRALLOC( argument );
@@ -8974,7 +9341,7 @@ void do_rpedit( CHAR_DATA *ch, char *argument )
 	return;    
     }
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
 	send_to_char( "You have no descriptor\n", ch );
 	return;
@@ -8991,7 +9358,7 @@ void do_rpedit( CHAR_DATA *ch, char *argument )
 	  if ( !ch->dest_buf )
 	  {
 		send_to_char( "Fatal error: report to Thoric.\n", ch );
-		bug( "do_opedit: sub_oprog_edit: NULL ch->dest_buf", 0 );
+		bug( "do_opedit: sub_oprog_edit: NULL ch->dest_buf" );
 		ch->substate = SUB_NONE;
 		return;
 	  }
@@ -9137,6 +9504,7 @@ void do_rpedit( CHAR_DATA *ch, char *argument )
 		break;
 	   }
 	}
+	invalidate_mprog_editors( mprg_next );
 	STRFREE( mprg_next->arglist );
 	STRFREE( mprg_next->comlist );
 	DISPOSE( mprg_next );
@@ -9154,7 +9522,7 @@ void do_rpedit( CHAR_DATA *ch, char *argument )
 	   return;
 	}
 	argstr = one_argument( argstr, arg3 );
-	mptype = get_mpflag( arg2 );
+	mptype = get_mpflag( arg3 );
 	if ( mptype == -1 )
 	{
 	   send_to_char( "Unknown program type.\n", ch );
@@ -9168,7 +9536,7 @@ void do_rpedit( CHAR_DATA *ch, char *argument )
 	if ( value == 1 )
 	{
 	   CREATE( mprg, MPROG_DATA, 1 );
-	   ch->in_room->progtypes |= ( 1 << mptype );
+	   ch->in_room->progtypes |= static_cast<int>( 1U << mptype );
 	   mpedit( ch, mprg, mptype, argstr );
 	   mprg->next = mprog;
 	   ch->in_room->mudprogs = mprg;
@@ -9180,7 +9548,7 @@ void do_rpedit( CHAR_DATA *ch, char *argument )
 	   if ( ++cnt == value && mprg->next )
 	   {
 		CREATE( mprg_next, MPROG_DATA, 1 );
-		ch->in_room->progtypes |= ( 1 << mptype );
+		ch->in_room->progtypes |= static_cast<int>( 1U << mptype );
 		mpedit( ch, mprg_next, mptype, argstr );
 		mprg_next->next = mprg->next;
 		mprg->next	= mprg_next;
@@ -9194,7 +9562,7 @@ void do_rpedit( CHAR_DATA *ch, char *argument )
     if ( !str_cmp( arg1, "add" ) )
     {
 	mptype = get_mpflag( arg2 );
-	if ( mptype == -1 )
+	if ( mptype < 0 || mptype >= 32 )
 	{
 	   send_to_char( "Unknown program type.\n", ch );
 	   return;
@@ -9206,7 +9574,7 @@ void do_rpedit( CHAR_DATA *ch, char *argument )
 	  mprog->next		= mprg;
 	else
 	  ch->in_room->mudprogs	= mprg;
-	ch->in_room->progtypes |= ( 1 << mptype );
+	ch->in_room->progtypes |= static_cast<int>( 1U << mptype );
 	mpedit( ch, mprg, mptype, argstr );
 	mprg->next = NULL;
 	return;
@@ -9263,13 +9631,6 @@ void do_rdelete( CHAR_DATA *ch, char *argument )
     send_to_char( "Room deleted.\n", ch );
     return;
 }
-void do_odelete( CHAR_DATA *ch, char *argument )
-{
-}
-void do_mdelete( CHAR_DATA *ch, char *argument )
-{
-}
-
 /* Is valid vnum checks to make sure an area has the valid vnum for any type
    types: 0=room, 1=obj, 2=mob                     -->Keberus 12/03/08 -DV added 3-14-26  */
 bool is_valid_vnum( int vnum, short type )
@@ -9390,7 +9751,8 @@ void do_alinks( CHAR_DATA* ch,  char* argument )
          rev = TRUE, detail = 1;
    }
    ch_printf( ch, "&wListing all links from &W%s &wto &W%s&w...\r\n\r\n",
-              rev ? "&wthe world" : area->name, rev ? area->name : "&wthe world" );
+              rev ? "&wthe world" : (target->name ? target->name : "(unnamed)"),
+              rev ? (target->name ? target->name : "(unnamed)") : "&wthe world" );
 
    fmask.reset();
    BV_SET_BIT( fmask, ROOM_NO_MOB );
@@ -9414,6 +9776,8 @@ void do_alinks( CHAR_DATA* ch,  char* argument )
          ex_found = FALSE;
          for( rexit = room->first_exit; rexit; rexit = rexit->next )
          {
+            if( !rexit->to_room || !rexit->to_room->area )
+               continue;
             if( rev ? rexit->to_room->area == target : rexit->to_room->area != target )
             {
                /*
@@ -9426,18 +9790,21 @@ void do_alinks( CHAR_DATA* ch,  char* argument )
                    * print room's data only once, the same with area names 
                    */
                   if( !rm_found && rev )
-                     ch_printf( ch, "&W%s &c- &W%s\r\n\r\n", area->filename, area->name );
-                  ch_printf( ch, "  &G%d &c- &w%s", room->vnum, room->name );
+                     ch_printf( ch, "&W%s &c- &W%s\r\n\r\n",
+                                area->filename ? area->filename : "(unknown)",
+                                area->name ? area->name : "(unnamed)" );
+                  ch_printf( ch, "  &G%d &c- &w%s", room->vnum, room->name ? room->name : "(unnamed)" );
                   {
-                     for( size_t i = 0; i < room->room_flags.size(); i++ )
-						if (fmask.test(i) && room->room_flags.test(i))
-							dummy.set(i);
-//                        dummy.bits[i] = room->room_flags.bits[i] & fmask.bits[i];
+                     dummy.reset();
+                     size_t max_bits = std::min(fmask.size(), room->room_flags.size());
+                     for( size_t i = 0; i < max_bits; i++ )
+                        if (fmask.test(i) && room->room_flags.test(i))
+                           dummy.set(i);
                      ch_printf( ch, " &c- &O%s", bitset_to_string( dummy, r_flags ).c_str() );
                   }
                   send_to_char( "\r\n", ch );
                }
-               dnum = UMIN( rexit->vdir, 10 );
+               dnum = URANGE( 0, rexit->vdir, 10 );
                if( detail == 0 )
                   ch_printf( ch, "%s&C%s:&g%d&O%s%s%s", ex_found ? " " : "    ", dirs[dnum], rexit->vnum,
                              "", rexit->key <= 0 ? "" : "k",
@@ -9446,7 +9813,8 @@ void do_alinks( CHAR_DATA* ch,  char* argument )
                {
                   ch_printf( ch, "    &C%-2s&c:&g%d&O%s &c- %s%s", dirs[dnum], rexit->vnum,
                              "", rev ? "&w" : "&W",
-                             rev ? rexit->to_room->name : rexit->to_room->area->name );
+                             rev ? (rexit->to_room->name ? rexit->to_room->name : "(unnamed)")
+                                 : (rexit->to_room->area->name ? rexit->to_room->area->name : "(no area)") );
                   if( rexit->exit_info )
                      ch_printf( ch, " &c- &O%s", flag_string( rexit->exit_info, (char* const*)(ex_flags) ) );
                   if( rexit->key > 0 )
@@ -9456,7 +9824,9 @@ void do_alinks( CHAR_DATA* ch,  char* argument )
                else
                   ch_printf( ch, "    &C%-2s&c:&g%d&O%s%s%s &c- &W%s &c- &w%s\r\n", dirs[dnum], rexit->vnum,
                              "", rexit->key <= 0 ? "" : "k",
-                             rexit->exit_info ? "f" : "", rexit->to_room->area->name, rexit->to_room->name );
+                             rexit->exit_info ? "f" : "",
+                             rexit->to_room->area->name ? rexit->to_room->area->name : "(no area)",
+                             rexit->to_room->name ? rexit->to_room->name : "(unnamed)" );
                ex_found = TRUE;
             }
          }

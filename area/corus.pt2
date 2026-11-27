@@ -340,7 +340,7 @@ mpat 10299 drop all
 mpat 10299 mppurge
 ~
 > act_prog Locke.~
-if ovnuminv(24611) >= 1
+if rand(0)
 nod $n
 say This one has eluded us for a while now.  Thank you. 
 mpwithdraw 5000
@@ -525,7 +525,7 @@ say Then someone else will.
 shrug
 ~
 > give_prog diskstolen~
-if ovnuminv(10598) >= 1
+if rand(0)
 grin
 thank $n
 mpwithdraw 3000
@@ -608,7 +608,7 @@ A Personal Floatation Device could save you from drowning.~
 0 0 0 0
 1 0 0
 A
-26 2097152
+26 21
 #10205
 lucky coin~
 lucky coin~
@@ -657,7 +657,7 @@ A scuba mask could help out in the ocean or a pool.~
 0 0 0 10
 1 200 20
 A
-26 -2147483648
+26 31
 #10210
 package to captain harlef~
 a package to captain harlef~
@@ -788,6 +788,27 @@ Mordecai is looking really hard for this broken lightsaber.~
 
 
 #ROOMS
+#10197
+Kuat Shipyard Ferry Cockpit~
+Flight instruments show the ferry's approach to Kuat. A short passage
+leads south to the passenger cabin.
+~
+0 536870920 0
+D2
+~
+~
+0 -1 10198
+S
+#10198
+Kuat Shipyard Ferry Passenger Cabin~
+Rows of seats face the boarding hatch. The cockpit is to the north.
+~
+0 536870920 0
+D0
+~
+~
+0 -1 10197
+S
 #10200
 Spaceport Speeder Rentals~
 This small speeder rental lot looks like it loses a lot more money than it
@@ -1657,7 +1678,7 @@ once you leave your ship. The ugly backsides of buildings enclose the area
 and almost give a sensation of claustrophobia.  The Imperial City is to
 the south. 
 ~
-0 0 1
+0 16 1
 D2
 ~
 ~

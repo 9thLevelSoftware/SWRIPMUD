@@ -191,7 +191,6 @@ Do not attempt to kill him, for you shall surely die.
 0 0 0 0 1059840 0 0 0
 0 0 0 0 0 0 0 0
 > all_greet_prog 100~
-mpadvance $n 2
 mpoload 10423
 mpat 10323 close n
 mpat 10323 lock n
@@ -790,6 +789,22 @@ A proottype bowcaster is here~
 ~
 5 0 8193
 0 0 0 6
+1 0 0
+#10432
+prototype forcepike~
+a prototype forcepike~
+A prototype forcepike is here.~
+~
+5 0 8193
+0 0 0 11
+1 0 0
+#10433
+prototype disguise~
+a prototype disguise~
+A prototype disguise is here.~
+~
+92 0 1
+0 0 0 0
 1 0 0
 #10487
 carsanum spice~

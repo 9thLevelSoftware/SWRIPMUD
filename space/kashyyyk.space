@@ -1,0 +1,16 @@
+#SPACE
+Name         Kashyyyk~
+Filename     kashyyyk.space~
+Type         1
+Locationa    Rwookrrorro Landing Pad~
+Doca         28613
+Locationb    Secondary Landing Pad~
+Docb         28639
+Locationc    ~
+Docc         0
+Xpos         -8762
+Ypos         -123
+Zpos         -3702
+End
+
+#END

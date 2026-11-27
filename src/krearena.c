@@ -33,7 +33,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <charconv>
 #include "mud.h"
+#include "bet.h"
 
 #define PREP_START  42   /* vnum of first prep room */
 #define PREP_END    43   /* vnum of last prep room */
@@ -91,92 +93,76 @@ int barena = 0;
 int num_gladiators = 0;
 
 
-extern int parsebet (const int currentbet, const std::string& s);
+void arena_cleanup_char(CHAR_DATA *ch);
 
 void do_bet(CHAR_DATA *ch, char *argument)
- {
-   std::string arg;
-   std::string buf;
-   std::string buf1;
-   std::string argstr = argument;
-   int newbet;
-       
-   argstr = one_argument(argstr,arg);
-   one_argument(argstr,buf1);
-           
-   if (IS_NPC(ch))
-   {
-      send_to_char("Mobs cant bet on the arena.\n",ch);
-      return;
-   }
+{
+    if (!ch || IS_NPC(ch))
+        return;
+    if (!ch->in_room || IN_ARENA(ch))
+    {
+        send_to_char("Arena players can not make bets.\n", ch);
+        return;
+    }
+    if (GET_BET_AMT(ch) > 0)
+    {
+        send_to_char("Sorry you have already bet.\n", ch);
+        return;
+    }
+    if (!in_start_arena && !ppl_challenged)
+    {
+        send_to_char("Betting is closed until the next arena opens.\n", ch);
+        return;
+    }
 
-   if (BV_IS_SET(ch->in_room->room_flags, ROOM_ARENA))
-   {
-      send_to_char("Arena players can not make bets.",ch);
-      return;
-   }
-                    
-   if(arg.empty())
-   {
-      send_to_char("Usage: bet <player> <amt>\n",ch);
-      return;
-   }
-   else if(!in_start_arena && !ppl_challenged)
-   {
-      send_to_char("Sorry the arena is closed, wait until it opens up to bet.\n", ch);
-      return;
-   }
-   else if(num_gladiators > 0 && !in_start_arena)
-   {
-      send_to_char("Sorry Arena has already started, no more bets.\n", ch);
-      return;
-   }
-   else if (!(ch->betted_on = get_char_world(ch, arg)))
-      send_to_char("No such person exists in the galaxy.", ch);
-   else if (ch->betted_on == ch)
-      send_to_char("That doesn't make much sense, does it?\n", ch);
-   else if(ch->in_room && !(BV_IS_SET(ch->betted_on->in_room->room_flags, ROOM_ARENA)))
-      send_to_char("Sorry that person is not in the arena.\n", ch);
-   else
-      {
-         if(GET_BET_AMT(ch) > 0)
-         {
-           send_to_char("Sorry you have already bet.\n", ch);
-           return;
-         }
-         GET_BETTED_ON(ch) = ch->betted_on;
-         newbet=parsebet(bet_pot,buf1); 
-         if(newbet == 0)
-         {
-            send_to_char("Bet some gold why dont you!\n", ch);
-            return;
-         }
-         if (newbet > ch->gold)
-         {
-            send_to_char("You don't have that much money!\n",ch);
-            return;
-         }
-         if(newbet > ARENA_MAXBET)
-         {
-            send_to_char("Sorry the house will not accept that much.\n", ch);
-            return;
-         }
-       
-         ch->gold -= newbet;
-         arena_pot += (newbet / 2);
-         bet_pot += (newbet / 2);
-         GET_BET_AMT(ch) = newbet;
-         buf = "You place " + std::to_string(newbet) + " credits on " + ch->betted_on->name + ".\n";
-         send_to_char(buf, ch);
-         buf = std::string(ch->name) + " has placed " + std::to_string(newbet) + " credits on " + std::string(ch->betted_on->name) + ".";
-         to_channel(buf,CHANNEL_ARENA,"&RArena&W",5);
-  }
+    std::string name, amount;
+    const std::string rest = one_argument(argument ? argument : "", name);
+    if (name.empty() || !one_argument(rest, amount).empty() || amount.empty())
+    {
+        send_to_char("Usage: bet <player> <amt>\n", ch);
+        return;
+    }
+
+    CHAR_DATA *target = get_char_world(ch, name);
+    if (!target || target == ch || IS_NPC(target) || !IN_ARENA(target))
+    {
+        send_to_char("Sorry that person is not an arena player.\n", ch);
+        return;
+    }
+
+    const int wager = parsebet(bet_pot, amount);
+    if (wager <= 0)
+    {
+        send_to_char("Bet some gold why dont you!\n", ch);
+        return;
+    }
+    if (wager > ch->gold)
+    {
+        send_to_char("You don't have that much money!\n", ch);
+        return;
+    }
+    const int contribution = wager / 2;
+    if (wager > ARENA_MAXBET || contribution > INT_MAX - arena_pot || contribution > INT_MAX - bet_pot)
+    {
+        send_to_char("Sorry the house will not accept that much.\n", ch);
+        return;
+    }
+
+    GET_BETTED_ON(ch) = target;
+    GET_BET_AMT(ch) = wager;
+    ch->gold -= wager;
+    arena_pot += contribution;
+    bet_pot += contribution;
+    ch_printf(ch, "You place %d credits on %s.\n", wager, target->name);
+    to_channel(str_printf("%s has placed %d credits on %s.", ch->name, wager, target->name),
+               CHANNEL_ARENA, "&RArena&W", 5);
 }
 
 void do_arena(CHAR_DATA *ch, char *argument)
 {
  std::string buf;
  struct struct_gladiator *gladiator_node;
+ (void)argument;
  if (IS_NPC(ch))
  {
    send_to_char("Mobs cant play in the arena.\n",ch);
@@ -202,6 +188,9 @@ void do_arena(CHAR_DATA *ch, char *argument)
     return;
  } 
  
+ if( !ch->in_room )
+    return;
+
  if(BV_IS_SET(ch->in_room->room_flags, ROOM_ARENA))
  { 
     send_to_char("You are in the arena already\n",ch);
@@ -265,9 +254,15 @@ void do_marena(CHAR_DATA *ch, char *argument)
    return;
  }
 
- if(BV_IS_SET(ch->in_room->room_flags, ROOM_ARENA))
+ if ( !mob->in_room )
  {
-    send_to_char("You are in the arena already\n",ch);
+    send_to_char( "They aren't in a room.\n", ch );
+    return;
+ }
+
+ if ( IN_ARENA(mob) )
+ {
+    send_to_char( "That mobile is already in the arena.\n", ch );
     return;
  }
  else
@@ -301,73 +296,52 @@ void do_marena(CHAR_DATA *ch, char *argument)
 
 void do_chaos(CHAR_DATA *ch, char *argument)
 {
-  std::string lolimit;
-  std::string hilimit;
-  std::string start_delay;
-  std::string length;
-  std::string buf;
-  std::string purse;          
-  std::string argstr = argument;
-  /*Usage: chaos lo hi start_delay cost/lev length*/
-        
-  argstr = one_argument(argstr, lolimit);
-  lo_lim = strtoi(lolimit);
-  argstr = one_argument(argstr, hilimit);
-  hi_lim = strtoi(hilimit);
-  argstr = one_argument(argstr, start_delay);
-  start_time = strtoi(start_delay);
-  argstr = one_argument(argstr, length);
-  game_length = strtoi(length);
-  argstr = one_argument(argstr, purse);
-  arena_pot = strtoi(purse);
-                                 
-  buf = str_printf("LowLim %d HiLim %d Delay %d Length %d\n", lo_lim,
-         hi_lim, start_time, game_length);
-  send_to_char(buf,ch);
-      
-  if(hi_lim >= LEVEL_IMPLEMENTOR +1)
-  {
-     send_to_char("Please choose a hi_lim under the Imps level\n", ch);
-     return;
-  }
-  
-  if(lolimit.empty() || hilimit.empty() || start_delay.empty() || length.empty())
-  {
-    send_to_char("Usage: chaos lo hi start_delay length [purse]", ch);
-    return;
-  }
+    if (!ch)
+        return;
+    if (num_gladiators > 0 || in_start_arena || ppl_challenged || time_left_in_game > 0)
+    {
+        send_to_char("The arena is already in use!\n", ch);
+        return;
+    }
 
-  if (lo_lim >= hi_lim)
-  {
-    send_to_char("Ya that just might be smart.\n", ch);
-    return;
-  }
-                              
-  if ((lo_lim < 0 || hi_lim < 0 || game_length < 0))
-  {
-    send_to_char("I like positive numbers thank you.\n", ch);
-    return;
-  }
-                                            
-  if ( start_time <= 0)
-  {
-    send_to_char("Lets at least give them a chance to enter!\n", ch);
-    return;
-  }
-  
-  if (num_gladiators > 0 || in_start_arena) {
-    send_to_char("The arena is already in use!\n",ch);
-    return;
-  }
-  num_gladiators = 0;
-  in_start_arena = 1;
-  time_to_start = start_time;
-  time_left_in_game =0;
-  bet_pot = 0;
-  barena = 1;
-  start_arena(ch->game);
-                                   
+    std::string lower, upper, delay, length, purse;
+    std::string rest = one_argument(argument ? argument : "", lower);
+    rest = one_argument(rest, upper);
+    rest = one_argument(rest, delay);
+    rest = one_argument(rest, length);
+    rest = one_argument(rest, purse);
+
+    int low, high, hours, duration, jackpot = 0;
+    auto parse = [](const std::string &value, int &parsed) {
+        const char *end = value.data() + value.size();
+        const auto result = std::from_chars(value.data(), end, parsed);
+        return result.ec == std::errc{} && result.ptr == end;
+    };
+    if (!rest.empty() || !parse(lower, low) || !parse(upper, high) || !parse(delay, hours)
+        || !parse(length, duration) || (!purse.empty() && !parse(purse, jackpot)))
+    {
+        send_to_char("Usage: chaos lo hi start_delay length [purse]\n", ch);
+        return;
+    }
+    if (low < 0 || high > LEVEL_IMPLEMENTOR || low >= high || hours <= 0 || duration <= 0 || jackpot < 0)
+    {
+        send_to_char("Choose an increasing level range, positive delay and length, and a nonnegative purse.\n", ch);
+        return;
+    }
+
+    lo_lim = low;
+    hi_lim = high;
+    start_time = time_to_start = hours;
+    game_length = duration;
+    arena_pot = jackpot;
+    in_start_arena = 1;
+    time_left_in_game = 0;
+    bet_pot = 0;
+    barena = 1;
+    ch_printf(ch, "LowLim %d HiLim %d Delay %d Length %d\n", low, high, hours, duration);
+    start_arena(ch->game);
 }
+
 // Modernized s printf - AI/DV 3-13-26
 void start_arena(GameContext *game)
 {
@@ -385,9 +359,6 @@ void start_arena(GameContext *game)
         }
         else
         {
-            // Arena announcement header
-            to_channel(buf1, CHANNEL_ARENA, "&RArena&W", lo_lim);
-
             // Killing Fields message
             buf1 = str_printf("&WThe Killing Fields are open to levels &R%d &Wthru &R%d\n", lo_lim, hi_lim);
             buf2 = "The killing fields are open.\n";
@@ -397,7 +368,7 @@ void start_arena(GameContext *game)
             if (time_to_start > 1)
             {
                 buf1 += str_printf("%d &Whours to start\n", time_to_start);
-                buf2 += str_printf("&R%d &Whour to start\n", time_to_start);
+                buf2 += str_printf("&R%d &Whours to start\n", time_to_start);
             }
             else
             {
@@ -409,18 +380,18 @@ void start_arena(GameContext *game)
             buf1 += "Type &Rarena &Wto enter.\n";
             buf2 += "Place your bets!!!\n";
 
+            to_channel(buf1, CHANNEL_ARENA, "&RArena&W", lo_lim);
             to_channel(buf2, CHANNEL_ARENA, "&RArena&W", 5);
 
             time_to_start--;
         }
     }
-    else if (!num_gladiators)
+    else
     {
         if (time_to_start == 0)
         {
             ppl_challenged = 0;
             show_jack_pot(game);
-            num_gladiators = 2;
             time_left_in_game = 5;
             start_game(game);
         }
@@ -464,22 +435,20 @@ void do_game(GameContext *game)
     ppl_challenged = 0;
     find_game_winner(game);
     num_gladiators = 0;
+    time_left_in_game = 0;
+    return;
   }
   else if(!in_start_arena && time_left_in_game == 0)
   {
     do_end_game(game);
+    return;
   }
   else if(!in_start_arena  && num_gladiators == 0)
   {
     num_gladiators = 0;
     ppl_challenged = 0;
     silent_end(game);
-  }
-  else if(!in_start_arena && time_left_in_game % 5)
-  {
-     buf = str_printf("With %d hours left in the game there are %d players left.",
-             time_left_in_game, num_gladiators);
-     to_channel(buf,CHANNEL_ARENA,"&RArena&W",5);
+    return;
   }
   else if(!in_start_arena && time_left_in_game == 1)
   {
@@ -487,7 +456,7 @@ void do_game(GameContext *game)
                   num_gladiators);
     to_channel(buf,CHANNEL_ARENA,"&RArena&W",5);
   }
-  else if(!in_start_arena && time_left_in_game <= 4)
+  else if(!in_start_arena && (time_left_in_game <= 4 || time_left_in_game % 5))
   {
     buf = str_printf("With %d hours left in the game there are %d players left.",
             time_left_in_game, num_gladiators);
@@ -499,6 +468,13 @@ void do_game(GameContext *game)
     if (g->ch && g->place == 0)
       count++;
   num_gladiators = count;
+}
+
+static int award_arena_credits(CHAR_DATA *ch, int amount)
+{
+  const int award = std::min<long long>(amount, static_cast<long long>(INT_MAX) - ch->gold);
+  ch->gold += award;
+  return award;
 }
 
 void find_game_winner(GameContext *game)
@@ -516,6 +492,8 @@ void find_game_winner(GameContext *game)
     if (i->in_room && BV_IS_SET(i->in_room->room_flags,ROOM_ARENA) && !IS_IMMORTAL(i) &&
 	i->hit > 0 && g->place == 0) {
       remove_from_arena(i);
+      if (char_died(i))
+        break;
       if(time_left_in_game == 1) {
                buf = str_printf("After 1 hour of battle %s is declared the winner",i->name);
                to_channel(buf,CHANNEL_ARENA,"&RArena&W",5);
@@ -525,31 +503,29 @@ void find_game_winner(GameContext *game)
                to_channel(buf,CHANNEL_ARENA,"&RArena&W",5);
       }
 
-      buf = str_printf("You have been awarded %d credits for winning the arena\n",
-             (arena_pot/2));
-      i->gold += (arena_pot/2);
+      const int award = award_arena_credits(i, arena_pot / 2);
+      buf = str_printf("You have been awarded %d credits for winning the arena\n", award);
       send_to_char(buf, i);
-      bug("%s awarded %d credits for winning arena", i->name,
-              (arena_pot/2));
+      log_printf("%s awarded %d credits for winning arena", i->name, award);
       CREATE(fame_node, struct hall_of_fame_element, 1);
-      strncpy(fame_node->name, i->name, MAX_INPUT_LENGTH);
-      fame_node->name[MAX_INPUT_LENGTH] = '\0';
+      snprintf(fame_node->name, sizeof(fame_node->name), "%s", i->name ? i->name : "");
       fame_node->date = time(0);
-      fame_node->award = (arena_pot/2);
+      fame_node->award = award;
       fame_node->next = fame_list;
       fame_list = fame_node;
       write_fame_list(game);
       find_bet_winners(i);
-      reset_bets(game);
       ppl_challenged = 0;
+      break;
 
     } 
   }
+  reset_bets(game);
   g = gladiators;
   while(gladiators) {
      g=gladiators;
      gladiators=gladiators->next;
-     free(g);
+     DISPOSE(g);
   }
   gladiators = NULL;
 }
@@ -559,6 +535,7 @@ void show_jack_pot(GameContext *game)
   std::string buf1;
   std::string buf2;
   std::string buf3;    
+  (void)game;
   buf1 = "\nLets get ready to RUMBLE!!!!!!!!\n";
   buf2 = str_printf("%.40sThe jack pot for this arena is %.60d credits\n",
   buf1.c_str(), arena_pot);
@@ -586,7 +563,7 @@ void silent_end(GameContext *game)
   while(gladiators) {
      g=gladiators;
      gladiators=gladiators->next;
-     free(g);
+     DISPOSE(g);
   }
   gladiators = NULL;
 }
@@ -617,7 +594,7 @@ void do_end_game(GameContext *game)
      while(gladiators) {
        g=gladiators;
        gladiators=gladiators->next;
-       free(g);
+       DISPOSE(g);
      }
      gladiators = NULL;
 
@@ -630,6 +607,7 @@ void do_awho(CHAR_DATA *ch, char *argument)
   std::string buf;
   std::string buf2;
   int num=num_gladiators;
+  (void)argument;
           
   if(num==0 && ppl_challenged == 0)
   {
@@ -649,9 +627,7 @@ void do_awho(CHAR_DATA *ch, char *argument)
   send_to_char(buf, ch);
   send_to_char("&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B", ch);
   send_to_char("-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B-&W-&B\n", ch);
-  send_to_char(buf, ch);
 
- 
   for(g = gladiators; g; g=g->next)
     if (g->ch && g->place == 0) {
       buf2 = str_printf("&W%s\n", g->ch->name);
@@ -663,12 +639,13 @@ void do_awho(CHAR_DATA *ch, char *argument)
 void do_ahall(CHAR_DATA *ch, char *argument)
 {
   std::string site;
-  char *timestr;
 //char format[MAX_INPUT_LENGTH], format2[MAX_INPUT_LENGTH];
   struct hall_of_fame_element *fame_node;
       
   std::string buf;
   std::string buf2;
+
+  (void)argument;
           
   if (!fame_list)
   {
@@ -694,15 +671,17 @@ void do_ahall(CHAR_DATA *ch, char *argument)
      send_to_char(buf, ch);
      for (fame_node = fame_list; fame_node; fame_node = fame_node->next)
      {
-        if (fame_node->date)
+        struct tm tm_buf;
+        char datebuf[32];
+        if (fame_node->date &&
+            localtime_r(&(fame_node->date), &tm_buf) != NULL &&
+            strftime(datebuf, sizeof(datebuf), "%a %b %e", &tm_buf) > 0)
         {
-           timestr = asctime(localtime(&(fame_node->date)));
-           *(timestr + 10) = 0;
-           site = std::string(timestr);
+           site = datebuf;
         }
      else
         site = "Unknown";
-     buf = str_printf("&W%-25.25s  &R%-10.10s  &Y%-16d\n", fame_node->name, site, fame_node->award);
+     buf = str_printf("&W%-25.25s  &R%-10.10s  &Y%-16d\n", fame_node->name, site.c_str(), fame_node->award);
      send_to_char(buf, ch);
      }
      return;
@@ -711,22 +690,32 @@ void do_ahall(CHAR_DATA *ch, char *argument)
 void load_hall_of_fame(GameContext *game)
 {
   FILE *fl;
-  int date, award;
+  long date_val = 0;
+  int award = 0;
   char name[MAX_INPUT_LENGTH + 1];
   struct hall_of_fame_element *next_node;
-        
-  fame_list = 0;
+
+  (void)game;
+
+  while (fame_list)
+  {
+    struct hall_of_fame_element *old_node = fame_list;
+    fame_list = fame_list->next;
+    DISPOSE(old_node);
+  }
+  fame_list = NULL;
           
   if (!(fl = fopen(HALL_FAME_FILE, "r")))
   {
     perror("Unable to open hall of fame file");
     return;
   }
-  while (fscanf(fl, "%s %d %d", name, &date, &award) == 3)
+  static_assert(MAX_INPUT_LENGTH == 1024, "Update %1024s width in load_hall_of_fame");
+  while (fscanf(fl, "%1024s %ld %d", name, &date_val, &award) == 3)
   {
     CREATE(next_node, struct hall_of_fame_element, 1);
-    strncpy(next_node->name, name, MAX_INPUT_LENGTH);
-    next_node->date = date;
+    snprintf(next_node->name, sizeof(next_node->name), "%s", name);
+    next_node->date = static_cast<time_t>(date_val);
     next_node->award = award;
     next_node->next = fame_list;
     fame_list = next_node;
@@ -739,10 +728,11 @@ void load_hall_of_fame(GameContext *game)
 void write_fame_list(GameContext *game)
 {
   FILE *fl;
+  (void)game;
   
   if (!(fl = fopen(HALL_FAME_FILE, "w")))
   {
-     bug("Error writing _hall_of_fame_list", 0);
+     bug("Error writing _hall_of_fame_list");
      return;
   }
   write_one_fame_node(fl, fame_list);/* recursively write from end to start */
@@ -767,23 +757,31 @@ void find_bet_winners(CHAR_DATA *winner)
     
   std::string buf1;
       
+  std::vector<DESCRIPTOR_DATA *> targets;
   for (d = first_descriptor; d; d = d->next)
-    if (!d->connected)
-    {
-       wch = d->original ? d->original : d->character;
+  {
+    if (comm_desc_alive(d) && !d->connected)
+      targets.push_back(d);
+  }
 
-       if (wch == NULL)
-         continue;
+  for (DESCRIPTOR_DATA *td : targets)
+  {
+    if (!comm_desc_alive(td) || td->connected)
+      continue;
+    wch = td->original ? td->original : td->character;
+
+    if (wch == NULL)
+      continue;
        
-       if ((!IS_NPC(wch)) && (GET_BET_AMT(wch) > 0) && (GET_BETTED_ON(wch) == winner))
-       {
-          buf1 = str_printf("You have won %d credits on your bet.\n",(GET_BET_AMT(wch))*2);
-          send_to_char(buf1, wch);
-          wch->gold += GET_BET_AMT(wch)*2;
-          GET_BETTED_ON(wch) = NULL;
-          GET_BET_AMT(wch) = 0;
-       }
+    if ((!IS_NPC(wch)) && (GET_BET_AMT(wch) > 0) && (GET_BETTED_ON(wch) == winner))
+    {
+       const int award = award_arena_credits(wch, GET_BET_AMT(wch) * 2);
+       buf1 = str_printf("You have won %d credits on your bet.\n", award);
+       send_to_char(buf1, wch);
+       GET_BETTED_ON(wch) = NULL;
+       GET_BET_AMT(wch) = 0;
     }
+  }
 }
 
 void do_challenge(CHAR_DATA *ch, char *argument)
@@ -934,7 +932,11 @@ void do_accept(CHAR_DATA *ch, char *argument)
 {
   std::string buf;
   struct struct_gladiator *gladiator_node;        
-  if (num_gladiators>0)
+  (void)argument;
+  if (!ch || !ch->in_room)
+    return;
+
+  if (num_gladiators > 0 || in_start_arena)
   {
    send_to_char("Please wait until the current arena is closed before you accept.\n",ch);
    return;
@@ -950,13 +952,8 @@ void do_accept(CHAR_DATA *ch, char *argument)
     CHAR_DATA *dch;
     dch = ch->challenged;
 
-    if (!dch || !(dch->in_room) || !(dch->name) || (ch->name[0] == '\0'))
+    if (!dch || char_died(dch) || dch == ch || !(dch->in_room) || !(dch->name) || (dch->name[0] == '\0') || !(ch->name) || (ch->name[0] == '\0'))
       return;
-      
-    if ( dch->in_room == ch->in_room )
-    {
-      send_to_char("You must be in a different room as your challenger.\n",ch);
-    }
       
     if ( dch->in_room == ch->in_room )
     {
@@ -998,7 +995,7 @@ void do_accept(CHAR_DATA *ch, char *argument)
     time_left_in_game =0;
     arena_pot =0;
     bet_pot = 0;
-    num_gladiators=0;
+    num_gladiators = 2;
     start_arena(ch->game);
     return;
    }
@@ -1007,10 +1004,11 @@ void do_accept(CHAR_DATA *ch, char *argument)
 void do_decline(CHAR_DATA *ch, char *argument)
 {
  std::string buf;
+ (void)argument;
  
  if (ch->challenged)
  {
-   buf = str_printf("%s has DECLINED %ss challenge! WHAT A WUSS!!!\n",ch->name,ch->challenged->name);
+   buf = str_printf("%s has DECLINED %ss challenge! WHAT A WUSS!!!\n",ch->name,ch->challenged->name ? ch->challenged->name : "someone");
    to_channel(buf,CHANNEL_ARENA,"&RArena&W",5);
    ch->challenged=NULL;
    return;
@@ -1029,6 +1027,7 @@ void do_decline(CHAR_DATA *ch, char *argument)
 void reset_bets(GameContext *game)
 {
   CHAR_DATA *ch;
+  (void)game;
 
   for (ch = first_char; ch; ch = ch->next )
     {
@@ -1049,8 +1048,10 @@ void remove_from_arena(CHAR_DATA *ch)
   struct struct_gladiator *g;
   std::string buf;
   for(g = gladiators;g;g=g->next) {
-    if (g->ch == ch) {
+    if (g->ch == ch && g->place == 0) {
       g->place = num_gladiators;
+      const int place = g->place;
+      --num_gladiators;
       ch->hit = g->prev_hit;
       ch->mana = g->prev_mana;
       ch->move = g->prev_move;
@@ -1060,15 +1061,64 @@ void remove_from_arena(CHAR_DATA *ch)
       char_to_room(ch,get_room_index(ch->retran));
       gmcp_evt_char_vitals(ch);
       do_look(ch,"auto");
+      if (char_died(ch))
+        return;
       act(AT_YELLOW,"$n falls from the sky.", ch, NULL, NULL, TO_ROOM);
-      switch (g->place) {
+      if (char_died(ch))
+        return;
+      switch (place) {
         case 1: buf = str_printf("%s is out of the fight in 1st place.",ch->name); break;
         case 2: buf = str_printf("%s is out of the fight in 2nd place.",ch->name); break;
         case 3: buf = str_printf("%s is out of the fight in 3rd place.",ch->name); break;
-        default:buf = str_printf("%s is out of the fight in %dth place.",ch->name,g->place);
+        default:buf = str_printf("%s is out of the fight in %dth place.",ch->name,place);
       }
       to_channel(buf,CHANNEL_ARENA,"&RArena&W",5);
-      num_gladiators--;
+      return;
     }
   }
+}
+
+void arena_cleanup_char(CHAR_DATA *ch)
+{
+  struct struct_gladiator *g;
+  struct struct_gladiator *g_prev = NULL;
+  struct struct_gladiator *g_next;
+  CHAR_DATA *wch;
+
+  if (ch == NULL)
+    return;
+
+  for (g = gladiators; g; g = g_next)
+  {
+    g_next = g->next;
+    if (g->ch == ch)
+    {
+      if (g->place == 0 && num_gladiators > 0)
+        num_gladiators--;
+      if (g_prev == NULL)
+        gladiators = g_next;
+      else
+        g_prev->next = g_next;
+      DISPOSE(g);
+    }
+    else
+    {
+      g_prev = g;
+    }
+  }
+
+  for (wch = first_char; wch; wch = wch->next)
+  {
+    if (wch->challenged == ch)
+      wch->challenged = NULL;
+    if (GET_BETTED_ON(wch) == ch)
+    {
+      GET_BETTED_ON(wch) = NULL;
+      GET_BET_AMT(wch) = 0;
+    }
+  }
+
+  ch->challenged = NULL;
+  GET_BETTED_ON(ch) = NULL;
+  GET_BET_AMT(ch) = 0;
 }

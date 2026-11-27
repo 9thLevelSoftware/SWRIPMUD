@@ -27,8 +27,10 @@
 #include <cstdarg>
 #include <cstdio>   // for snprintf
 #include <cstddef>  // for size_t
+#include <array>
 #include <vector>
 #include <cstdint>
+#include <initializer_list>
 #include <algorithm>
 #include <bit>
 #include <string>
@@ -37,9 +39,12 @@
 #include <typeindex>
 #include <utility>
 #include <cstring>
+#include <cassert>
 
 
+#ifndef MCCP
 #define MCCP
+#endif
 
 #ifdef MCCP
 #include <zlib.h>
@@ -134,7 +139,6 @@ typedef struct	map_index_data		MAP_INDEX_DATA;   /* maps */
 typedef struct	map_data		MAP_DATA;   /* maps */
 typedef struct	room_index_data		ROOM_INDEX_DATA;
 typedef struct	shop_data		SHOP_DATA;
-typedef struct	repairshop_data		REPAIR_DATA;
 typedef struct	time_info_data		TIME_INFO_DATA;
 typedef struct	hour_min_sec		HOUR_MIN_SEC;
 typedef struct	weather_data		WEATHER_DATA;
@@ -201,38 +205,38 @@ typedef ch_ret	SPELL_FUN	args( ( int sn, int level, CHAR_DATA *ch, void *vo ) );
 #define DUR_CONV	23.333333333333333333333333
 #define HIDDEN_TILDE	'*'
 
-#define BV00		(1 <<  0)
-#define BV01		(1 <<  1)
-#define BV02		(1 <<  2)
-#define BV03		(1 <<  3)
-#define BV04		(1 <<  4)
-#define BV05		(1 <<  5)
-#define BV06		(1 <<  6)
-#define BV07		(1 <<  7)
-#define BV08		(1 <<  8)
-#define BV09		(1 <<  9)
-#define BV10		(1 << 10)
-#define BV11		(1 << 11)
-#define BV12		(1 << 12)
-#define BV13		(1 << 13)
-#define BV14		(1 << 14)
-#define BV15		(1 << 15)
-#define BV16		(1 << 16)
-#define BV17		(1 << 17)
-#define BV18		(1 << 18)
-#define BV19		(1 << 19)
-#define BV20		(1 << 20)
-#define BV21		(1 << 21)
-#define BV22		(1 << 22)
-#define BV23		(1 << 23)
-#define BV24		(1 << 24)
-#define BV25		(1 << 25)
-#define BV26		(1 << 26)
-#define BV27		(1 << 27)
-#define BV28		(1 << 28)
-#define BV29		(1 << 29)
-#define BV30		(1 << 30)
-#define BV31		(1 << 31)
+#define BV00		(1U <<  0)
+#define BV01		(1U <<  1)
+#define BV02		(1U <<  2)
+#define BV03		(1U <<  3)
+#define BV04		(1U <<  4)
+#define BV05		(1U <<  5)
+#define BV06		(1U <<  6)
+#define BV07		(1U <<  7)
+#define BV08		(1U <<  8)
+#define BV09		(1U <<  9)
+#define BV10		(1U << 10)
+#define BV11		(1U << 11)
+#define BV12		(1U << 12)
+#define BV13		(1U << 13)
+#define BV14		(1U << 14)
+#define BV15		(1U << 15)
+#define BV16		(1U << 16)
+#define BV17		(1U << 17)
+#define BV18		(1U << 18)
+#define BV19		(1U << 19)
+#define BV20		(1U << 20)
+#define BV21		(1U << 21)
+#define BV22		(1U << 22)
+#define BV23		(1U << 23)
+#define BV24		(1U << 24)
+#define BV25		(1U << 25)
+#define BV26		(1U << 26)
+#define BV27		(1U << 27)
+#define BV28		(1U << 28)
+#define BV29		(1U << 29)
+#define BV30		(1U << 30)
+#define BV31		(1U << 31)
 /* 32 USED! DO NOT ADD MORE! SB */
 
 struct flag_name
@@ -244,22 +248,38 @@ struct flag_name
 #define FLAG_TABLE_COUNT(x) (static_cast<int>(sizeof(x) / sizeof((x)[0])) - 1)
 
 extern  const   flag_name   obj_flag_table[];
+extern  const   size_t      obj_flag_table_count;
 extern const    flag_name   obj_attack_table[];
 
 inline const char* get_flag_name(const flag_name* table, int index, int count)
 {
-    if (!table || index < 0 || index >= count)
+    if (!table || index < 0 || count <= 0)
         return "none";
 
-    return table[index].name;
+    if (index < count)
+    {
+        for (int i = 0; i <= index && i < count && table[i].name != nullptr; ++i)
+        {
+            if (i == index && table[i].bit == static_cast<size_t>(index))
+                return table[i].name;
+        }
+    }
+
+    for (int i = 0; i < count && table[i].name != nullptr; ++i)
+    {
+        if (table[i].bit == static_cast<size_t>(index))
+            return table[i].name;
+    }
+
+    return "none";
 }
 
 inline const char* get_flag_name_sparse(const flag_name* table, int index, int count)
 {
-    if (!table || index < 0 || index >= count)
+    if (!table || index < 0 || count <= 0)
         return "none";
 
-    for (int i = 0; i < count; ++i)
+    for (int i = 0; i < count && table[i].name != nullptr; ++i)
     {
         if (table[i].bit == static_cast<size_t>(index))
             return table[i].name;
@@ -318,6 +338,7 @@ inline const char* get_flag_name_sparse(const flag_name* table, int index, int c
 
 bool str_cmp_utf8(const char *astr, const char *bstr);
 int	number_range	args( ( int from, int to ) );
+void	bug		args( ( const char *str, ... ) ) __attribute__((format(printf, 1, 2)));
 
 struct BitSet
 {
@@ -334,9 +355,12 @@ struct BitSet
     // Set a bit
     void set(size_t bit)
     {
-        if (bit > MAX_BITS)   // same bound
+        if (bit >= MAX_BITS)
         {
-            // optional: log
+            if (static_cast<intptr_t>(bit) < 0)
+                bug("BitSet::set: negative sentinel bit %ld out of range (MAX_BITS=%d)", static_cast<long>(static_cast<intptr_t>(bit)), MAX_BITS);
+            else
+                bug("BitSet::set: bit %zu out of range (MAX_BITS=%d)", bit, MAX_BITS);
             return;
         }
 
@@ -347,8 +371,14 @@ struct BitSet
     // Clear a bit
     void clear(size_t bit)
     {
-        if (bit > MAX_BITS)   // same bound
-            return;        
+        if (bit >= MAX_BITS)
+        {
+            if (static_cast<intptr_t>(bit) < 0)
+                bug("BitSet::clear: negative sentinel bit %ld out of range (MAX_BITS=%d)", static_cast<long>(static_cast<intptr_t>(bit)), MAX_BITS);
+            else
+                bug("BitSet::clear: bit %zu out of range (MAX_BITS=%d)", bit, MAX_BITS);
+            return;
+        }
         size_t idx = bit >> 6;
         if (idx < bits.size())
             bits[idx] &= ~(1ULL << (bit & 63));
@@ -357,8 +387,14 @@ struct BitSet
     // Toggle a bit
     void toggle(size_t bit)
     {
-        if (bit > MAX_BITS)   // same bound
+        if (bit >= MAX_BITS)
+        {
+            if (static_cast<intptr_t>(bit) < 0)
+                bug("BitSet::toggle: negative sentinel bit %ld out of range (MAX_BITS=%d)", static_cast<long>(static_cast<intptr_t>(bit)), MAX_BITS);
+            else
+                bug("BitSet::toggle: bit %zu out of range (MAX_BITS=%d)", bit, MAX_BITS);
             return;
+        }
         ensure(bit);
         bits[bit >> 6] ^= (1ULL << (bit & 63));
     }
@@ -366,8 +402,14 @@ struct BitSet
     // Test a bit
     bool test(size_t bit) const
     {
-        if (bit > MAX_BITS)   // same bound
-            return false;        
+        if (bit >= MAX_BITS)
+        {
+            if (static_cast<intptr_t>(bit) < 0)
+                bug("BitSet::test: negative sentinel bit %ld out of range (MAX_BITS=%d)", static_cast<long>(static_cast<intptr_t>(bit)), MAX_BITS);
+            else
+                bug("BitSet::test: bit %zu out of range (MAX_BITS=%d)", bit, MAX_BITS);
+            return false;
+        }
         size_t idx = bit >> 6;
         if (idx >= bits.size())
             return false;
@@ -399,6 +441,16 @@ struct BitSet
     }
     void set_range(size_t start, size_t end)
     {
+        if (start > end || start >= MAX_BITS)
+        {
+            bug("BitSet::set_range: invalid range [%zu, %zu] (MAX_BITS=%d)", start, end, MAX_BITS);
+            return;
+        }
+        if (end >= MAX_BITS)
+        {
+            bug("BitSet::set_range: end %zu clamped to %d", end, MAX_BITS - 1);
+            end = MAX_BITS - 1;
+        }
         for (size_t i = start; i <= end; i++)
             set(i);
     }
@@ -475,6 +527,11 @@ struct BitSet
     {
         if (value == 0)
             return;
+        if (offset > MAX_BITS - 32)
+        {
+            bug("BitSet::add_int_offset: offset %zu exceeds MAX_BITS - 32 (%d)", offset, MAX_BITS - 32);
+            return;
+        }
 
         size_t word = offset >> 6;
         size_t shift = offset & 63;
@@ -500,66 +557,45 @@ struct BitSet
 
         return result;
     }        
-    std::string bitset_to_string() const
-    {
-        std::string result;
-
-        for (size_t i = 0; obj_flag_table[i].name != nullptr; ++i)
-        {
-            if (test(obj_flag_table[i].bit))
-            {
-                if (!result.empty())
-                    result += " ";
-                result += obj_flag_table[i].name;
-            }
-        }
-
-        return result;
-    }    
-    bool string_to_bitset(const char *str, bool clear_first = false)
-    {
-        if (!str || *str == '\0')
-            return false;
-
-        if (clear_first)
-            reset();
-
-        std::istringstream iss(str);
-        std::string token;
-        bool found_any = false;
-
-        while (iss >> token)
-        {
-            for (size_t i = 0; obj_flag_table[i].name != nullptr; ++i)
-            {
-                if (!str_cmp_utf8(token.c_str(), obj_flag_table[i].name))
-                {
-                    set(obj_flag_table[i].bit);
-                    found_any = true;                    
-                    break;
-                }
-            }
-        }
-        return found_any;    
-    }
     bool intersects_excluding(const BitSet &other, size_t exclude_bit) const
     {
-        for (size_t bit = 0; bit < size(); ++bit)
+        size_t n = std::min(bits.size(), other.bits.size());
+        size_t ex_word = exclude_bit >> 6;
+        uint64_t ex_mask = ~(1ULL << (exclude_bit & 63));
+        for (size_t w = 0; w < n; ++w)
         {
-            if (bit == exclude_bit)
-                continue;
-
-            if (test(bit) && other.test(bit))
+            uint64_t overlap = bits[w] & other.bits[w];
+            if (w == ex_word)
+                overlap &= ex_mask;
+            if (overlap != 0)
                 return true;
         }
         return false;
-    }    
-    size_t size() const
+    }
+    size_t word_count() const
     {
         return bits.size();
+    }
+    size_t bit_capacity() const
+    {
+        return bits.size() * 64;
+    }
+    size_t size() const
+    {
+        return bits.size() * 64;
     }    
     void copy_range_from(const BitSet &src, size_t min_bit, size_t max_bit)
     {
+        if (min_bit > max_bit || min_bit >= MAX_BITS)
+        {
+            bug("BitSet::copy_range_from: invalid range [%zu, %zu] (MAX_BITS=%d)", min_bit, max_bit, MAX_BITS);
+            return;
+        }
+        if (max_bit >= MAX_BITS)
+        {
+            bug("BitSet::copy_range_from: max_bit %zu clamped to %d", max_bit, MAX_BITS - 1);
+            max_bit = MAX_BITS - 1;
+        }
         for (size_t bit = min_bit; bit <= max_bit; ++bit)
         {
             if (src.test(bit))
@@ -601,61 +637,64 @@ typedef BitSet FLAG_SET;
 
 #define FLAG_END   -1
 
-static inline FLAG_SET make_flagset_array(const int *bits) // Takes an array of ints/enums and returns a BitSet with those bits set
+static inline FLAG_SET make_flagset_list(std::initializer_list<int> bits) // Takes an initializer_list of ints/enums and returns a BitSet with those bits set
 {
     FLAG_SET set;
     set.reset();
 
-    for (int i = 0; bits[i] != FLAG_END; ++i)
+    for (int bit : bits)
     {
-        BV_SET_BIT(set, bits[i]);
+        if (bit != FLAG_END)
+            BV_SET_BIT(set, bit);
     }
 
     return set;
 }
 
-#define FLAGSET(...) make_flagset_array((int[]){ __VA_ARGS__, FLAG_END })
-#define FLAGSET_EMPTY make_flagset_array((int[]){ FLAG_END })
+#define FLAGSET(...) make_flagset_list({ __VA_ARGS__ })
+#define FLAGSET_EMPTY make_flagset_list({})
 
 static inline FLAG_SET int_to_bitset(int flags) // Takes a bitmask and turns it into a bitset
 {
     FLAG_SET bv;
+    uint32_t uflags = static_cast<uint32_t>(flags);
     for (int i = 0; i < 32; i++)
-        if (flags & (1 << i))
+        if (uflags & (1U << i))
             bv.set(i);
     return bv;
 }
 
 static inline void int_into_bitset_offset(FLAG_SET &bv, int flags, size_t offset) // Does the same as int_to_bitset, but offsets by a certain number.
 {
+    uint32_t uflags = static_cast<uint32_t>(flags);
     for (size_t i = 0; i < 32; ++i)
     {
-        if (flags & (1U << i))
+        if (uflags & (1U << i))
             bv.set(i + offset);
     }
 }
 
 static inline int bitset_to_int(const FLAG_SET &bv) // Takes a BitSet and turns it into a bitmask - only works for the first 32 bits.
 {
-    int flags = 0;
+    uint32_t flags = 0;
 
     for (int i = 0; i < 32; i++)
     {
         if (bv.test(i))
-            flags |= (1 << i);
+            flags |= (1U << i);
     }
 
-    // Optional debug warning
+    // Log truncation warning when bits >= 32 are set
     for (size_t i = 32; i < bv.bits.size() * 64; i++)
     {
         if (bv.test(i))
         {
-            // log warning here
+            bug("bitset_to_int: truncating high flag bit %zu (>= 32)", i);
             break;
         }
     }
 
-    return flags;
+    return static_cast<int>(flags);
 }
 static inline int first_set_bit(unsigned int bits) // Takes a bitmask and returns the enum to match the first bit set
 {
@@ -671,6 +710,9 @@ static inline int first_set_bit(unsigned int bits) // Takes a bitmask and return
 
 static inline const flag_name* find_flag(const flag_name* table, const std::string& name) // Returns a link to the flag_name that matches the string in the provided table.
 {
+    if (!table)
+        return nullptr;
+
     for (size_t i = 0; table[i].name != nullptr; ++i)
     {
         if (!str_cmp_utf8(name.c_str(), table[i].name))
@@ -899,17 +941,12 @@ struct system_data
     bool empty_guild_advisor() { return guild_advisor.empty(); };
 };
 
-// Very much in progress, but global GameContext struct to hold all the global data.  This is an attempt to instance the game state.
-
+// The server runs one world per process. World registries are process-wide.
 class GameContext
 {
     system_data sysdata;
-//    DescriptorList descriptors;
-//    WorldState world;
-//    SkillTable skills;
-//    TimeInfoData time_info;
     public:
-    WILDERNESS_SYSTEM *wilderness;
+    WILDERNESS_SYSTEM *wilderness = nullptr;
     system_data* get_sysdata() { return &sysdata; };
 
 };
@@ -1124,22 +1161,28 @@ struct	descriptor_data
     bool debug_telnet;
     TelnetState telstate = TS_DATA;
     bool naws_enabled = false;
+    bool eor_offer_pending = false;
+    bool last_was_cr = false;
     unsigned char telopt_us[256];   /* what we WILL/WONT */
     unsigned char telopt_him[256];  /* what he WILL/WONT */    
     int inbuf_len = 0;
     char intext[MAX_INBUF_SIZE];   // processed text buffer
     int  intext_len;    
     unsigned char sb_option = 0;
-    unsigned char sb_buf[64];
+    unsigned char sb_buf[4096];
     int sb_len = 0;
+    bool sb_discard = false;
 
     int term_width = 80;
     int term_height = 24;
 
     /* Input flood protection */
-    int in_bytes;          /* bytes received this window */
-    int in_commands;       /* commands this window */
-    time_t in_time;        /* window start */
+    int in_bytes = 0;                /* bytes received this window */
+    int in_commands = 0;             /* commands in current 1000ms window */
+    int64_t in_byte_time_ms = 0;     /* flood byte window start (steady_clock ms) */
+    int64_t in_cmd_times[20] = {};   /* circular buffer of active command timestamps (ms) */
+    int in_cmd_head = 0;             /* oldest active timestamp index */
+    bool in_rate_limited = false;    /* emitted SLOW DOWN for current throttle episode */
 
     /* Output buffering */
     int out_bytes;       /* bytes sent this tick */
@@ -1153,6 +1196,7 @@ struct	descriptor_data
     char terminal_type[64];   /* TTYPE result */
     int  ttype_state;         /* optional: for cycling */   
     int  ttype_count;         /* how many we've received */
+    bool ttype_done = false;
     bool supports_256color;     
     bool supports_truecolor;
     bool supports_utf8;
@@ -1183,6 +1227,11 @@ struct	descriptor_data
     gmcp_cache_t gmcp_cache;
 
     OlcSession* olc = nullptr;
+    bool closing = false;
+    bool counted = false;
+    bool write_failed = false;
+
+    ~descriptor_data();
 
 };
 
@@ -1466,25 +1515,13 @@ struct	shop_data
     sh_int	  profit_fix;		/* Cost multiplier for fixing	*/
     sh_int	open_hour;		/* First opening hour		*/
     sh_int	close_hour;		/* First closing hour		*/
+    bool separate_repair = false;
+    FLAG_SET repair_type;
+    sh_int repair_open_hour = 0;
+    sh_int repair_close_hour = 23;
 };
 
-#define MAX_FIX		3
-#define SHOP_FIX	1
-#define SHOP_RECHARGE	2
-
-struct	repairshop_data
-{
-    GameContext *game = NULL;   /* Pointer to our game context */
-    REPAIR_DATA * next;			/* Next shop in list		*/
-    REPAIR_DATA * prev;			/* Previous shop in list	*/
-    int		  keeper;		/* Vnum of shop keeper mob	*/
-    FLAG_SET   fix_type;	    /* Item types shop will fix - now in BitSet form to allow unlimited types */
-    //sh_int	  fix_type [MAX_FIX];	/* Item types shop will fix	*/
-    sh_int	  profit_fix;		/* Cost multiplier for fixing	*/
-    sh_int	  shop_type;		/* Repair shop type		*/
-    sh_int	  open_hour;		/* First opening hour		*/
-    sh_int	  close_hour;		/* First closing hour		*/
-};
+#define MAX_FIX		3 /* Legacy #REPAIRS boot compatibility */
 
 
 /* Mob program structures */
@@ -1927,8 +1964,17 @@ private:
     int         firstroom;
     int         lastroom;
 public:
+    void set_room_range(int first, int last) {
+        if (firstroom > 0 && lastroom >= firstroom)
+            unlink_ship_rooms(this->game, this);
+        firstroom = first;
+        lastroom = last;
+        if (firstroom > 0 && lastroom >= firstroom)
+            link_ship_rooms(this->game, this);
+    }
     void set_firstroom(int vnum) { 
-        unlink_ship_rooms(this->game, this);
+        if (firstroom > 0 && lastroom >= firstroom)
+            unlink_ship_rooms(this->game, this);
         firstroom = vnum; 
         if (lastroom == 0) lastroom = vnum;
         if (cockpit == 0) cockpit = vnum;
@@ -1937,12 +1983,15 @@ public:
         if (gunseat == 0) gunseat = vnum;
         if (navseat == 0) navseat = vnum;
         if (entrance == 0) entrance = vnum;
-        link_ship_rooms(this->game, this);
+        if (firstroom > 0 && lastroom >= firstroom)
+            link_ship_rooms(this->game, this);
     }
     void set_lastroom(int vnum) { 
-        unlink_ship_rooms(this->game, this); 
+        if (firstroom > 0 && lastroom >= firstroom)
+            unlink_ship_rooms(this->game, this);
         lastroom = vnum; 
-        link_ship_rooms(this->game, this);
+        if (firstroom > 0 && lastroom >= firstroom)
+            link_ship_rooms(this->game, this);
     }
     int get_firstroom() { return firstroom; }
     int get_lastroom() { return lastroom; }
@@ -2987,23 +3036,23 @@ typedef enum
 #define ROOM_VNUM_ALTAR		  32144 
 #define ROOM_VNUM_SCHOOL	  10300
 #define ROOM_AUTH_START		  10300
-#define ROOM_START_HUMAN            211
+#define ROOM_START_HUMAN            301  /* Manarai Spaceport entrance */
 #define ROOM_START_WOOKIEE        28600
 #define ROOM_START_TWILEK         32148
 #define ROOM_START_RODIAN         32148
 #define ROOM_START_HUTT           32148
-#define ROOM_START_MON_CALAMARIAN 21069
+#define ROOM_START_MON_CALAMARIAN  6904  /* Quarren City platform */
 #define ROOM_START_NOGHRI          1015
-#define ROOM_START_GAMORREAN      28100
-#define ROOM_START_JAWA           31819
-#define ROOM_START_ADARIAN        29000
+#define ROOM_START_GAMORREAN      32148  /* Serin Pluogus */
+#define ROOM_START_JAWA            3300  /* Mos Espa Space Port */
+#define ROOM_START_ADARIAN        32148  /* Serin Pluogus */
 #define ROOM_START_EWOK           32148
 #define ROOM_START_VERPINE        32148
 #define ROOM_START_DEFEL          32148
 #define ROOM_START_TRANDOSHAN     32148
 #define ROOM_START_CHADRA_FAN     32148
 #define ROOM_START_SULLUSTAN      32148
-#define ROOM_START_QUARREN        21069
+#define ROOM_START_QUARREN         6904  /* Quarren City platform */
 #define ROOM_START_IMMORTAL         100
 #define ROOM_LIMBO_SHIPYARD          45
 #define ROOM_DEFAULT_CRASH        28025
@@ -3028,7 +3077,7 @@ typedef enum
 typedef enum 
 {
     ROOM_DARK              = 0,   /* BV00 */
-    /* 1 reserved (track/hunt) */
+    ROOM_BFS_MARK          = 1,   /* reserved (legacy BFS mark; do not reuse) */
 
     ROOM_NO_MOB            = 2,   /* BV02 */
     ROOM_INDOORS           = 3,   /* BV03 */
@@ -3113,7 +3162,7 @@ typedef enum
 #define EX_WINDOW		  BV25
 #define EX_xLOOK		  BV26
 #define EX_WILDERNESS          BV27
-#define MAX_EXFLAG		  26
+#define MAX_EXFLAG		  27
 
 /*
  * Sector types.
@@ -3138,8 +3187,15 @@ typedef enum
   WEAR_NECK_2, WEAR_BODY, WEAR_HEAD, WEAR_LEGS, WEAR_FEET, WEAR_HANDS,
   WEAR_ARMS, WEAR_SHIELD, WEAR_ABOUT, WEAR_WAIST, WEAR_WRIST_L, WEAR_WRIST_R,
   WEAR_WIELD, WEAR_HOLD, WEAR_DUAL_WIELD, WEAR_EARS, WEAR_EYES,
-  WEAR_MISSILE_WIELD, WEAR_FLOATING, WEAR_OVER, MAX_WEAR, WEAR_DISGUISE, WEAR_MAX
+  WEAR_MISSILE_WIELD, WEAR_FLOATING, WEAR_OVER,
+  // Areas and player files store these slot numbers directly.
+  WEAR_RESERVED = 24, WEAR_DISGUISE = 25, MAX_WEAR, WEAR_MAX = MAX_WEAR
 } wear_locations;
+
+inline bool is_valid_wear_location(int wear)
+{
+    return wear >= WEAR_LIGHT && wear < MAX_WEAR && wear != WEAR_RESERVED;
+}
 
 /* Board Types */
 typedef enum { BOARD_NOTE, BOARD_MAIL } board_types;
@@ -3329,14 +3385,13 @@ struct	mob_index_data
     SPEC_FUN *		spec_fun;
     SPEC_FUN *          spec_2;
     SHOP_DATA *		pShop;
-    REPAIR_DATA *	rShop;
     MPROG_DATA *	mudprogs;
     int			progtypes;
     char *		player_name;
     char *		short_descr;
     char *		long_descr;
     char *		description;
-    sh_int		vnum;
+    int			vnum;
     sh_int		count;
     sh_int		killed;
     sh_int		sex;
@@ -3402,12 +3457,14 @@ struct fighting_data
     sh_int		timeskilled;
 };
 
+#define MAX_EDITOR_LINES 49
+
 struct	editor_data
 {
     sh_int		numlines;
     sh_int		on_line;
     sh_int		size;
-    char		line[49][81];
+    char		line[MAX_EDITOR_LINES][81];
 };
 
 struct	extracted_char_data
@@ -3571,14 +3628,13 @@ CHAR_DATA           *   challenged;
     ROOM_INDEX_DATA *   home;
     sh_int   cmd_recurse;
     OBJ_DATA 	    * 	on;
-    CHAR_DATA 	    * 	pet;
     CraftSession *craft_session;
 };
 
 
 struct killed_data
 {
-    sh_int		vnum;
+    int			vnum;
     char		count;
 };
 
@@ -3589,6 +3645,8 @@ struct	pc_data
 {
     CLAN_DATA *		clan;
     AREA_DATA *		area;
+    std::string         bounty_transaction;
+    int                 home_generation = 0;
     char *		homepage;
     char *		clan_name;
     char *		pwd;
@@ -3637,8 +3695,6 @@ struct	pc_data
     FLAG_SET            wanted_flags;
     long		bank;
     bool  whoCloak;
-    char *     		betted_on;
-    int 	      	bet_amt;    
     int 		salary;
     long int		salary_date;	/* Auto-Salary Darrik Vequir */
     ALIAS_DATA *	first_alias;
@@ -3648,7 +3704,7 @@ struct	pc_data
     NOTE_DATA *		pnote;
     NOTE_DATA *		comments;
     sh_int		clones;
-    int			played;
+    long long		played;
     time_t		logon;
     time_t		save_time;
     FLAG_SET    commandgroup;
@@ -3665,8 +3721,8 @@ struct	pc_data
 
 struct	liq_type
 {
-    char *	liq_name;
-    char *	liq_color;
+    const char *	liq_name;
+    const char *	liq_color;
     sh_int	liq_affect[3];
 };
 
@@ -3859,8 +3915,8 @@ struct	area_data
     int			hi_r_vnum;
     int			low_o_vnum;
     int			hi_o_vnum;
-    sh_int		low_m_vnum;
-    sh_int		hi_m_vnum;
+    int			low_m_vnum;
+    int			hi_m_vnum;
     int			low_soft_range;
     int			hi_soft_range;
     int			low_hard_range;
@@ -3901,8 +3957,8 @@ struct	godlist_data
     int			hi_r_vnum;
     int			low_o_vnum;
     int			hi_o_vnum;
-    sh_int		low_m_vnum;
-    sh_int		hi_m_vnum;
+    int			low_m_vnum;
+    int			hi_m_vnum;
 };
 
 
@@ -3991,7 +4047,7 @@ struct move_plan
 struct	room_index_data
 {
     GameContext *   game = NULL;
-    WILD_ROOM_CACHE_DATA *wild_cache;
+    WILD_ROOM_CACHE_DATA *wild_cache = nullptr;
     ROOM_INDEX_DATA *	next;
     ROOM_INDEX_DATA *	next_sort;
     CHAR_DATA *		first_person;
@@ -4011,6 +4067,7 @@ struct	room_index_data
     char *		description;
     int vnum;
     FLAG_SET		room_flags;
+    int                 home_generation = 0;
     MPROG_ACT_LIST *	mpact;               /* mudprogs */
     int			mpactnum;            /* mudprogs */
     MPROG_DATA *	mudprogs;            /* mudprogs */
@@ -4195,10 +4252,6 @@ extern sh_int   gsn_slicing;
 extern sh_int	gsn_makefurniture;
 extern sh_int	gsn_module_engineering;
 extern sh_int   gsn_repairmodule;
-// Johnson 6-26-04 Begin:
-extern sh_int   gsn_basictrackingdevices;
-extern sh_int   gsn_advancedtrackingdevices;
-// Johnson 6-26 End
 
 
 
@@ -4211,6 +4264,7 @@ extern	sh_int	gsn_peek;
 extern	sh_int	gsn_pick_lock;
 extern  sh_int  gsn_scan;
 extern	sh_int	gsn_skin;
+extern	sh_int	gsn_meditate;
 extern	sh_int	gsn_sneak;
 extern	sh_int	gsn_steal;
 extern	sh_int	gsn_gouge;
@@ -4301,7 +4355,7 @@ extern  sh_int                  gsn_defel;
 extern  sh_int                  gsn_trandoshan;
 extern  sh_int                  gsn_chadra_fan;
 extern  sh_int                  gsn_quarren;
-extern  sh_int                  gsn_duinduogwuin;
+extern  sh_int                  gsn_sullustan;
 extern  sh_int			gsn_barabel;
 extern  sh_int			gsn_firrerreo;
 extern  sh_int		gsn_bothan;
@@ -4525,19 +4579,8 @@ do {                                                                        \
     }                                                                       \
 } while (0)
 
-template <typename... Args>
-std::string str_printf_(const char* fmt, Args... args)
-{
-    int needed = std::snprintf(nullptr, 0, fmt, args...);
-    if (needed <= 0)
-        return std::string();
-
-    std::string result;
-    result.resize(static_cast<size_t>(needed));
-
-    std::snprintf(result.data(), static_cast<size_t>(needed) + 1, fmt, args...);
-    return result;
-}
+inline std::string vstr_printf( const char *fmt, va_list args ) __attribute__((format(printf, 1, 0)));
+inline std::string str_printf_( const char *fmt, ... ) __attribute__((format(printf, 1, 2)));
 
 inline std::string vstr_printf( const char *fmt, va_list args )
 {
@@ -4556,6 +4599,87 @@ inline std::string vstr_printf( const char *fmt, va_list args )
     std::vsnprintf( result.data(), result.size() + 1, fmt, args );
     return result;
 }
+
+inline std::string str_printf_( const char *fmt, ... )
+{
+    va_list args;
+    va_start( args, fmt );
+    std::string result = vstr_printf( fmt, args );
+    va_end( args );
+    return result;
+}
+
+inline const char *mud_fmt_arg(const char *s)
+{
+    return s ? s : "";
+}
+
+inline char *mud_fmt_arg(char *s)
+{
+    return s ? s : const_cast<char *>("");
+}
+
+inline const char *mud_fmt_arg(const std::string &s)
+{
+    return s.c_str();
+}
+
+inline const char *mud_fmt_arg(std::string_view sv)
+{
+    (void)sv;
+    return "";
+}
+
+template <typename T>
+inline T mud_fmt_arg(T v)
+{
+    return v;
+}
+
+inline void mud_fmt_check(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+inline void mud_fmt_check(const char *, ...) {}
+
+#define MUD_FE_EXPAND(x) x
+#define MUD_FE_1(fn, a) fn(a)
+#define MUD_FE_2(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_1(fn, __VA_ARGS__))
+#define MUD_FE_3(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_2(fn, __VA_ARGS__))
+#define MUD_FE_4(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_3(fn, __VA_ARGS__))
+#define MUD_FE_5(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_4(fn, __VA_ARGS__))
+#define MUD_FE_6(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_5(fn, __VA_ARGS__))
+#define MUD_FE_7(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_6(fn, __VA_ARGS__))
+#define MUD_FE_8(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_7(fn, __VA_ARGS__))
+#define MUD_FE_9(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_8(fn, __VA_ARGS__))
+#define MUD_FE_10(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_9(fn, __VA_ARGS__))
+#define MUD_FE_11(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_10(fn, __VA_ARGS__))
+#define MUD_FE_12(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_11(fn, __VA_ARGS__))
+#define MUD_FE_13(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_12(fn, __VA_ARGS__))
+#define MUD_FE_14(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_13(fn, __VA_ARGS__))
+#define MUD_FE_15(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_14(fn, __VA_ARGS__))
+#define MUD_FE_16(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_15(fn, __VA_ARGS__))
+#define MUD_FE_17(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_16(fn, __VA_ARGS__))
+#define MUD_FE_18(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_17(fn, __VA_ARGS__))
+#define MUD_FE_19(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_18(fn, __VA_ARGS__))
+#define MUD_FE_20(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_19(fn, __VA_ARGS__))
+#define MUD_FE_21(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_20(fn, __VA_ARGS__))
+#define MUD_FE_22(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_21(fn, __VA_ARGS__))
+#define MUD_FE_23(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_22(fn, __VA_ARGS__))
+#define MUD_FE_24(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_23(fn, __VA_ARGS__))
+#define MUD_FE_25(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_24(fn, __VA_ARGS__))
+#define MUD_FE_26(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_25(fn, __VA_ARGS__))
+#define MUD_FE_27(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_26(fn, __VA_ARGS__))
+#define MUD_FE_28(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_27(fn, __VA_ARGS__))
+#define MUD_FE_29(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_28(fn, __VA_ARGS__))
+#define MUD_FE_30(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_29(fn, __VA_ARGS__))
+#define MUD_FE_31(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_30(fn, __VA_ARGS__))
+#define MUD_FE_32(fn, a, ...) fn(a), MUD_FE_EXPAND(MUD_FE_31(fn, __VA_ARGS__))
+
+#define MUD_FE_N(_1,_2,_3,_4,_5,_6,_7,_8,_9,_10,_11,_12,_13,_14,_15,_16,_17,_18,_19,_20,_21,_22,_23,_24,_25,_26,_27,_28,_29,_30,_31,_32,N,...) N
+#define MUD_FOR_EACH(fn, ...) \
+    MUD_FE_EXPAND(MUD_FE_N(__VA_ARGS__, \
+        MUD_FE_32,MUD_FE_31,MUD_FE_30,MUD_FE_29,MUD_FE_28,MUD_FE_27,MUD_FE_26,MUD_FE_25, \
+        MUD_FE_24,MUD_FE_23,MUD_FE_22,MUD_FE_21,MUD_FE_20,MUD_FE_19,MUD_FE_18,MUD_FE_17, \
+        MUD_FE_16,MUD_FE_15,MUD_FE_14,MUD_FE_13,MUD_FE_12,MUD_FE_11,MUD_FE_10,MUD_FE_9, \
+        MUD_FE_8,MUD_FE_7,MUD_FE_6,MUD_FE_5,MUD_FE_4,MUD_FE_3,MUD_FE_2,MUD_FE_1)(fn, __VA_ARGS__))
 
 struct PrintfArgHolder
 {
@@ -4629,17 +4753,15 @@ inline T printf_value(T v)
 
 /* Wrapper helpers */
 
+void ch_printf_ args( ( CHAR_DATA *ch, const char *fmt, ... ) ) __attribute__((format(printf, 2, 3)));
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#pragma GCC diagnostic ignored "-Wformat-security"
 template <typename Tuple, std::size_t... I>
 void ch_printf_from_tuple(CHAR_DATA *ch, const char *fmt, Tuple& tup, std::index_sequence<I...>)
 {
     ch_printf_(ch, fmt, printf_value(std::get<I>(tup))...);
-}
-
-template <typename... Args>
-void ch_printf(CHAR_DATA *ch, const char *fmt, Args&&... args)
-{
-    auto stored = std::make_tuple(printf_store(std::forward<Args>(args))...);
-    ch_printf_from_tuple(ch, fmt, stored, std::index_sequence_for<Args...>{});
 }
 
 template <typename Tuple, std::size_t... I>
@@ -4647,13 +4769,41 @@ std::string str_printf_from_tuple(const char *fmt, Tuple& tup, std::index_sequen
 {
     return str_printf_(fmt, printf_value(std::get<I>(tup))...);
 }
+#pragma GCC diagnostic pop
 
 template <typename... Args>
-std::string str_printf(const char *fmt, Args&&... args)
+void ch_printf_impl(CHAR_DATA *ch, const char *fmt, Args&&... args)
 {
-    auto stored = std::make_tuple(printf_store(std::forward<Args>(args))...);
-    return str_printf_from_tuple(fmt, stored, std::index_sequence_for<Args...>{});
+    if constexpr (sizeof...(Args) == 0)
+    {
+        ch_printf_(ch, "%s", fmt ? fmt : "");
+    }
+    else
+    {
+        auto stored = std::make_tuple(printf_store(std::forward<Args>(args))...);
+        ch_printf_from_tuple(ch, fmt, stored, std::index_sequence_for<Args...>{});
+    }
 }
+
+template <typename... Args>
+std::string str_printf_impl(const char *fmt, Args&&... args)
+{
+    if constexpr (sizeof...(Args) == 0)
+    {
+        return fmt ? std::string(fmt) : std::string();
+    }
+    else
+    {
+        auto stored = std::make_tuple(printf_store(std::forward<Args>(args))...);
+        return str_printf_from_tuple(fmt, stored, std::index_sequence_for<Args...>{});
+    }
+}
+
+#define str_printf(fmt, ...) \
+    (__extension__ ({ \
+        __VA_OPT__(if (false) mud_fmt_check((fmt), MUD_FOR_EACH(mud_fmt_arg, __VA_ARGS__));) \
+        str_printf_impl((fmt) __VA_OPT__(,) __VA_ARGS__); \
+    }))
 
 /*
  * Memory allocation macros.
@@ -4661,15 +4811,14 @@ std::string str_printf(const char *fmt, Args&&... args)
 #define CREATE(result, type, number)                           \
 do                                                             \
 {                                                              \
-    if ((number) == 1)                                         \
-        (result) = new type();                                 \
-    else                                                       \
-        (result) = new type[(number)](); /* value-init */      \
+    assert((number) == 1);                                     \
+    (result) = new type();                                     \
 } while(0)
 
 #define CREATE_ARRAY(result, type, number)                     \
 do                                                             \
 {                                                              \
+    assert((number) > 0);                                      \
     (result) = new type[(number)](); /* value-init */          \
 } while(0)
 
@@ -4716,9 +4865,8 @@ do								                                \
   }								                                \
   else                                                          \
   {                                                             \
-                                                                \
       free( (point) );                                          \
-      point = NULL;							                    \
+      (point) = NULL;						                    \
   }                                                             \
 } while(0)
 
@@ -4734,8 +4882,12 @@ do								                                \
     bug( "Freeing null pointer" );	 			                \
     fprintf( stderr, "STRFREEing NULL in %s, line %d\n", __FILE__, __LINE__ ); \
   }								                                \
-  else if (str_free((point))==-1) 				                \
+  else                                                          \
+  {                                                             \
+    if (str_free((point))==-1)                                  \
       fprintf( stderr, "STRFREEing bad pointer in %s, line %d\n", __FILE__, __LINE__ ); \
+    (point) = NULL;                                             \
+  }                                                             \
 } while(0)
 #else
 #define STRALLOC(point)		str_dup((point))
@@ -4749,7 +4901,11 @@ do								                                \
 	bug( "Freeing null pointer" );				                \
 	fprintf( stderr, "STRFREEing NULL in %s, line %d\n", __FILE__, __LINE__ ); \
   }								                                \
-  else free((point));						                    \
+  else                                                          \
+  {                                                             \
+    free((point));                                              \
+    (point) = NULL;                                             \
+  }                                                             \
 } while(0)
 #endif
 
@@ -4912,7 +5068,7 @@ do								                                \
 #define IS_CLANNED(ch)		(!IS_NPC((ch))				    \
 				&& (ch)->pcdata->clan			    )
 
-#define WAIT_STATE(ch, npulse)	((ch)->wait += UMAX((ch)->wait, (npulse)))
+#define WAIT_STATE(ch, npulse)	((ch)->wait = UMAX((ch)->wait, (npulse)))
 
 
 #define EXIT(ch, door)		( get_exit( (ch)->in_room, door ) )
@@ -4973,19 +5129,19 @@ do								                                \
 /*
  * Description macros.
  */
-#define DISGUISE(ch)            ((!nifty_is_name(ch->name, ch->pcdata->title)) ?   \
-  				1 : 0)
+#define DISGUISE(ch)            ((ch) && !IS_NPC(ch) && (ch)->name && (ch)->pcdata->title \
+                                 && (ch)->pcdata->title[0] && !nifty_is_name((ch)->name, (ch)->pcdata->title))
                                 
 
-#define PERS(ch, looker)	( can_see( (looker), (ch) ) ?		\
-				( IS_NPC(ch) ? (ch)->short_descr	\
-				: ((get_trust(looker) <= LEVEL_IMMORTAL) ? (DISGUISE(ch) ? ch->pcdata->title : (ch)->name ) : (ch)->name)) : ( IS_IMMORTAL(ch) ? "A Great One" : "someone" ))
+#define PERS(ch, looker)        ((ch) && (looker) && can_see((looker), (ch)) \
+                                 ? (IS_NPC(ch) ? ((ch)->short_descr ? (ch)->short_descr : "someone") \
+                                    : (get_trust(looker) <= LEVEL_IMMORTAL && DISGUISE(ch) ? (ch)->pcdata->title \
+                                       : ((ch)->name ? (ch)->name : "someone"))) \
+                                 : ((ch) && IS_IMMORTAL(ch) ? "A Great One" : "someone"))
 
 
 #define log_string( txt )	( log_string_plus( (txt), LOG_NORMAL, LEVEL_LOG ) )
 
-/*#define GET_BETTED_ON(ch)    (IS_NPC(ch) ? 0 : ((ch)->pcdata->betted_on))
-#define GET_BET_AMT(ch) (IS_NPC(ch) ? 0 : ((ch)->pcdata->bet_amt))*/
 
 
 /*
@@ -5058,7 +5214,7 @@ extern  const	struct	frc_app_type	frc_app		[26];
 extern	const	struct	race_type	race_table	[MAX_RACE];
 extern	const	struct	liq_type	liq_table	[LIQ_MAX];
 extern	char *	const			    attack_table	[13];
-extern	char *  const	        	ability_name	[MAX_ABILITY];
+extern	const char *  const	        	ability_name	[MAX_ABILITY];
 
 
 extern	const flag_name	skill_tname	[];
@@ -5106,6 +5262,7 @@ extern	int	physicalobjects;
 extern	int	num_descriptors;
 //extern	struct	system_data		sysdata;
 extern	int	top_sn;
+extern	int	top_shop;
 extern	int	top_vroom;
 extern	int	top_herb;
 extern  long long high_galaxy_cash;
@@ -5125,8 +5282,8 @@ extern          AUCTION_DATA      *     auction;
 extern		TIME_INFO_DATA		time_info;
 extern		WEATHER_DATA		weather_info;
 
-// Won't work if multi-threaded, so will need a passed variable instead
-extern		OBJ_DATA	  *	save_equipment[MAX_WEAR][MAX_LAYERS];
+using EquipmentSlots = std::array<std::array<OBJ_DATA *, MAX_LAYERS>, MAX_WEAR>;
+using ObjectNest = std::array<OBJ_DATA *, MAX_NEST>;
 
 extern		CMDTYPE		  *	command_hash	[126];
 extern		SOCIALTYPE	  *	social_index	[27];
@@ -5139,8 +5296,6 @@ extern		HELP_DATA	  *	first_help;
 extern		HELP_DATA	  *	last_help;
 extern		SHOP_DATA	  *	first_shop;
 extern		SHOP_DATA	  *	last_shop;
-extern		REPAIR_DATA	  *	first_repair;
-extern		REPAIR_DATA	  *	last_repair;
 extern 		SPACE_DATA	  *	first_spaceobject;
 extern 		SPACE_DATA	  *	last_spaceobject;
 extern		BAN_DATA	  *	first_ban;
@@ -5189,6 +5344,7 @@ extern		CHAR_DATA	  *	saving_char;
 extern		OBJ_DATA	  *	all_obj;
 
 extern		struct act_prog_data *	mob_act_list;
+extern		struct act_prog_data *	room_act_list;
 
 // Log globals
 extern		char			bug_buf		[];
@@ -5212,7 +5368,6 @@ DECLARE_DO_FUN( do_mccpstat );
 DECLARE_DO_FUN( do_repair_module );
 DECLARE_DO_FUN( do_maketemplateship);
 DECLARE_DO_FUN( do_ordership);
-DECLARE_DO_FUN( do_ahelp );
 DECLARE_DO_FUN( do_alinks );
 DECLARE_DO_FUN( do_improve_module );
 DECLARE_DO_FUN( do_install_module );
@@ -5231,7 +5386,6 @@ DECLARE_DO_FUN( do_medit        );
 DECLARE_DO_FUN( do_members      );
 DECLARE_DO_FUN( do_roster       );
 DECLARE_DO_FUN( do_scatter );
-DECLARE_DO_FUN( do_mortalize );
 DECLARE_DO_FUN( do_delay );
 DECLARE_DO_FUN( do_setplanet );
 DECLARE_DO_FUN( do_makeplanet );
@@ -5257,7 +5411,6 @@ DECLARE_DO_FUN( do_autopilot  );
 DECLARE_DO_FUN( do_allspeeders  );
 DECLARE_DO_FUN( do_speeders  );
 DECLARE_DO_FUN( do_suicide  );
-DECLARE_DO_FUN( do_gain  );
 DECLARE_DO_FUN( do_train  );
 DECLARE_DO_FUN( do_beg  );
 DECLARE_DO_FUN( do_bank  );
@@ -5270,7 +5423,6 @@ DECLARE_DO_FUN( do_sabotage );
 DECLARE_DO_FUN( do_spacetalk );
 DECLARE_DO_FUN( do_hail );
 DECLARE_DO_FUN( do_allships );
-DECLARE_DO_FUN( do_newclan );
 DECLARE_DO_FUN( do_appoint );
 DECLARE_DO_FUN( do_demote );
 DECLARE_DO_FUN( do_empower );
@@ -5279,9 +5431,7 @@ DECLARE_DO_FUN( do_arm );
 DECLARE_DO_FUN( do_chaff );
 DECLARE_DO_FUN( do_clan_donate );
 DECLARE_DO_FUN( do_clan_withdraw );
-DECLARE_DO_FUN( do_fly );
 DECLARE_DO_FUN( do_drive );
-DECLARE_DO_FUN( do_bomb );
 DECLARE_DO_FUN( do_setblaster );
 DECLARE_DO_FUN( do_ammo );
 DECLARE_DO_FUN( do_takedrug );
@@ -5291,32 +5441,14 @@ DECLARE_DO_FUN( do_resign );
 DECLARE_DO_FUN( do_pluogus ); 
 DECLARE_DO_FUN( do_findserin );
 DECLARE_DO_FUN( do_tractorbeam );
-DECLARE_DO_FUN( do_makearmor );
-DECLARE_DO_FUN( do_makejewelry );
-DECLARE_DO_FUN( do_makegrenade );
-DECLARE_DO_FUN( do_makelandmine );
-DECLARE_DO_FUN( do_makelight );
-DECLARE_DO_FUN( do_makecomlink );
-DECLARE_DO_FUN( do_makeshield );
-DECLARE_DO_FUN( do_makecontainer );
-DECLARE_DO_FUN( do_makefurniture );
-DECLARE_DO_FUN( do_makemissile );
-DECLARE_DO_FUN( do_gemcutting );
 DECLARE_DO_FUN( do_reinforcements );
 DECLARE_DO_FUN( do_postguard );
 DECLARE_DO_FUN( do_torture );
 DECLARE_DO_FUN( do_snipe );
 DECLARE_DO_FUN( do_throw );
 DECLARE_DO_FUN( do_disguise );
-DECLARE_DO_FUN( do_makedisguise );
 DECLARE_DO_FUN( do_mine );
 DECLARE_DO_FUN( do_first_aid);
-DECLARE_DO_FUN( do_makeblade ); 
-DECLARE_DO_FUN( do_makeblaster );
-DECLARE_DO_FUN( do_makebowcaster );
-DECLARE_DO_FUN( do_makemedpac );
-DECLARE_DO_FUN( do_makelightsaber );
-DECLARE_DO_FUN( do_makespice );
 DECLARE_DO_FUN( do_closebay );
 DECLARE_DO_FUN( do_openbay );
 DECLARE_DO_FUN( do_autotrack );
@@ -5344,7 +5476,6 @@ DECLARE_DO_FUN( do_calculate );
 DECLARE_DO_FUN( do_calculate_diff ); DECLARE_DO_FUN( do_guard );
 DECLARE_DO_FUN( do_recharge );
 DECLARE_DO_FUN( do_repairship );
-DECLARE_DO_FUN( do_refuel );
 DECLARE_DO_FUN( do_addpilot );
 DECLARE_DO_FUN( do_addresident );
 DECLARE_DO_FUN( do_rempilot);
@@ -5408,13 +5539,11 @@ DECLARE_DO_FUN( do_bestow	);
 DECLARE_DO_FUN( do_bestowarea	);
 DECLARE_DO_FUN( do_bind 	);
 DECLARE_DO_FUN(	do_bio		);
-DECLARE_DO_FUN(	do_bite		);
 DECLARE_DO_FUN( do_board        );
 DECLARE_DO_FUN( do_boards	);
 DECLARE_DO_FUN( do_bodybag	);
 DECLARE_DO_FUN( do_bounties     );
 DECLARE_DO_FUN(	do_brandish	);
-DECLARE_DO_FUN( do_brew 	);
 DECLARE_DO_FUN( do_bset		);
 DECLARE_DO_FUN( do_bstat	);
 DECLARE_DO_FUN(	do_bug		);
@@ -5440,12 +5569,9 @@ DECLARE_DO_FUN( do_shipdelete   );
 DECLARE_DO_FUN( do_shiptrack    );
 DECLARE_DO_FUN(	do_clantalk	);
 DECLARE_DO_FUN(	do_allclantalk	);
-DECLARE_DO_FUN(	do_claw		);
 DECLARE_DO_FUN(	do_climb	);
 DECLARE_DO_FUN(	do_close	);
 DECLARE_DO_FUN(	do_cmdtable	);
-DECLARE_DO_FUN(	do_cmenu	);
-DECLARE_DO_FUN(	do_color	);
 DECLARE_DO_FUN( do_collectgold  );
 DECLARE_DO_FUN(	do_commands	);
 DECLARE_DO_FUN(	do_comment	);
@@ -5456,25 +5582,20 @@ DECLARE_DO_FUN( do_compress	);
 DECLARE_DO_FUN(	do_config	);
 DECLARE_DO_FUN(	do_consider	);
 DECLARE_DO_FUN( do_cutdoor     );
-DECLARE_DO_FUN( do_senate	);
-DECLARE_DO_FUN( do_addsenator	);
-DECLARE_DO_FUN( do_remsenator	);
 DECLARE_DO_FUN( do_craft    );
 DECLARE_DO_FUN( do_credits	);
 DECLARE_DO_FUN(	do_cset		);
-DECLARE_DO_FUN(	do_degradeship	);
-DECLARE_DO_FUN( do_deities	);
 DECLARE_DO_FUN(	do_deny		);
 DECLARE_DO_FUN(	do_description	);
 DECLARE_DO_FUN( do_destro       );
 DECLARE_DO_FUN( do_destroy      );
 DECLARE_DO_FUN(	do_detrap	);
-DECLARE_DO_FUN( do_devote	);
 DECLARE_DO_FUN( do_dig		);
 DECLARE_DO_FUN(	do_disarm	);
 DECLARE_DO_FUN(	do_disconnect	);
 DECLARE_DO_FUN( do_dismount	);
 DECLARE_DO_FUN(	do_dmesg	);
+DECLARE_DO_FUN( do_dnd );
 DECLARE_DO_FUN(	do_down		);
 DECLARE_DO_FUN( do_drag 	);
 DECLARE_DO_FUN(	do_drink	);
@@ -5489,7 +5610,6 @@ DECLARE_DO_FUN(	do_enter	);
 DECLARE_DO_FUN(	do_equipment	);
 DECLARE_DO_FUN(	do_examine	);
 DECLARE_DO_FUN(	do_exits	);
-DECLARE_DO_FUN(	do_feed		);
 DECLARE_DO_FUN(	do_fill		);
 DECLARE_DO_FUN(	do_fixchar	);
 DECLARE_DO_FUN(	do_flee		);
@@ -5512,8 +5632,6 @@ DECLARE_DO_FUN( do_gravityprojector  );
 DECLARE_DO_FUN(	do_group	);
 DECLARE_DO_FUN(	do_grub 	);
 DECLARE_DO_FUN(	do_gtell	);
-DECLARE_DO_FUN( do_guilds       );
-DECLARE_DO_FUN( do_guildtalk    );
 DECLARE_DO_FUN( do_hedit	);
 DECLARE_DO_FUN( do_hell		);
 DECLARE_DO_FUN(	do_help		);
@@ -5546,8 +5664,6 @@ DECLARE_DO_FUN(	do_level	);
 DECLARE_DO_FUN(	do_light	);
 DECLARE_DO_FUN(	do_list		);
 DECLARE_DO_FUN(	do_litterbug	);
-DECLARE_DO_FUN( do_load	);
-DECLARE_DO_FUN( do_unload	);
 DECLARE_DO_FUN( do_unloadcargo	);
 DECLARE_DO_FUN( do_loadarea	);
 DECLARE_DO_FUN( do_loadcargo	);
@@ -5555,19 +5671,17 @@ DECLARE_DO_FUN( do_loadup	);
 DECLARE_DO_FUN(	do_lock		);
 DECLARE_DO_FUN(	do_log		);
 DECLARE_DO_FUN(	do_look		);
+DECLARE_DO_FUN( do_lookmap );
 DECLARE_DO_FUN(	do_low_purge	);
 DECLARE_DO_FUN( do_mailroom	);
 DECLARE_DO_FUN(	do_make		);
 DECLARE_DO_FUN(	do_makeboard	);
 DECLARE_DO_FUN(	do_makeclan	);
 DECLARE_DO_FUN( do_makeship     );
-DECLARE_DO_FUN( do_makeguild    );
-DECLARE_DO_FUN( do_makerepair	);
 DECLARE_DO_FUN( do_makeshop	);
 DECLARE_DO_FUN( do_makewizlist	);
 DECLARE_DO_FUN(	do_memory	);
 DECLARE_DO_FUN( do_mcreate	);
-DECLARE_DO_FUN( do_mdelete	);
 DECLARE_DO_FUN(	do_mfind	);
 DECLARE_DO_FUN(	do_minvoke	);
 DECLARE_DO_FUN( do_mlist	);
@@ -5592,31 +5706,24 @@ DECLARE_DO_FUN(	do_notell	);
 DECLARE_DO_FUN( do_notitle      );
 DECLARE_DO_FUN(	do_noteroom	);
 DECLARE_DO_FUN( do_ocreate	);
-DECLARE_DO_FUN( do_odelete	);
 DECLARE_DO_FUN(	do_ofind	);
 DECLARE_DO_FUN(	do_ogrub 	);
 DECLARE_DO_FUN(	do_oinvoke	);
 DECLARE_DO_FUN(	do_oldscore	);
 DECLARE_DO_FUN( do_olist	);
 DECLARE_DO_FUN(	do_open		);
-DECLARE_DO_FUN( do_opentourney  );
 DECLARE_DO_FUN(	do_order	);
-DECLARE_DO_FUN(	do_orders	);
-DECLARE_DO_FUN(	do_ordertalk	);
 DECLARE_DO_FUN(	do_oset		);
 DECLARE_DO_FUN(	do_ostat	);
-DECLARE_DO_FUN(	do_ot		);
 DECLARE_DO_FUN(	do_outcast	);
 DECLARE_DO_FUN(	do_override	);
 DECLARE_DO_FUN(	do_owhere	);
 DECLARE_DO_FUN( do_pager	);
-DECLARE_DO_FUN(	do_pardon	);
 DECLARE_DO_FUN(	do_password	);
 DECLARE_DO_FUN(	do_peace	);
 DECLARE_DO_FUN(	do_pick		);
 DECLARE_DO_FUN( do_placevendor  );
 DECLARE_DO_FUN( do_poison_weapon);
-DECLARE_DO_FUN(	do_pose		);
 DECLARE_DO_FUN(	do_practice	);
 DECLARE_DO_FUN( do_pricevendor  );
 DECLARE_DO_FUN( do_prompt	);
@@ -5625,7 +5732,6 @@ DECLARE_DO_FUN(	do_punch	);
 DECLARE_DO_FUN(	do_purge	);
 DECLARE_DO_FUN( do_push		);
 DECLARE_DO_FUN(	do_put		);
-DECLARE_DO_FUN( do_qpset	);
 DECLARE_DO_FUN(	do_quaff	);
 DECLARE_DO_FUN(	do_quest	);
 DECLARE_DO_FUN(	do_qui		);
@@ -5643,9 +5749,6 @@ DECLARE_DO_FUN( do_regoto       );
 DECLARE_DO_FUN(	do_remove	);
 DECLARE_DO_FUN(	do_rent		);
 DECLARE_DO_FUN(	do_repair	);
-DECLARE_DO_FUN(	do_repairset	);
-DECLARE_DO_FUN(	do_repairshops	);
-DECLARE_DO_FUN(	do_repairstat	);
 DECLARE_DO_FUN(	do_reply	);
 DECLARE_DO_FUN( do_retell       );
 DECLARE_DO_FUN(	do_report	);
@@ -5699,7 +5802,6 @@ DECLARE_DO_FUN(	do_sit		);
 DECLARE_DO_FUN(	do_sla		);
 DECLARE_DO_FUN(	do_slay		);
 DECLARE_DO_FUN(	do_sleep	);
-DECLARE_DO_FUN( do_slice        );
 DECLARE_DO_FUN( do_slist        );
 DECLARE_DO_FUN(	do_slookup	);
 DECLARE_DO_FUN(	do_smoke	);
@@ -5714,13 +5816,9 @@ DECLARE_DO_FUN( do_speak        );
 DECLARE_DO_FUN(	do_split	);
 DECLARE_DO_FUN(	do_sset		);
 DECLARE_DO_FUN(	do_stand	);
-DECLARE_DO_FUN( do_starttourney );
 DECLARE_DO_FUN(	do_steal	);
-DECLARE_DO_FUN(	do_sting	);
 DECLARE_DO_FUN(	do_stun		);
-DECLARE_DO_FUN( do_supplicate	);
 DECLARE_DO_FUN(	do_switch	);
-DECLARE_DO_FUN(	do_tail		);
 DECLARE_DO_FUN(	do_tamp		);
 DECLARE_DO_FUN(	do_tell		);
 DECLARE_DO_FUN(	do_time		);
@@ -5740,7 +5838,6 @@ DECLARE_DO_FUN(	do_undock	);
 DECLARE_DO_FUN(	do_unlock	);
 DECLARE_DO_FUN( do_unsilence    );
 DECLARE_DO_FUN(	do_up		);
-DECLARE_DO_FUN(	do_upgradeship	);
 DECLARE_DO_FUN(	do_users	);
 DECLARE_DO_FUN( do_undead       );
 DECLARE_DO_FUN(	do_value	);
@@ -5769,9 +5866,7 @@ DECLARE_DO_FUN( do_mp_close_passage );
 DECLARE_DO_FUN( do_mp_damage );
 DECLARE_DO_FUN( do_mp_restore );
 DECLARE_DO_FUN( do_mp_open_passage );
-DECLARE_DO_FUN( do_mp_practice );
 DECLARE_DO_FUN( do_mp_slay);
-DECLARE_DO_FUN( do_mpadvance    );
 DECLARE_DO_FUN( do_mpasound     );
 DECLARE_DO_FUN( do_mpat         );
 DECLARE_DO_FUN( do_mpdream	);
@@ -5782,10 +5877,8 @@ DECLARE_DO_FUN( do_mpechoaround );
 DECLARE_DO_FUN( do_mpechoat     );
 DECLARE_DO_FUN( do_mpedit       );
 DECLARE_DO_FUN( do_mpfind       );
-DECLARE_DO_FUN( do_mrange       );
 DECLARE_DO_FUN( do_opedit       );
 DECLARE_DO_FUN( do_opfind       );
-DECLARE_DO_FUN( do_orange       );
 DECLARE_DO_FUN( do_rpedit       );
 DECLARE_DO_FUN( do_rpfind       );
 DECLARE_DO_FUN( do_mpforce      );
@@ -5794,10 +5887,8 @@ DECLARE_DO_FUN( do_mpgoto       );
 DECLARE_DO_FUN( do_mpjunk       );
 DECLARE_DO_FUN( do_mpkill       );
 DECLARE_DO_FUN( do_mpmload      );
-DECLARE_DO_FUN( do_mpmset	);
 DECLARE_DO_FUN( do_mpnothing	);
 DECLARE_DO_FUN( do_mpoload      );
-DECLARE_DO_FUN( do_mposet	);
 DECLARE_DO_FUN( do_mppurge      );
 DECLARE_DO_FUN( do_mpstat       );
 DECLARE_DO_FUN( do_opstat       );
@@ -5805,7 +5896,6 @@ DECLARE_DO_FUN( do_rpstat       );
 DECLARE_DO_FUN( do_mptransfer   );
 DECLARE_DO_FUN( do_mpapply	);
 DECLARE_DO_FUN( do_mpapplyb  	);
-DECLARE_DO_FUN( do_mppkset	);
 DECLARE_DO_FUN( do_mpgain	);
 
 /*
@@ -5816,7 +5906,6 @@ DECLARE_SPELL_FUN(	spell_null		);
 DECLARE_SPELL_FUN(	spell_notfound		);
 DECLARE_SPELL_FUN(	spell_acid_blast	);
 DECLARE_SPELL_FUN(	spell_animate_dead	);
-DECLARE_SPELL_FUN(	spell_astral_walk	);
 DECLARE_SPELL_FUN(	spell_blindness		);
 DECLARE_SPELL_FUN(	spell_burning_hands	);
 DECLARE_SPELL_FUN(	spell_call_lightning	);
@@ -5846,7 +5935,6 @@ DECLARE_SPELL_FUN(	spell_faerie_fog	);
 DECLARE_SPELL_FUN(	spell_farsight		);
 DECLARE_SPELL_FUN(	spell_fireball		);
 DECLARE_SPELL_FUN(	spell_flamestrike	);
-DECLARE_SPELL_FUN(	spell_gate		);
 DECLARE_SPELL_FUN(      spell_knock             );
 DECLARE_SPELL_FUN(	spell_harm		);
 DECLARE_SPELL_FUN(	spell_identify		);
@@ -5855,22 +5943,16 @@ DECLARE_SPELL_FUN(	spell_know_alignment	);
 DECLARE_SPELL_FUN(	spell_lightning_bolt	);
 DECLARE_SPELL_FUN(	spell_locate_object	);
 DECLARE_SPELL_FUN(	spell_magic_missile	);
-DECLARE_SPELL_FUN(	spell_mist_walk		);
 DECLARE_SPELL_FUN(	spell_pass_door		);
-DECLARE_SPELL_FUN(	spell_plant_pass	);
 DECLARE_SPELL_FUN(	spell_poison		);
 DECLARE_SPELL_FUN(	spell_polymorph		);
 DECLARE_SPELL_FUN(	spell_possess		);
 DECLARE_SPELL_FUN(	spell_recharge		);
-DECLARE_SPELL_FUN(	spell_remove_curse	);
 DECLARE_SPELL_FUN(	spell_remove_invis	);
 DECLARE_SPELL_FUN(	spell_remove_trap	);
 DECLARE_SPELL_FUN(	spell_shocking_grasp	);
 DECLARE_SPELL_FUN(	spell_sleep		);
 DECLARE_SPELL_FUN(	spell_smaug		);
-DECLARE_SPELL_FUN(	spell_solar_flight	);
-DECLARE_SPELL_FUN(	spell_summon		);
-DECLARE_SPELL_FUN(	spell_teleport		);
 DECLARE_SPELL_FUN(	spell_ventriloquate	);
 DECLARE_SPELL_FUN(	spell_weaken		);
 DECLARE_SPELL_FUN(	spell_word_of_recall	);
@@ -5881,9 +5963,6 @@ DECLARE_SPELL_FUN(	spell_gas_breath	);
 DECLARE_SPELL_FUN(	spell_lightning_breath	);
 DECLARE_SPELL_FUN(	spell_spiral_blast	);
 DECLARE_SPELL_FUN(	spell_scorching_surge	);
-DECLARE_SPELL_FUN(	spell_helical_flow	);
-DECLARE_SPELL_FUN(      spell_transport      		);
-DECLARE_SPELL_FUN(      spell_portal                    );
 
 DECLARE_SPELL_FUN(      spell_ethereal_fist                 );
 DECLARE_SPELL_FUN(      spell_spectral_furor                );
@@ -5904,8 +5983,6 @@ DECLARE_SPELL_FUN(      spell_black_fist                    );
 DECLARE_SPELL_FUN(      spell_black_lightning               );
 DECLARE_SPELL_FUN(      spell_midas_touch                   );
 
-DECLARE_SPELL_FUN(      spell_suggest                       );
-DECLARE_SPELL_FUN(      spell_cure_addiction                );
 
 /*
  * OS-dependent declarations.
@@ -5974,18 +6051,6 @@ char *	crypt		args( ( const char *key, const char *salt ) );
 #endif
 
 /*
- * The crypt(3) function is not available on some operating systems.
- * In particular, the U.S. Government prohibits its export from the
- *   United States to foreign countries.
- * Turn on NOCRYPT to keep passwords in plain text.
- */
-#if	defined(NOCRYPT)
-#define crypt(s1, s2)	(s1)
-#endif
-
-extern "C" char *crypt(const char *key, const char *salt);
-
-/*
  * Data files used by the server.
  *
  * AREA_LIST contains a list of areas to boot.
@@ -6043,7 +6108,6 @@ extern "C" char *crypt(const char *key, const char *salt);
 #define WIZLIST_FILE	SYSTEM_DIR "WIZLIST"	  /* Wizlist		 */
 #define WHO_FILE	SYSTEM_DIR "WHO"	  /* Who output file	 */
 #define WEBWHO_FILE	SYSTEM_DIR "WEBWHO"	  /* WWW Who output file */
-#define REQUEST_PIPE	SYSTEM_DIR "REQUESTS"	  /* Request FIFO	 */
 #define SKILL_FILE	SYSTEM_DIR "skills.dat"   /* Skill table	 */
 #define HERB_FILE	SYSTEM_DIR "herbs.dat"	  /* Herb table		 */
 #define SOCIAL_FILE	SYSTEM_DIR "socials.dat"  /* Socials		 */
@@ -6104,7 +6168,7 @@ void  	talk_auction    args( ( const std::string& argument ) );
 bool    knows_language  args( ( CHAR_DATA *ch, int language,
 				CHAR_DATA *cch ) );
 bool    can_learn_lang  args( ( CHAR_DATA *ch, int language ) );
-int     countlangs      args( ( int languages ) );
+int     countlangs      args( ( const FLAG_SET &languages ) );
 char *	obj_short	args( ( OBJ_DATA *obj ) );
 
 /* act_info.c */
@@ -6122,7 +6186,9 @@ EXIT_DATA *find_door( CHAR_DATA *ch, const std::string& arg, bool quiet );
 ED *	get_exit	args( ( ROOM_INDEX_DATA *room, sh_int dir ) );
 ED *	get_exit_to	args( ( ROOM_INDEX_DATA *room, sh_int dir, int vnum ) );
 ED *	get_exit_num	args( ( ROOM_INDEX_DATA *room, sh_int count ) );
-ch_ret	move_char	args( ( CHAR_DATA *ch, EXIT_DATA *pexit, int fall ) );
+ch_ret  move_char( CHAR_DATA *ch, EXIT_DATA *pexit, int fall, bool voluntary = false );
+bool    craft_interpret_during_build( CHAR_DATA *ch, const std::string &command, const std::string &argument );
+void    show_room_map( CHAR_DATA *ch );
 void	teleport	args( ( CHAR_DATA *ch, int room, FLAG_SET flags ) );
 sh_int	encumbrance	args( ( CHAR_DATA *ch, sh_int move ) );
 bool	will_fall	args( ( CHAR_DATA *ch, int fall ) );
@@ -6157,8 +6223,8 @@ void	free_note	args( ( NOTE_DATA *pnote ) );
 /* build.c */
 const char *flag_bit_name(size_t bit, const flag_name *table);
 size_t get_attackflag( const std::string& flag );
-char *flag_string(const FLAG_SET &bv, char * const flagarray[], size_t max_flags);
-char *	flag_string	args( ( int bitvector, char * const flagarray[] ) );
+char *flag_string(const FLAG_SET &bv, const char * const flagarray[], size_t max_flags);
+char *	flag_string	args( ( int bitvector, const char * const flagarray[] ) );
 int	get_mpflag	args( ( const std::string& flag ) );
 int	get_dir		args( ( const std::string& txt  ) );
 std::string strip_cr( const std::string &str );
@@ -6174,8 +6240,6 @@ extern const char *  const           ex_flags[];
 CL *	get_clan		args( ( const std::string& name ) );
 void	load_clans		args( ( GameContext *game ) );
 void	save_clan		args( ( CLAN_DATA *clan ) );
-void	load_senate		args( ( GameContext *game ) );
-void	save_senate		args( ( GameContext *game ) );
 PLANET_DATA *	get_planet	args( ( const std::string& name ) );
 void	load_planets		args( ( GameContext *game ) );
 void	save_planet		args( ( PLANET_DATA *planet ) );
@@ -6198,6 +6262,7 @@ SH        *  get_ship          	    args( ( GameContext *game, const std::string
 SH        *  get_ship_from_filename args( ( GameContext *game, const std::string& name ) );
 void         load_ships        	    args( ( GameContext *game ) );
 void         save_ship      	    args( ( SHIP_DATA *ship ) );
+bool         create_template_ship( CHAR_DATA *ch, SHIP_DATA *ship, int destination, int price );
 void         load_space             args( ( GameContext *game ) );
 void         save_spaceobject        args( ( SPACE_DATA *spaceobject ) );
 SPACE_DATA * spaceobject_from_name   args( ( GameContext *game, const std::string& name ) );
@@ -6286,11 +6351,14 @@ void gmcp_init_subscriptions(DESCRIPTOR_DATA *d);
 void gmcp_flush(DESCRIPTOR_DATA *d);
 
 /* comm.c */
+bool    comm_desc_alive( const DESCRIPTOR_DATA *d );
+void    comm_close_failed_descriptors( void );
 int telnet_process      args( ( DESCRIPTOR_DATA *d, const unsigned char *in, int in_len, unsigned char *out, int out_max) );
 void	close_socket	args( ( DESCRIPTOR_DATA *dclose, bool force ) );
 //void	write_to_buffer	args( ( DESCRIPTOR_DATA *d, const char *txt, int length ) );
 void    write_to_buffer_str(DESCRIPTOR_DATA *d,  const std::string& txt);
 void output_to_descriptor(DESCRIPTOR_DATA *d, const std::string& txt);
+std::string prompt_text_prefix(const std::string &text);
 void	write_to_pager	args( ( DESCRIPTOR_DATA *d, const char *txt, int length ) );
 inline void write_to_pager( DESCRIPTOR_DATA *d, const std::string& txt );
 //void	send_to_char	args( ( const char *txt, CHAR_DATA *ch ) );
@@ -6300,8 +6368,8 @@ void	send_to_pager	args( ( const std::string& txt, CHAR_DATA *ch ) );
 void	send_to_pager	args( ( const char *txt, CHAR_DATA *ch ) );
 void	set_char_color  args( ( sh_int AType, CHAR_DATA *ch ) );
 void	set_pager_color	args( ( sh_int AType, CHAR_DATA *ch ) );
-void	ch_printf_	args( ( CHAR_DATA *ch, const char *fmt, ... ) );
-void	pager_printf	args( (CHAR_DATA *ch, const char *fmt, ...) );
+void	ch_printf_	args( ( CHAR_DATA *ch, const char *fmt, ... ) ) __attribute__((format(printf, 2, 3)));
+void	pager_printf	args( (CHAR_DATA *ch, const char *fmt, ...) ) __attribute__((format(printf, 2, 3)));
 void act( sh_int AType, const std::string &format, CHAR_DATA *ch,
           const std::string *arg1, const void *arg2, int type );
 void act( sh_int AType, const std::string &format, CHAR_DATA *ch,
@@ -6316,10 +6384,16 @@ void act( sh_int AType, const std::string &format, CHAR_DATA *ch,
           const void *arg1, const std::string &arg2, int type );          
 void	act		args( ( sh_int AType, const char *format, CHAR_DATA *ch, const void *arg1, const void *arg2, int type ) );
 
-inline void ch_printf( CHAR_DATA *ch, const std::string& txt )
+inline void ch_printf_impl( CHAR_DATA *ch, const std::string& txt )
 {
     send_to_char( txt, ch );
 }
+
+#define ch_printf(ch, fmt, ...) \
+    do { \
+        __VA_OPT__(if (false) mud_fmt_check((fmt), MUD_FOR_EACH(mud_fmt_arg, __VA_ARGS__));) \
+        ch_printf_impl((ch), (fmt) __VA_OPT__(,) __VA_ARGS__); \
+    } while (0)
 
 /* reset.c */
 RD  *	make_reset	args( ( char letter, int extra, int arg1, int arg2, int arg3 ) );
@@ -6331,10 +6405,10 @@ void	reset_area	args( ( GameContext *game, AREA_DATA * pArea ) );
 int utf8_decode(const unsigned char *p, unsigned int *out_cp);
 bool isspace_utf8(const char *p);
 bool isalpha_utf8(const char *p);
-void buffer_printf args ( ( DESCRIPTOR_DATA * d, const char *fmt, ... ) );
-void log_printf args( (const char *fmt, ...) );
-void log_printf_plus args ( (int log_type, int level, const char *fmt, ...) );
-void log_channelf args ( (int channel, const char *channel_name, int level, const char *fmt, ...) );
+void buffer_printf args ( ( DESCRIPTOR_DATA * d, const char *fmt, ... ) ) __attribute__((format(printf, 2, 3)));
+void log_printf args( (const char *fmt, ...) ) __attribute__((format(printf, 1, 2)));
+void log_printf_plus args ( (int log_type, int level, const char *fmt, ...) ) __attribute__((format(printf, 3, 4)));
+void log_channelf args ( (int channel, const char *channel_name, int level, const char *fmt, ...) ) __attribute__((format(printf, 4, 5)));
 void	show_file	args( ( CHAR_DATA *ch, char *filename ) );
 bool  is_valid_filename args( ( CHAR_DATA *ch, const std::string& direct, const std::string& filename ) );
 char *str_dup( const std::string &str );
@@ -6347,7 +6421,7 @@ OD *	create_object	args( ( OBJ_INDEX_DATA *pObjIndex, int level ) );
 void	clear_char	args( ( CHAR_DATA *ch ) );
 void	free_char	args( ( CHAR_DATA *ch ) );
 char *	get_extra_descr	args( ( const std::string& name, EXTRA_DESCR_DATA *ed ) );
-MID *	get_mob_index	args( ( sh_int vnum ) );
+MID *	get_mob_index	args( ( int vnum ) );
 OID *	get_obj_index	args( ( int vnum ) );
 RID *	get_room_index	args( ( int vnum ) );
 char	fread_letter	args( ( FILE *fp ) );
@@ -6357,7 +6431,7 @@ char *	fread_string	args( ( FILE *fp ) );
 char *	fread_string_nohash args( ( FILE *fp ) );
 void	fread_to_eol	args( ( FILE *fp ) );
 char *	fread_word	args( ( FILE *fp ) );
-char *	fread_line	args( ( FILE *fp ) );
+char *	fread_line	args( ( FILE *fp, bool skip_leading_whitespace = true ) );
 int	number_fuzzy	args( ( int number ) );
 int	number_range	args( ( int from, int to ) );
 int	number_percent	args( ( void ) );
@@ -6385,11 +6459,11 @@ std::string strupper(const std::string& str);
 std::string  aoran		args( ( const std::string& str ) );
 void	append_file	args( ( CHAR_DATA *ch, const std::string& file, const std::string& str ) );
 void	append_to_file	args( ( const std::string& file, const std::string& str ) );
-void	bug		args( ( const char *str, ... ) );
+void	bug		args( ( const char *str, ... ) ) __attribute__((format(printf, 1, 2)));
 void	log_string_plus	args( ( const char *str, sh_int log_type, sh_int level ) );
 RID *	make_room	args( ( GameContext *game, int vnum ) );
 OID *	make_object	args( ( GameContext *game, int vnum, int cvnum, const std::string& name ) );
-MID *	make_mobile	args( ( GameContext *game, sh_int vnum, sh_int cvnum, const std::string& name ) );
+MID *	make_mobile	args( ( GameContext *game, int vnum, int cvnum, const std::string& name ) );
 ED  *	make_exit	args( ( ROOM_INDEX_DATA *pRoomIndex, ROOM_INDEX_DATA *to_room, sh_int door ) );
 void	add_help	args( ( HELP_DATA *pHelp ) );
 void	fix_area_exits	args( ( AREA_DATA *tarea ) );
@@ -6408,10 +6482,17 @@ void	sort_area	args( ( AREA_DATA *pArea, bool proto ) );
 void 	save_sysdata	args( ( SYSTEM_DATA sys ) );
 
 /* build.c */
-bool string_to_bitset(const char *str, FLAG_SET &bv, const flag_name *table, bool clear_first = false);
+bool string_to_bitset(const std::string& str, FLAG_SET &bv, const flag_name *table, bool clear_first = false);
+inline bool string_to_bitset(const char *str, FLAG_SET &bv, const flag_name *table, bool clear_first = false)
+{
+    if (!str)
+        return false;
+    return string_to_bitset(std::string(str), bv, table, clear_first);
+}
 std::string bitset_to_string(const FLAG_SET &bv, const flag_name *table,
                              size_t min_bit = 0,
                              size_t max_bit = SIZE_MAX);
+void    set_weapon_flag( FLAG_SET &bv, size_t new_flag );
 void    start_editing( CHAR_DATA *ch, const std::string &data );
 void	start_editing	args( ( CHAR_DATA *ch, char *data ) );
 void	stop_editing	args( ( CHAR_DATA *ch ) );
@@ -6430,7 +6511,7 @@ EDD *	SetOExtra	args( ( OBJ_DATA *obj, const std::string&keywords ) );
 bool	DelOExtra	args( ( OBJ_DATA *obj, const std::string&keywords ) );
 EDD *	SetOExtraProto	args( ( OBJ_INDEX_DATA *obj, const std::string&keywords ) );
 bool	DelOExtraProto	args( ( OBJ_INDEX_DATA *obj, const std::string&keywords ) );
-void	fold_area	args( ( AREA_DATA *tarea, const std::string& filename, bool install ) );
+bool	fold_area	args( ( AREA_DATA *tarea, const std::string& filename, bool install ) );
 int	get_otype	args( ( const std::string& type ) );
 int	get_atype	args( ( const std::string& type ) );
 int	get_aflag	args( ( const std::string& flag ) );
@@ -6467,7 +6548,6 @@ bool	is_hunting	args( ( CHAR_DATA *ch, CHAR_DATA *victim ) );
 bool	is_hating	args( ( CHAR_DATA *ch, CHAR_DATA *victim ) );
 bool	is_fearing	args( ( CHAR_DATA *ch, CHAR_DATA *victim ) );
 bool	is_safe		args( ( CHAR_DATA *ch, CHAR_DATA *victim ) );
-bool	is_safe_nm	args( ( CHAR_DATA *ch, CHAR_DATA *victim ) );
 bool	legal_loot	args( ( CHAR_DATA *ch, CHAR_DATA *victim ) );
 bool    check_illegal_pk args( ( CHAR_DATA *ch, CHAR_DATA *victim ) );
 void    raw_kill        args( ( CHAR_DATA *ch, CHAR_DATA *victim ) );   
@@ -6479,6 +6559,7 @@ void	make_blood	args( ( CHAR_DATA *ch ) );
 void	make_bloodstain args( ( CHAR_DATA *ch ) );
 void	make_scraps	args( ( OBJ_DATA *obj ) );
 void	make_fire	args( ( ROOM_INDEX_DATA *in_room, sh_int timer) );
+void format_object_description(char *&description, char placeholder, const std::string &value);
 OD *	make_trap	args( ( int v0, int v1, int v2, int v3 ) );
 OD *	create_money	args( ( int amount ) );
 
@@ -6489,7 +6570,7 @@ void jedi_bonus   args( ( CHAR_DATA *ch ) );
 void sith_penalty args( ( CHAR_DATA *ch ) );
 
 /* mud_comm.c */
-char *	mprog_type_to_name	args( ( int type ) );
+char *	mprog_type_to_name	args( ( uint32_t type ) );
 
 /* mud_prog.c */
 
@@ -6513,11 +6594,11 @@ void    mprog_hitprcnt_trigger  args ( ( CHAR_DATA* mob, CHAR_DATA* ch ) );
 void    mprog_death_trigger     args ( ( CHAR_DATA *killer, CHAR_DATA* mob ) );
 void    mprog_random_trigger    args ( ( CHAR_DATA* mob ) );
 void    mprog_speech_trigger    args ( ( const std::string& txt, CHAR_DATA* mob ) );
-void    mprog_script_trigger    args ( ( CHAR_DATA *mob ) );
+bool    mprog_script_trigger    args ( ( CHAR_DATA *mob ) );
 void    mprog_hour_trigger      args ( ( CHAR_DATA *mob ) );
 void    mprog_time_trigger      args ( ( CHAR_DATA *mob ) );
 void    progbug                 args( ( const std::string& str, CHAR_DATA *mob ) );
-void progbugf                   args( ( CHAR_DATA *mob, const char *fmt, ... ) );
+void progbugf                   args( ( CHAR_DATA *mob, const char *fmt, ... ) ) __attribute__((format(printf, 2, 3)));
 void	rset_supermob		args( ( ROOM_INDEX_DATA *room) );
 void	release_supermob	args( ( GameContext *game ) );
 
@@ -6573,7 +6654,7 @@ bool	is_affected	args( ( CHAR_DATA *ch, int sn ) );
 void	affect_join	args( ( CHAR_DATA *ch, AFFECT_DATA *paf ) );
 void	char_from_room	args( ( CHAR_DATA *ch ) );
 void	char_to_room	args( ( CHAR_DATA *ch, ROOM_INDEX_DATA *pRoomIndex ) );
-OD *	obj_to_char	args( ( OBJ_DATA *obj, CHAR_DATA *ch ) );
+OD *obj_to_char(OBJ_DATA *obj, CHAR_DATA *ch, const EquipmentSlots *equipment = nullptr);
 void	obj_from_char	args( ( OBJ_DATA *obj ) );
 int	apply_ac	args( ( OBJ_DATA *obj, int iWear ) );
 OD *	get_eq_char	args( ( CHAR_DATA *ch, int iWear ) );
@@ -6586,7 +6667,6 @@ OD *	obj_to_obj	args( ( OBJ_DATA *obj, OBJ_DATA *obj_to ) );
 void	obj_from_obj	args( ( OBJ_DATA *obj ) );
 void	extract_obj	args( ( OBJ_DATA *obj ) );
 void	extract_exit	args( ( ROOM_INDEX_DATA *room, EXIT_DATA *pexit ) );
-void	extract_room	args( ( ROOM_INDEX_DATA *room ) );
 void	clean_room	args( ( ROOM_INDEX_DATA *room ) );
 void	clean_obj	args( ( OBJ_INDEX_DATA *obj ) );
 void	clean_mob	args( ( MOB_INDEX_DATA *mob ) );
@@ -6706,8 +6786,6 @@ int	dice_parse	args( (CHAR_DATA *ch, int level, char *exp) );
 SK *	get_skilltype	args( ( int sn ) );
 
 /* request.c */
-void	init_request_pipe	args( ( GameContext *game ) );
-void	check_requests		args( ( GameContext *game ) );
 
 /* save.c */
 /* object saving defines for fread/write_obj. -- Altrag */
@@ -6717,17 +6795,19 @@ void call_to_stop(); // Debugging function that does nothing but can be tracked 
 void fread_bitset_compat(FILE *fp, FLAG_SET &bv);
 void    fwrite_bitset(FILE *fp, const char *name, const FLAG_SET &bv);
 void    fread_bitset(FILE *fp, FLAG_SET &bv);
-void	save_char_obj	args( ( CHAR_DATA *ch ) );
+bool	save_char_obj	args( ( CHAR_DATA *ch ) );
+bool    read_saved_bounty_transaction( const std::string &name, std::string &transaction );
 void	save_clone	args( ( CHAR_DATA *ch ) );
-bool	load_char_obj	args( ( DESCRIPTOR_DATA *d, const std::string& name, bool preload ) );
-bool 	load_char_obj_v2 args( (DESCRIPTOR_DATA *d, const std::string& name, bool preload , int undead) );
+bool	load_char_obj( DESCRIPTOR_DATA *d, const std::string& name, bool preload, long *password_offset = nullptr );
+bool 	load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload, int undead, long *password_offset = nullptr );
+bool    replace_player_password( const CHAR_DATA *ch, long offset, const char *digest );
 void	set_alarm	args( ( long seconds ) );
 void	requip_char	args( ( CHAR_DATA *ch ) );
-void    fwrite_obj      args( ( CHAR_DATA *ch,  OBJ_DATA  *obj, FILE *fp, 
-				int iNest, sh_int os_type ) );
-void	fread_obj	args( ( GameContext *game, CHAR_DATA *ch,  FILE *fp, sh_int os_type ) );
-void	de_equip_char	args( ( CHAR_DATA *ch ) );
-void	re_equip_char	args( ( CHAR_DATA *ch ) );
+void fwrite_obj(CHAR_DATA *ch, OBJ_DATA *obj, FILE *fp, int iNest, sh_int os_type,
+                const EquipmentSlots *equipment = nullptr);
+void fread_obj(GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type, ObjectNest &nest);
+void de_equip_char(CHAR_DATA *ch, EquipmentSlots &equipment);
+void re_equip_char(CHAR_DATA *ch, const EquipmentSlots &equipment);
 void	save_home	args( ( CHAR_DATA *ch ) );
 void save_storeroom( ROOM_INDEX_DATA *room );
 void load_storerooms( GameContext *game );
@@ -6843,6 +6923,9 @@ bool olc_room_edit_bexit_field(CHAR_DATA* ch, ROOM_INDEX_DATA* room);
 std::string olc_room_exit_list_summary(void* obj);
 bool olc_room_edit_extradesc_field(CHAR_DATA* ch, ROOM_INDEX_DATA* room);
 std::string olc_room_extradesc_list_summary(void* obj);
+void olc_abort_descriptor(DESCRIPTOR_DATA *d);
+void olc_invalidate_target(void *target, const char *reason = nullptr);
+void invalidate_mprog_editors(MPROG_DATA *mprg);
 
 #undef	SK
 #undef	CO
@@ -6882,13 +6965,6 @@ struct	menu_data
     char		*cmdString;
 };
 
-DECLARE_DO_FUN( do_redraw_page  );
-DECLARE_DO_FUN( do_refresh_page );
-DECLARE_DO_FUN( do_pagelen	);
-DECLARE_DO_FUN( do_omenu  	);
-DECLARE_DO_FUN( do_rmenu  	);
-DECLARE_DO_FUN( do_mmenu  	);
-DECLARE_DO_FUN( do_clear  	);
 
 extern		MENU_DATA		room_page_a_data[];
 extern		MENU_DATA		room_page_b_data[];
@@ -6987,8 +7063,6 @@ extern	const   char    control_help_page[];
  *   Map Structures
  */
 
-DECLARE_DO_FUN( do_mapout 	);
-DECLARE_DO_FUN( do_lookmap	);
 
 struct  map_data	/* contains per-room data */
 {
@@ -7111,7 +7185,7 @@ void rprog_act_trigger( const std::string& buf, ROOM_INDEX_DATA *room, CHAR_DATA
 #define send_to_char_color  send_to_char
 #define GET_BETTED_ON(ch)    ((ch)->betted_on)
 #define GET_BET_AMT(ch) ((ch)->bet_amt)
-#define IN_ARENA(ch)            (IS_SET((ch)->in_room->room_flags, ROOM_ARENA))
+#define IN_ARENA(ch)            ((ch) != NULL && (ch)->in_room != NULL && BV_IS_SET((ch)->in_room->room_flags, ROOM_ARENA))
 DECLARE_DO_FUN(do_trivia);
 DECLARE_DO_FUN(do_trivia_answer);
 DECLARE_DO_FUN(do_trivia_question);

@@ -86,7 +86,7 @@ this room.
 5 10 0 0 0 0 0 0
 0 0 0 0 0 0 0 0
 > act_prog package~
-if ovnuminv(21209) >= 1
+if rand(0)
 say Thank you, $n.
 mpwithdraw 2500
 give 2500 credits $n

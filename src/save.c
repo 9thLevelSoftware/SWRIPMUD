@@ -30,6 +30,12 @@
 #include <dirent.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <cerrno>
+#include <climits>
+#include <cstdint>
+#include <fstream>
+#include <limits>
+#include <sstream>
 #include "mud.h"
 
 /*
@@ -38,13 +44,8 @@
 #define SAVEVERSION	3
 
 
-/*
- * Array to keep track of equipment temporarily.		-Thoric
- */
-OBJ_DATA *save_equipment[MAX_WEAR][8];
 CHAR_DATA *quitting_char, *loading_char, *saving_char;
 
-int file_ver;
 
 /*
  * Externals
@@ -52,19 +53,18 @@ int file_ver;
 void fwrite_comments( CHAR_DATA *ch, FILE *fp );
 void fread_comment( CHAR_DATA *ch, FILE *fp );
 
-/*
- * Array of containers read for proper re-nesting of objects.
- */
-static	OBJ_DATA *	rgObjNest	[MAX_NEST];
+extern int top_ed;
 
 /*
  * Local functions.
  */
 
-void	fwrite_char	args( ( CHAR_DATA *ch, FILE *fp ) );
-void	fread_char	args( ( CHAR_DATA *ch, FILE *fp, bool preload) );
+static void fwrite_char( CHAR_DATA *ch, FILE *fp );
+static void fread_char( CHAR_DATA *ch, FILE *fp, bool preload, int &file_version, long *password_offset );
+static void fread_obj_versioned(GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type,
+                               int file_version, ObjectNest &nest, EquipmentSlots *equipment = nullptr);
 void	write_corpses	args( ( CHAR_DATA *ch, const std::string& name ) );
-CHAR_DATA *  fread_mobile( GameContext *game, FILE *fp );
+CHAR_DATA *  fread_mobile( GameContext *game, FILE *fp, int file_version = SAVEVERSION );
 void write_char_mobile( CHAR_DATA *ch , char *argument );
 void read_char_mobile( GameContext *game, char *argument );
 void fwrite_mobile( FILE *fp, CHAR_DATA *mob );
@@ -103,32 +103,20 @@ void save_home( CHAR_DATA *ch )
  * Un-equip character before saving to ensure proper	-Thoric
  * stats are saved in case of changes to or removal of EQ
  */
-void de_equip_char( CHAR_DATA *ch )
+void de_equip_char(CHAR_DATA *ch, EquipmentSlots &equipment)
 {
-    std::string buf;
-    OBJ_DATA *obj;
-    int x,y;
+    equipment = {};
 
-    for ( x = 0; x < MAX_WEAR; x++ )
-	for ( y = 0; y < MAX_LAYERS; y++ )
-	    save_equipment[x][y] = NULL;
-    for ( obj = ch->first_carrying; obj; obj = obj->next_content )
-	if ( obj->wear_loc > -1 && obj->wear_loc < MAX_WEAR )
+    for (OBJ_DATA *obj = ch->first_carrying; obj; obj = obj->next_content)
+	if ( is_valid_wear_location( obj->wear_loc ) )
 	{
-	    
-		for ( x = 0; x < MAX_LAYERS; x++ )
-		   if ( !save_equipment[obj->wear_loc][x] )
-		   {
-			save_equipment[obj->wear_loc][x] = obj;
-			break;
-		   }
-		if ( x == MAX_LAYERS )
-		{
-		    buf = str_printf("%s had on more than %d layers of clothing in one location (%d): %s",
-			ch->name, MAX_LAYERS, obj->wear_loc, obj->name );
-		    bug( buf.c_str(), 0 );
-		}
-	    
+	    auto &layers = equipment[obj->wear_loc];
+	    const auto empty_slot = std::find(layers.begin(), layers.end(), nullptr);
+	    if (empty_slot == layers.end())
+		bug("%s had on more than %d layers of clothing in one location (%d): %s",
+		    ch->name, MAX_LAYERS, obj->wear_loc, obj->name);
+	    else
+		*empty_slot = obj;
 	    unequip_char(ch, obj);
 	}
 }
@@ -136,69 +124,223 @@ void de_equip_char( CHAR_DATA *ch )
 /*
  * Re-equip character					-Thoric
  */
-void re_equip_char( CHAR_DATA *ch )
+void re_equip_char(CHAR_DATA *ch, const EquipmentSlots &equipment)
 {
-    int x,y;
+    if (quitting_char == ch)
+        return;
 
-    for ( x = 0; x < MAX_WEAR; x++ )
-	for ( y = 0; y < MAX_LAYERS; y++ )
-	   if ( save_equipment[x][y] != NULL )
-	   {
-		if ( quitting_char != ch )
-		   equip_char(ch, save_equipment[x][y], x);
-		save_equipment[x][y] = NULL;
-	   }
-	   else
-		break;
+    for (int wear = 0; wear < MAX_WEAR; ++wear)
+        for (OBJ_DATA *obj : equipment[wear])
+            if (obj)
+                equip_char(ch, obj, wear);
 }
 
 
+static bool create_save_bucket( const char *root, char initial )
+{
+    const std::string bucket = std::string(root) + initial;
+    for ( const char *path : {root, bucket.c_str()} )
+    {
+        if ( mkdir( path, 0750 ) == 0 )
+            continue;
+        if ( errno == EEXIST )
+        {
+            struct stat info;
+            if ( stat( path, &info ) == 0 )
+            {
+                if ( S_ISDIR( info.st_mode ) )
+                    continue;
+                errno = ENOTDIR;
+            }
+        }
+        bug( "Save_char_obj: cannot create directory %s: %s", path, strerror(errno) );
+        return false;
+    }
+    return true;
+}
+
+static FILE *open_pfile_temp( const std::string &path, std::string &temp_path )
+{
+    temp_path = path + ".tmp.XXXXXX";
+    const int fd = mkstemp( temp_path.data() );
+    if ( fd < 0 )
+        return nullptr;
+
+    FILE *fp = fdopen( fd, "wb" );
+    if ( !fp )
+    {
+        const int open_error = errno;
+        close( fd );
+        unlink( temp_path.c_str() );
+        errno = open_error;
+    }
+    return fp;
+}
+
+static bool close_pfile( FILE *fp )
+{
+    const bool complete = !ferror(fp) && fflush(fp) == 0 && fsync(fileno(fp)) == 0;
+    const bool closed = fclose(fp) == 0;
+    return complete && closed;
+}
+
+static bool sync_save_directory( const std::string &path )
+{
+    const int fd = open( path.c_str(), O_RDONLY | O_DIRECTORY );
+    if ( fd < 0 )
+        return false;
+    const bool synced = fsync( fd ) == 0;
+    const bool closed = close( fd ) == 0;
+    return synced && closed;
+}
+
+bool read_saved_bounty_transaction( const std::string &name, std::string &transaction )
+{
+    if ( name.empty() || name.find_first_not_of( "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" ) != std::string::npos )
+        return false;
+
+    const char initial = tolower( static_cast<unsigned char>(name[0]) );
+    const std::string bucket = std::string( PLAYER_DIR ) + initial;
+    std::ifstream input( bucket + "/" + capitalize( name ) );
+    std::string field;
+    if ( !(input >> field) || field != "#PLAYER" || !(input >> field) )
+        return false;
+    if ( field == "Version" )
+    {
+        int version;
+        if ( !(input >> version >> field) )
+            return false;
+    }
+
+    std::string token;
+    if ( field == "BountyTxn" )
+    {
+        if ( !(input >> token >> field) || token.size() != 64
+             || token.find_first_not_of( "0123456789abcdef" ) != std::string::npos )
+            return false;
+    }
+    if ( field != "Toplevel" && field != "Name" )
+        return false;
+
+    if ( !sync_save_directory( bucket ) || !sync_save_directory( PLAYER_DIR ) )
+        return false;
+
+    transaction = token;
+    return true;
+}
+
+static bool copy_pfile_data( FILE *input, FILE *output, long remaining = -1 )
+{
+    char buffer[8192];
+    while ( remaining != 0 )
+    {
+        const size_t capacity = remaining < 0 ? sizeof(buffer)
+            : std::min( sizeof(buffer), static_cast<size_t>( remaining ) );
+        const size_t length = fread( buffer, 1, capacity, input );
+        if ( fwrite( buffer, 1, length, output ) != length )
+            return false;
+        if ( length < capacity )
+            return remaining < 0 && !ferror( input );
+        if ( remaining > 0 )
+            remaining -= length;
+    }
+    return !ferror( input );
+}
+
+bool replace_player_password( const CHAR_DATA *ch, long offset, const char *digest )
+{
+    if ( offset < 0 )
+        return false;
+
+    const std::string path = str_printf( "%s%c/%s", PLAYER_DIR,
+        tolower( static_cast<unsigned char>( ch->name[0] ) ), capitalize( ch->name ).c_str() );
+    FILE *input = fopen( path.c_str(), "rb" );
+    if ( !input )
+        return false;
+
+    const std::string previous = std::string( ch->pcdata->pwd ) + "~";
+    std::string field( previous.size(), '\0' );
+    std::string temporary;
+    FILE *output = open_pfile_temp( path, temporary );
+    if ( !output )
+    {
+        fclose( input );
+        return false;
+    }
+
+    const bool copied = copy_pfile_data( input, output, offset )
+        && fread( field.data(), 1, field.size(), input ) == field.size() && field == previous
+        && fprintf( output, "%s~", digest ) > 0 && copy_pfile_data( input, output );
+    const bool input_closed = fclose( input ) == 0;
+    const bool output_closed = close_pfile( output );
+    if ( copied && input_closed && output_closed && rename( temporary.c_str(), path.c_str() ) == 0 )
+        return true;
+
+    bug( "Cannot update password field for %s", ch->name );
+    unlink( temporary.c_str() );
+    return false;
+}
+
+static void backup_pfile( const std::string &path, const std::string &backup_path )
+{
+    FILE *input = fopen( path.c_str(), "rb" );
+    if ( !input )
+    {
+        if ( errno != ENOENT )
+            bug( "Save_char_obj: cannot read previous save %s: %s", path.c_str(), strerror(errno) );
+        return;
+    }
+
+    std::string temp_path;
+    FILE *output = open_pfile_temp( backup_path, temp_path );
+    if ( !output )
+    {
+        bug( "Save_char_obj: cannot open backup for %s: %s", path.c_str(), strerror(errno) );
+        fclose( input );
+        return;
+    }
+
+    const bool copied = copy_pfile_data( input, output );
+    const bool input_closed = fclose(input) == 0;
+    const bool output_closed = close_pfile(output);
+    if ( copied && input_closed && output_closed
+         && rename( temp_path.c_str(), backup_path.c_str() ) == 0 )
+        return;
+
+    bug( "Save_char_obj: backup failed for %s", path.c_str() );
+    unlink( temp_path.c_str() );
+}
+
 /*
  * Save a character and inventory.
- * Would be cool to save NPC's too for quest purposes,
- *   some of the infrastructure is provided.
  */
-void save_char_obj( CHAR_DATA *ch )
+bool save_char_obj( CHAR_DATA *ch )
 {
-    std::string strsave, strback;
     FILE *fp;
 
     if ( !ch )
     {
-	bug( "Save_char_obj: null ch!", 0 );
-	return;
+	bug( "Save_char_obj: null ch!" );
+	return false;
     }
 
-    if ( IS_NPC(ch) || NOT_AUTHED(ch) )
-	return;
-
-    saving_char = ch;
-    /* save pc's clan's data while we're at it to keep the data in sync */
-    if ( !IS_NPC(ch) && ch->pcdata->clan )
-	save_clan( ch->pcdata->clan );
+    if ( IS_NPC(ch) || !ch->pcdata || NOT_AUTHED(ch) )
+	return false;
 
     if ( ch->desc && ch->desc->original )
 	ch = ch->desc->original;
 
-    de_equip_char( ch );
+    if ( !ch->name || !ch->name[0] || !ch->pcdata )
+	return false;
 
-    ch->pcdata->save_time = current_time;
-    strsave = str_printf("%s%c/%s", PLAYER_DIR, tolower(ch->name[0]),
-				 capitalize( ch->name ).c_str() );
+    saving_char = ch;
+    /* Keep the player's clan data in sync. */
+    if ( ch->pcdata->clan )
+	save_clan( ch->pcdata->clan );
 
-    /*
-     * Auto-backup pfile (can cause lag with high disk access situtations
-     */
-    if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_BACKUP ) )
-    {
-		strback = str_printf("%s%c/%s", BACKUP_DIR, tolower(ch->name[0]),
-					capitalize( ch->name ).c_str() );
-		if (rename(strsave.c_str(), strback.c_str()) != 0)
-		{
-			perror("rename failed");
-			bug("save_char_obj: backup rename failed", 0);
-		}
-    }
+    const char initial = tolower( static_cast<unsigned char>(ch->name[0]) );
+    const std::string name = capitalize( ch->name );
+    const std::string strsave = str_printf( "%s%c/%s", PLAYER_DIR, initial, name.c_str() );
 
     /*
      * Save immortal stats, level & vnums for wizlist		-Thoric
@@ -209,12 +351,12 @@ void save_char_obj( CHAR_DATA *ch )
      */
     if ( get_trust(ch) > LEVEL_HERO )
     {
-      strback = str_printf("%s%s", GOD_DIR, capitalize( ch->name ).c_str() );
+      const std::string god_file = str_printf( "%s%s", GOD_DIR, name.c_str() );
 
-      if ( ( fp = fopen( strback.c_str(), "w" ) ) == NULL )
+      if ( ( fp = fopen( god_file.c_str(), "w" ) ) == NULL )
       {
-	bug( "Save_god_level: fopen", 0 );
-	perror( strback.c_str() );
+	bug( "Save_god_level: fopen" );
+	perror( god_file.c_str() );
       }
       else
       {
@@ -234,32 +376,54 @@ void save_char_obj( CHAR_DATA *ch )
       }
     }
 
-    if ( ( fp = fopen( strsave.c_str(), "w" ) ) == NULL )
+    bool saved = false;
+    if ( create_save_bucket( PLAYER_DIR, initial ) )
     {
-	bug( "Save_char_obj: fopen", 0 );
-	perror( strsave.c_str() );
-    }
-    else
-    {
-	fwrite_char( ch, fp );
-	if ( ch->first_carrying )
-	  fwrite_obj( ch, ch->last_carrying, fp, 0, OS_CARRY );
-/*	if ( ch->pcdata->pet )
-		fwrite_mobile( fp, ch->pcdata->pet ); */
-	if ( ch->pcdata && ch->pcdata->comments )         /* comments */
-	  fwrite_comments( ch, fp );        /* comments */
-	if ( ch->pcdata->pet )
-		fwrite_mobile( fp, ch->pcdata->pet );
-	fprintf( fp, "#END\n" );
-	FCLOSE( fp );
-    }
+        std::string temp_path;
+        fp = open_pfile_temp( strsave, temp_path );
+        if ( !fp )
+            bug( "Save_char_obj: cannot open new save for %s: %s", strsave.c_str(), strerror(errno) );
+        else
+        {
+            EquipmentSlots equipment;
+            de_equip_char(ch, equipment);
+            fwrite_char( ch, fp );
+            if ( ch->first_carrying )
+                fwrite_obj(ch, ch->last_carrying, fp, 0, OS_CARRY, &equipment);
+            if ( ch->pcdata->comments )
+                fwrite_comments( ch, fp );
+            if ( ch->pcdata->pet )
+                fwrite_mobile( fp, ch->pcdata->pet );
+            fprintf( fp, "#END\n" );
+            const bool complete = close_pfile( fp );
+            re_equip_char(ch, equipment);
 
-    re_equip_char( ch );
+            if ( complete )
+            {
+                if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_BACKUP )
+                     && create_save_bucket( BACKUP_DIR, initial ) )
+                {
+                    const std::string backup_path = str_printf( "%s%c/%s", BACKUP_DIR, initial, name.c_str() );
+                    backup_pfile( strsave, backup_path );
+                }
+                saved = rename( temp_path.c_str(), strsave.c_str() ) == 0;
+                if ( !saved )
+                    bug( "Save_char_obj: cannot publish save %s: %s", strsave.c_str(), strerror(errno) );
+            }
+            else
+                bug( "Save_char_obj: cannot finish writing %s", strsave.c_str() );
+
+            if ( saved )
+                ch->pcdata->save_time = current_time;
+            else
+                unlink( temp_path.c_str() );
+        }
+    }
 
     write_corpses(ch, "");
     quitting_char = NULL;
     saving_char   = NULL;
-    return;
+    return saved;
 }
 
 void save_clone( CHAR_DATA *ch )
@@ -269,7 +433,7 @@ void save_clone( CHAR_DATA *ch )
 
     if ( !ch )
     {
-	bug( "Save_char_obj: null ch!", 0 );
+	bug( "Save_char_obj: null ch!" );
 	return;
     }
 
@@ -279,11 +443,13 @@ void save_clone( CHAR_DATA *ch )
     if ( ch->desc && ch->desc->original )
 	ch = ch->desc->original;
 
-    de_equip_char( ch );
+    saving_char = ch;
+    EquipmentSlots equipment;
+    de_equip_char(ch, equipment);
     ch->pcdata->clones++;
     
     ch->pcdata->save_time = current_time;
-    strsave = str_printf("%s%c/%s.clone", PLAYER_DIR, tolower(ch->name[0]),
+    strsave = str_printf("%s%c/%s.clone", PLAYER_DIR, tolower(static_cast<unsigned char>(ch->name[0])),
 				 capitalize( ch->name ).c_str() );
 
     /*
@@ -291,14 +457,14 @@ void save_clone( CHAR_DATA *ch )
      */
     if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_BACKUP ) )
     {
-	strback = str_printf("%s%c/%s", BACKUP_DIR, tolower(ch->name[0]),
+	strback = str_printf("%s%c/%s.clone", BACKUP_DIR, tolower(static_cast<unsigned char>(ch->name[0])),
 				 capitalize( ch->name ).c_str() );
 	rename( strsave.c_str(), strback.c_str() );
     }
 
     if ( ( fp = fopen( strsave.c_str(), "w" ) ) == NULL )
     {
-	bug( "Save_char_obj: fopen", 0 );
+	bug( "Save_char_obj: fopen" );
 	perror( strsave.c_str() );
     }
     else
@@ -311,7 +477,7 @@ void save_clone( CHAR_DATA *ch )
     }
 
     ch->pcdata->clones--;
-    re_equip_char( ch );
+    re_equip_char(ch, equipment);
 
     write_corpses(ch, "");
     quitting_char = NULL;
@@ -347,22 +513,72 @@ void fwrite_bitset(FILE *fp, const char *name, const FLAG_SET &bv)
 void fread_bitset(FILE *fp, FLAG_SET &bv)
 {
     bv.reset();
+    if ( !fp )
+        return;
 
     for (;;)
     {
-        int bit = fread_number(fp);
-//		fprintf(stderr,"DEBUG: bit read = %d\r\n", bit);
-        if (bit < 0)
+        int c;
+        do
+        {
+            c = getc( fp );
+        }
+        while ( c != EOF && isspace( static_cast<unsigned char>(c) ) );
+
+        if ( c == EOF || ferror( fp ) )
+        {
+            bug( "fread_bitset: EOF encountered before -1 terminator" );
+            break;
+        }
+
+        int bit;
+        if ( c == '-' || c == '+' )
+        {
+            int next = getc( fp );
+            if ( next == EOF || ferror( fp ) )
+            {
+                bug( "fread_bitset: EOF encountered after sign before -1 terminator" );
+                break;
+            }
+            if ( !isdigit( static_cast<unsigned char>(next) ) )
+            {
+                bug( "fread_bitset: unexpected char '%c' after '%c' before -1 terminator", next, c );
+                ungetc( next, fp );
+                fread_to_eol( fp );
+                break;
+            }
+            ungetc( next, fp );
+            bit = fread_number( fp );
+            if ( c == '-' )
+                bit = -bit;
+        }
+        else if ( !isdigit( static_cast<unsigned char>(c) ) )
+        {
+            bug( "fread_bitset: unexpected char '%c' before -1 terminator", c );
+            ungetc( c, fp );
+            fread_to_eol( fp );
+            break;
+        }
+        else
+        {
+            ungetc( c, fp );
+            bit = fread_number( fp );
+        }
+
+        if ( bit < 0 )
             break;
 
-        if (bit > 20000)   // pick a sane upper bound
+        if ( bit > 20000 )   // pick a sane upper bound
         {
-            bug("fread_bitset: insane bit %d", bit);
-            fread_to_eol(fp);   // discard rest of line
+            bug( "fread_bitset: insane bit %d", bit );
+            fread_to_eol( fp );   // discard rest of line
             break;
         }
 
         bv.set((size_t)bit);
+
+        if ( feof( fp ) || ferror( fp ) )
+            break;
     }
 }
 
@@ -375,54 +591,103 @@ void fread_bitset_compat(FILE *fp, FLAG_SET &bv)
 {
     bv.reset();
 
-    char *ln = fread_line(fp);
-
-    int vals[64]; // more than enough
-    int count = 0;
-
-    char *ptr = ln;
-    while (*ptr && count < 64)
+    constexpr size_t max_bitset_line = MAX_BITS * 6 + 2;
+    std::string line;
+    int c;
+    while ((c = getc(fp)) != EOF && c != '\n' && c != '\r')
     {
-        while (isspace(*ptr)) ++ptr;
-        if (!*ptr) break;
+        if (line.size() <= max_bitset_line)
+            line.push_back(static_cast<char>(c));
+    }
+    if (line.size() > max_bitset_line)
+    {
+        bug("fread_bitset_compat: line too long");
+        return;
+    }
+    const char *ln = line.c_str();
+    std::vector<int> vals;
 
-        vals[count++] = strtol(ptr, &ptr, 10);
+    const char *ptr = ln;
+    while (*ptr)
+    {
+        while (isspace(static_cast<unsigned char>(*ptr)))
+            ++ptr;
+        if (!*ptr)
+            break;
+
+        errno = 0;
+        char *end = nullptr;
+        long v = strtol(ptr, &end, 10);
+        if (end == ptr)
+        {
+            bug("fread_bitset_compat: non-numeric token in line '%s'", ln);
+            break;
+        }
+        ptr = end;
+        if (errno == ERANGE || v < INT_MIN || v > INT_MAX)
+        {
+            bug("fread_bitset_compat: integer out of range in line '%s'", ln);
+            continue;
+        }
+        vals.push_back(static_cast<int>(v));
     }
 
-    if (count == 0)
+    if (vals.empty())
         return;
 
     /*
      * Check for NEW format (ends with -1)
      */
-    if (vals[count - 1] == -1)
+    if (vals.back() == -1)
     {
-        for (int i = 0; i < count - 1; ++i)
+        for (size_t i = 0; i + 1 < vals.size(); ++i)
         {
+            if (vals[i] >= MAX_BITS)
+            {
+                bug("fread_bitset_compat: insane bit %d", vals[i]);
+                continue;
+            }
             if (vals[i] >= 0)
-                bv.set(vals[i]);
+                bv.set(static_cast<size_t>(vals[i]));
         }
         return;
     }
 
     /*
-     * Check for OLD format (8 values, all 0/1)
+     * Check for OLD formats (8 values):
+     *   1) Legacy 32-bit bitmask in vals[0] followed by seven 0s
+     *   2) 8-element boolean array (all 0/1)
      */
-    if (count == 8)
+    if (vals.size() == 8)
     {
-        bool old = true;
-        for (int i = 0; i < 8; ++i)
+        bool trailing_zeros = true;
+        for (size_t i = 1; i < 8; ++i)
         {
-            if (i != 0 && vals[i] != 0 && vals[i] != 1)
+            if (vals[i] != 0)
             {
-                old = false;
+                trailing_zeros = false;
                 break;
             }
         }
-
-        if (old)
+        if (trailing_zeros)
         {
-            for (int i = 0; i < 8; ++i)
+            if (vals[0] != 0)
+                bv = int_to_bitset(vals[0]);
+            return;
+        }
+
+        bool all_bool = true;
+        for (size_t i = 0; i < 8; ++i)
+        {
+            if (vals[i] != 0 && vals[i] != 1)
+            {
+                all_bool = false;
+                break;
+            }
+        }
+        if (all_bool)
+        {
+            for (size_t i = 0; i < 8; ++i)
             {
                 if (vals[i])
                     bv.set(i);
@@ -434,10 +699,15 @@ void fread_bitset_compat(FILE *fp, FLAG_SET &bv)
     /*
      * Fallback: treat as new format without -1 (tolerant mode)
      */
-    for (int i = 0; i < count; ++i)
+    for (int val : vals)
     {
-        if (vals[i] >= 0)
-            bv.set(vals[i]);
+        if (val >= MAX_BITS)
+        {
+            bug("fread_bitset_compat: insane bit %d", val);
+            continue;
+        }
+        if (val >= 0)
+            bv.set(static_cast<size_t>(val));
     }
 }
 
@@ -445,16 +715,18 @@ void fread_bitset_compat(FILE *fp, FLAG_SET &bv)
 /*
  * Write the char.
  */
-void fwrite_char( CHAR_DATA *ch, FILE *fp )
+static void fwrite_char( CHAR_DATA *ch, FILE *fp )
 {
     AFFECT_DATA *paf;
     ALIAS_DATA *pal;
     int sn, track, drug;
     SKILLTYPE *skill;
 
-    fprintf( fp, "#%s\n", IS_NPC(ch) ? "MOB" : "PLAYER"		);
+    fprintf( fp, "#PLAYER\n" );
 
     fprintf( fp, "Version      %d\n",   SAVEVERSION		);
+    if ( !ch->pcdata->bounty_transaction.empty() )
+        fprintf( fp, "BountyTxn    %s\n", ch->pcdata->bounty_transaction.c_str() );
     fprintf( fp, "Toplevel     %d\n",   ch->top_level           );
     fprintf( fp, "Name         %s~\n",	ch->name		);
     if ( ch->short_descr && ch->short_descr[0] != '\0' )
@@ -470,15 +742,26 @@ void fwrite_char( CHAR_DATA *ch, FILE *fp )
 	fwrite_bitset( fp, "Speaks", ch->speaks);
     if ( ch->trust )
       fprintf( fp, "Trust        %d\n",	ch->trust		);
-    fprintf( fp, "Played       %d\n",
-	ch->pcdata->played + (int) (current_time - ch->pcdata->logon)		);
+    {
+      long long played_total = std::max( 0LL, ch->pcdata->played );
+      if ( ch->pcdata->logon > 0 && current_time > ch->pcdata->logon )
+      {
+        const auto elapsed = static_cast<long long>( current_time - ch->pcdata->logon );
+        played_total += std::min( elapsed, LLONG_MAX - played_total );
+      }
+      fprintf( fp, "Played       %lld\n", played_total );
+    }
     fprintf( fp, "Room         %d\n",
 	(  ch->in_room == get_room_index( ROOM_VNUM_LIMBO )
 	&& ch->was_in_room )
 	    ? ch->was_in_room->vnum
-	    : ch->in_room->vnum );
+	    : ( ch->in_room ? ch->in_room->vnum : ROOM_VNUM_LIMBO ) );
     if ( ch->plr_home != NULL )
-       fprintf( fp, "PlrHome      %d\n",          ch->plr_home->vnum );
+    {
+       fprintf( fp, "PlrHome      %d\n", ch->plr_home->vnum );
+       if ( ch->pcdata->home_generation > 0 )
+           fprintf( fp, "HomeGeneration %d\n", ch->pcdata->home_generation );
+    }
 
     fprintf( fp, "HpManaMove   %d %d 0 0 %d %d\n",
 	ch->hit, ch->max_hit, ch->move, ch->max_move );
@@ -491,15 +774,13 @@ void fwrite_char( CHAR_DATA *ch, FILE *fp )
            fprintf( fp, "Ability        %d %d %ld\n",	
               ability , ch->skill_level[ability] , ch->experience[ability] );
     }
-    fprintf( fp, "Clones         %d\n",	ch->pcdata->clones		);
     fprintf( fp, "Salary_time         %ld\n",	ch->pcdata->salary_date );
     fprintf( fp, "Salary         %d\n",	ch->pcdata->salary		);
     fprintf( fp, "Clones         %d\n",	ch->pcdata->clones		);
     fprintf( fp, "Questpoints         %d\n",	ch->questpoints		);
     fprintf( fp, "Nextquest         %d\n",	ch->nextquest		);
     fprintf( fp, "Jailvnum         %d\n",	ch->pcdata->jail_vnum	);
-    if ( ch->act.any() )
-	fwrite_bitset(fp, "ActEx", ch->act);
+    fwrite_bitset( fp, "ActEx", ch->act );
     if ( ch->affected_by.any() )
 	  fwrite_bitset(fp, "AffectedByEx",ch->affected_by);
     fprintf( fp, "Position     %d\n",
@@ -533,16 +814,9 @@ void fwrite_char( CHAR_DATA *ch, FILE *fp )
     if ( ch->mental_state != -10 )
       fprintf( fp, "Mentalstate  %d\n",	ch->mental_state	);
 
-    if ( IS_NPC(ch) )
-    {
-	fprintf( fp, "Vnum         %d\n",	ch->pIndexData->vnum	);
-        fprintf( fp, "Mobinvis     %d\n",	ch->mobinvis		);
-    }
-    else
     {
 	fprintf( fp, "Password     %s~\n",	ch->pcdata->pwd		);
-	fprintf( fp, "Lastplayed   %d\n",
-        	(int)current_time );
+	fprintf( fp, "Lastplayed   %lld\n", static_cast<long long>( current_time ) );
 	if ( ch->pcdata->bamfin && ch->pcdata->bamfin[0] != '\0' )
 	  fprintf( fp, "Bamfin       %s~\n",	ch->pcdata->bamfin	);
 	if ( ch->pcdata->email && ch->pcdata->email[0] != '\0' )
@@ -606,8 +880,8 @@ void fwrite_char( CHAR_DATA *ch, FILE *fp )
 	  fprintf( fp, "Clan         %s~\n",	ch->pcdata->clan_name	);
 	fwrite_bitset(fp, "FlagsEx", ch->pcdata->flags);
         if ( ch->pcdata->release_date > current_time )
-            fprintf( fp, "Helled       %d %s~\n",
-        	(int)ch->pcdata->release_date, ch->pcdata->helled_by );
+            fprintf( fp, "Helled       %lld %s~\n",
+                static_cast<long long>( ch->pcdata->release_date ), ch->pcdata->helled_by );
 	if ( ch->pcdata->pkills )
 	  fprintf( fp, "PKills       %d\n",	ch->pcdata->pkills	);
 	if ( ch->pcdata->pdeaths )
@@ -717,11 +991,11 @@ void fwrite_char( CHAR_DATA *ch, FILE *fp )
  * Write an object and its contents.
  */
 void fwrite_obj( CHAR_DATA *ch, OBJ_DATA *obj, FILE *fp, int iNest,
-		 sh_int os_type )
+		 sh_int os_type, const EquipmentSlots *equipment )
 {
     EXTRA_DESCR_DATA *ed;
     AFFECT_DATA *paf;
-    sh_int wear, wear_loc, x;
+    int wear_loc = WEAR_NONE;
 
     if ( iNest >= MAX_NEST )
     {
@@ -740,7 +1014,7 @@ void fwrite_obj( CHAR_DATA *ch, OBJ_DATA *obj, FILE *fp, int iNest,
      *   so loading them will load in forwards order.
      */
     if ( obj->prev_content && os_type != OS_CORPSE )
-	fwrite_obj( ch, obj->prev_content, fp, iNest, OS_CARRY );
+	fwrite_obj(ch, obj->prev_content, fp, iNest, OS_CARRY, equipment);
 
     /*
      * Castrate storage characters.
@@ -781,18 +1055,17 @@ void fwrite_obj( CHAR_DATA *ch, OBJ_DATA *obj, FILE *fp, int iNest,
     if ( obj->wear_flags != obj->pIndexData->wear_flags )
 		fwrite_bitset(fp,"WearFlagsEx", obj->wear_flags);
 //		fprintf( fp, "WearFlags    %d\n",	obj->wear_flags	     );
-    wear_loc = -1;
-    for ( wear = 0; wear < MAX_WEAR; wear++ )
-	for ( x = 0; x < MAX_LAYERS; x++ )
-	   if ( obj == save_equipment[wear][x] )
-	   {
-		wear_loc = wear;
-		break;
-	   }
-	   else
-	   if ( !save_equipment[wear][x] )
-		break;
-    if ( wear_loc != -1 )
+    if (equipment)
+        for (int wear = 0; wear < MAX_WEAR; ++wear)
+        {
+            const auto &layers = (*equipment)[wear];
+            if (std::find(layers.begin(), layers.end(), obj) != layers.end())
+            {
+                wear_loc = wear;
+                break;
+            }
+        }
+    if ( wear_loc != WEAR_NONE )
 	fprintf( fp, "WearLoc      %d\n",	wear_loc	     );
     if ( obj->item_type != obj->pIndexData->item_type )
 	fprintf( fp, "ItemType     %d\n",	obj->item_type	     );
@@ -889,7 +1162,7 @@ void fwrite_obj( CHAR_DATA *ch, OBJ_DATA *obj, FILE *fp, int iNest,
     fprintf( fp, "End\n\n" );
 
     if ( obj->first_content )
-	fwrite_obj( ch, obj->last_content, fp, iNest + 1, OS_CARRY );
+	fwrite_obj(ch, obj->last_content, fp, iNest + 1, OS_CARRY, equipment);
 
     return;
 }
@@ -899,36 +1172,39 @@ void fwrite_obj( CHAR_DATA *ch, OBJ_DATA *obj, FILE *fp, int iNest,
 /*
  * Load a char and inventory into a new ch structure.
  */
-bool load_char_obj( DESCRIPTOR_DATA *d, const std::string& name, bool preload )
+bool load_char_obj( DESCRIPTOR_DATA *d, const std::string& name, bool preload, long *password_offset )
 {
-  return load_char_obj_v2(d,name,preload,0);
+  return load_char_obj_v2(d,name,preload,0,password_offset);
 }
 
 /*
  * Load a char and inventory into a new ch structure with option of restoring from backup.
  */
-bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload , int undead)
+bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload, int undead, long *password_offset )
 {
     std::string strsave;
     CHAR_DATA *ch;
     FILE *fp;
     bool found;
+    bool from_backup = undead != 0;
+    if ( password_offset )
+        *password_offset = -1;
+    int file_version = 0;
     struct stat fst;
-    int i, x;
+    EquipmentSlots equipment{};
+    ObjectNest nest{};
     extern FILE *fpArea;
     extern char strArea[MAX_INPUT_LENGTH];
 //  char buf[MAX_INPUT_LENGTH];
     
     CREATE( ch, CHAR_DATA, 1 );
 	ch->game = d->game;
-    for ( x = 0; x < MAX_WEAR; x++ )
-	for ( i = 0; i < MAX_LAYERS; i++ )
-	    save_equipment[x][i] = NULL;
     clear_char( ch );
     loading_char = ch;
 
 	ch->game = d->game;
 	ch->pcdata = new PC_DATA();
+	ch->pcdata->logon = current_time;
     d->character			= ch;
     ch->on				= NULL;
     ch->desc				= d;
@@ -937,6 +1213,7 @@ bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload
 	BV_SET_BIT(ch->act,PLR_BLANK);	
 	BV_SET_BIT(ch->act,PLR_COMBINE);
 	BV_SET_BIT(ch->act,PLR_PROMPT);	
+    ch->channels.set_range( 0, CHANNEL_MAX - 1 );
     ch->perm_str			= 10;
     ch->perm_int			= 10;
     ch->perm_wis			= 10;
@@ -950,7 +1227,7 @@ bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload
     ch->pcdata->wizinvis		= 0;
     ch->mental_state			= -10;
     ch->mobinvis			= 0;
-    for(i = 0; i < MAX_SKILL; i++)
+    for (int i = 0; i < MAX_SKILL; ++i)
         ch->pcdata->learned[i]		= 0;
     ch->pcdata->release_date		= 0;
     ch->pcdata->helled_by		= NULL;
@@ -977,6 +1254,7 @@ bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload
     {
       if ( fst.st_size == 0 )
       {
+	from_backup = true;
 	strsave = str_printf("%s%c/%s", BACKUP_DIR, tolower(name[0]),
 			capitalize( name ).c_str() );
 	send_to_char( "Restoring your backup player file...", ch );
@@ -992,10 +1270,8 @@ bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload
 
     if ( ( fp = fopen( strsave.c_str(), "r" ) ) != NULL )
     {
-	int iNest;
-
-	for ( iNest = 0; iNest < MAX_NEST; iNest++ )
-	    rgObjNest[iNest] = NULL;
+        long field_offset = -1;
+        bool read_player = false;
 
 	found = TRUE;
 	/* Cheat so that bug will show line #'s -- Altrag */
@@ -1015,21 +1291,25 @@ bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload
 
 	    if ( letter != '#' )
 	    {
-		bug( "Load_char_obj: # not found.", 0 );
-		bug( name.c_str(), 0 );
+		bug( "Load_char_obj: # not found." );
+		bug( "%s", name.c_str() );
 		break;
 	    }
 
 	    word = fread_word( fp );
 	    if ( !str_cmp( word, "PLAYER" ) )
 	    {
-		fread_char ( ch, fp, preload );
+		fread_char( ch, fp, preload, file_version,
+                    password_offset && !read_player ? &field_offset : nullptr );
+                if ( read_player )
+                    field_offset = -1;
+                read_player = true;
 		if ( preload )
 		  break;
 	    }
 	    else
 	    if ( !str_cmp( word, "OBJECT" ) )	/* Objects	*/
-		fread_obj  ( d->game, ch, fp, OS_CARRY );
+		fread_obj_versioned(d->game, ch, fp, OS_CARRY, file_version, nest, &equipment);
 	    else
 	    if ( !str_cmp( word, "COMMENT") )
 		fread_comment(ch, fp );		/* Comments	*/
@@ -1039,22 +1319,29 @@ bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload
 		CHAR_DATA *mob;
 		if (!d->game)
 		{
-		  bug( "Load_char_obj: Mobile not loaded as no game was found on the char.", 0 );
-		  bug( name.c_str(), 0 );
+		  bug( "Load_char_obj: Mobile not loaded as no game was found on the char." );
+		  bug( "%s", name.c_str() );
 		  break;
 		}
-		mob = fread_mobile( d->game, fp );
-		ch->pcdata->pet = mob;
-		mob->master = ch;
-		BV_SET_BIT(mob->affected_by, AFF_CHARM);
+		mob = fread_mobile( d->game, fp, file_version );
+		if ( mob )
+		{
+		    ch->pcdata->pet = mob;
+		    mob->master = ch;
+		    BV_SET_BIT(mob->affected_by, AFF_CHARM);
+		}
 	    }
 	    else
 	    if ( !str_cmp( word, "END"    ) )	/* Done		*/
+            {
+                if ( password_offset && !from_backup && !preload && !ferror( fp ) )
+                    *password_offset = field_offset;
 		break;
+            }
 	    else
 	    {
-		bug( "Load_char_obj: bad section.", 0 );
-		bug( name.c_str(), 0 );
+		bug( "Load_char_obj: bad section." );
+		bug( "%s", name.c_str() );
 		break;
 	    }
 	}
@@ -1071,7 +1358,6 @@ bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload
 	ch->long_descr			= STRALLOC( "" );
 	ch->description			= STRALLOC( "" );
     	ch->pcdata->target		= STRALLOC( "" );
-	ch->channels.set_range(0, CHANNEL_MAX - 1);
 	ch->editor			= NULL;
         ch->nextquest 				= 0;
         ch->questpoints				= 0;
@@ -1104,6 +1390,17 @@ bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload
     else
     {
     	ch->on				= NULL;
+	if ( !ch->plr_home || !BV_IS_SET(ch->plr_home->room_flags, ROOM_PLR_HOME)
+	     || ch->pcdata->home_generation < 0
+	     || ch->pcdata->home_generation != ch->plr_home->home_generation )
+	{
+	    ch->plr_home = nullptr;
+	    ch->pcdata->home_generation = 0;
+	    BV_REMOVE_BIT( ch->act, PLR_HOME_RESIDENT );
+	}
+	if ( ch->in_room && ch->in_room != ch->plr_home
+	     && BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) )
+	    ch->in_room = nullptr;
 	if ( !ch->pcdata->clan_name )
 	{
 	  ch->pcdata->clan_name	= STRALLOC( "" );
@@ -1121,25 +1418,10 @@ bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload
 	    ch->pcdata->wizinvis = ch->top_level;
  	  assign_area( ch );
 	}
-	if ( file_ver > 1 )
-	{
-	  for ( i = 0; i < MAX_WEAR; i++ )
-	    for ( x = 0; x < MAX_LAYERS; x++ )
-		if ( save_equipment[i][x] )
-		{
-		    equip_char( ch, save_equipment[i][x], i );
-		    save_equipment[i][x] = NULL;
-		}
-		else
-		    break;
-        }
+	if (file_version > 1)
+	    re_equip_char(ch, equipment);
 
     }
-	if ( !ch->channels.any() ) 
-	{
-		ch->channels.set_range(0, CHANNEL_MAX - 1);
-	}		     
-	
     loading_char = NULL;
     return found;
 }
@@ -1162,7 +1444,28 @@ bool load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload
 				    break;				\
 				}
 
-void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
+template <typename Integer>
+static Integer fread_pfile_integer( FILE *fp )
+{
+    const char *word = fread_word( fp );
+    char *end;
+    errno = 0;
+    const long long value = strtoll( word, &end, 10 );
+    if ( end == word || *end != '\0' )
+    {
+        bug( "fread_char: invalid integer field" );
+        return 0;
+    }
+    if ( errno == ERANGE || value < std::numeric_limits<Integer>::min()
+                         || value > std::numeric_limits<Integer>::max() )
+    {
+        bug( "fread_char: integer field out of range" );
+        return value < 0 ? std::numeric_limits<Integer>::min() : std::numeric_limits<Integer>::max();
+    }
+    return static_cast<Integer>( value );
+}
+
+static void fread_char( CHAR_DATA *ch, FILE *fp, bool preload, int &file_version, long *password_offset )
 {
     std::string buf;
     char *line;
@@ -1170,10 +1473,11 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
     int x1, x2, x3, x4, x5, x6, x7, x8, x9, x0;
     sh_int killcnt;
     bool fMatch;
-    time_t lastplayed;
+    bool read_password = false;
+    time_t lastplayed = 0;
     int sn;//, extra;
          
-    file_ver = 0;
+    file_version = 0;
     killcnt = 0;
 
     for ( ; ; )
@@ -1185,6 +1489,10 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 			bug( "%s: EOF encountered reading file!", __FUNCTION__ );
 			word = "End";
 		}
+        if ( preload && ( !str_cmp( word, "Site" ) || !str_cmp( word, "Skill" )
+                         || !str_cmp( word, "Spell" ) || !str_cmp( word, "Tongue" )
+                         || !str_cmp( word, "Weapon" ) ) )
+            word = "End";
 		fMatch = FALSE;
 
 	switch ( UPPER(word[0]) )
@@ -1251,14 +1559,13 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
             
             if ( !str_cmp( word, "Ability"  ) )
 	    {
-		line = fread_line( fp );
-		x0=x1=x2=0;
-		sscanf( line, "%d %d %d",
-		      &x0, &x1, &x2 );
-		if ( x0 >= 0 && x0 < MAX_ABILITY )
+		std::istringstream values( fread_line( fp ) );
+		long experience;
+		if ( ( values >> x0 >> x1 >> experience )
+		     && x0 >= 0 && x0 < MAX_ABILITY )
 		{
 		      ch->skill_level[x0] = x1;
-		      ch->experience[x0] = x2;
+		      ch->experience[x0] = experience;
 		}
 		fMatch = TRUE;
 		break;
@@ -1287,7 +1594,7 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 				if ( (sn=skill_lookup(sname)) < 0 )
 				{
 				if ( (sn=herb_lookup(sname)) < 0 )
-					bug( "Fread_char: unknown skill.", 0 );
+					bug( "Fread_char: unknown skill." );
 				else
 					sn += TYPE_HERB;
 				}
@@ -1324,7 +1631,7 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 				if ( (sn=skill_lookup(sname)) < 0 )
 				{
 				if ( (sn=herb_lookup(sname)) < 0 )
-					bug( "Fread_char: unknown skill.", 0 );
+					bug( "Fread_char: unknown skill." );
 				else
 					sn += TYPE_HERB;
 				}
@@ -1403,7 +1710,8 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 	    KEY( "Bamfout",	ch->pcdata->bamfout,	fread_string_nohash( fp ) );
 	    KEY( "Bestowments", ch->pcdata->bestowments, fread_string_nohash( fp ) );
 	    KEY( "Bio",		ch->pcdata->bio,	fread_string( fp ) );
-	    KEY( "Bank",	ch->pcdata->bank,	fread_number( fp ) );
+	    KEY( "Bank",	ch->pcdata->bank,	fread_pfile_integer<long>( fp ) );
+	    KEY( "BountyTxn", ch->pcdata->bounty_transaction, fread_word( fp ) );
 	    break;
 
 	case 'C':
@@ -1469,12 +1777,12 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 	    KEY( "Damroll",	ch->damroll,		fread_number( fp ) );
 		if ( !str_cmp( word, "Deaf" ) ) // Loading legacy 'deaf' variable into the new channels BitSet.  Bits are flipped!
 		{
-			int deaf = fread_number( fp);
+			const auto deaf = static_cast<uint32_t>( fread_number( fp ) );
 			ch->channels.reset();  // clear all bits first
 
 			for ( int i = 0; i < CHANNEL_MAX; ++i )
 			{
-				if ( ((deaf >> i) & 1) == 0 )
+				if ( ((deaf >> i) & 1U) == 0 )
 					BV_SET_BIT(ch->channels, i);
 			}
 			fMatch = TRUE;
@@ -1560,9 +1868,16 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
             break;
 
 	case 'H':
+	    if ( !str_cmp( word, "HomeGeneration" ) )
+	    {
+	        const int generation = fread_pfile_integer<int>( fp );
+	        ch->pcdata->home_generation = generation > 0 ? generation : -1;
+	        fMatch = TRUE;
+	        break;
+	    }
 	    if ( !str_cmp(word, "Helled") )
 	    {
-	      ch->pcdata->release_date = fread_number(fp);
+	      ch->pcdata->release_date = fread_pfile_integer<time_t>( fp );
 	      ch->pcdata->helled_by = fread_string(fp);
 	      if ( ch->pcdata->release_date < current_time )
 	      {
@@ -1645,7 +1960,7 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 	case 'L':
 	    if ( !str_cmp(word, "Lastplayed") )
 	    {
-	      lastplayed = fread_number(fp);
+	      lastplayed = fread_pfile_integer<time_t>( fp );
 	      fMatch = TRUE;
 	      break;
 	    }
@@ -1689,7 +2004,7 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 	    break;
 
 	case 'O':
-	    KEY( "Outcast_time", ch->pcdata->outcast_time, fread_number( fp ) );
+	    KEY( "Outcast_time", ch->pcdata->outcast_time, fread_pfile_integer<long>( fp ) );
 	    if ( !str_cmp( word, "ObjRange" ) )
 	    {
 		ch->pcdata->o_range_lo = fread_number( fp );
@@ -1700,13 +2015,34 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 
 	case 'P':
 	    KEY( "Pagerlen",	ch->pcdata->pagerlen,	fread_number( fp ) );
-	    KEY( "Password",	ch->pcdata->pwd,	fread_string_nohash( fp ) );
+            if ( !str_cmp( word, "Password" ) )
+            {
+                if ( ch->pcdata->pwd )
+                    STR_DISPOSE( ch->pcdata->pwd );
+                ch->pcdata->pwd = fread_string_nohash( fp );
+                if ( password_offset )
+                {
+                    const long end = ftell( fp );
+                    const long size = static_cast<long>( strlen( ch->pcdata->pwd ) ) + 1;
+                    *password_offset = !read_password && end >= size ? end - size : -1;
+                }
+                read_password = true;
+                fMatch = TRUE;
+                break;
+            }
 	    KEY( "PDeaths",	ch->pcdata->pdeaths,	fread_number( fp ) );
 	    KEY( "PKills",	ch->pcdata->pkills,	fread_number( fp ) );
-	    KEY( "Played",	ch->pcdata->played,	fread_number( fp ) );
+	    KEY( "Played",	ch->pcdata->played,	fread_pfile_integer<long long>( fp ) );
 	    KEY( "Position",	ch->position,		fread_number( fp ) );
 //	    KEY( "Practice",	extra,		fread_number( fp ) );
-	    KEY( "Prompt",	ch->pcdata->prompt,	fread_string( fp ) );
+	    if ( !str_cmp(word, "Prompt") )
+	    {
+		if (ch->pcdata->prompt)
+		    STRFREE(ch->pcdata->prompt);
+		ch->pcdata->prompt = fread_string(fp);
+		fMatch = TRUE;
+		break;
+	    }
 	    if (!str_cmp ( word, "PTimer" ) )
 	    {
 		add_timer( ch , TIMER_PKILLED, fread_number(fp), NULL, 0 );	
@@ -1725,12 +2061,19 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 
 	case 'Q':
 	    KEY( "Questpoints",        ch->questpoints,		fread_number( fp ) );
+	    break;
 
 	case 'R':
-	    KEY( "Race",        ch->race,		fread_number( fp ) );
+	    if ( !str_cmp( word, "Race" ) )
+	    {
+		const int race = fread_number( fp );
+		ch->race = race >= 0 && race < MAX_RACE ? race : RACE_HUMAN;
+		fMatch = TRUE;
+		break;
+	    }
 	    KEY( "Rank",        ch->pcdata->rank,	fread_string_nohash( fp ) );
 //	    KEY( "Resistant",	ch->resistant,		fread_number( fp ) );
-	    KEY( "Restore_time",ch->pcdata->restore_time, fread_number( fp ) );
+	    KEY( "Restore_time",ch->pcdata->restore_time, fread_pfile_integer<long>( fp ) );
 		if ( !str_cmp( word, "Resistant" ) )
 		{
 			int legacy = fread_number(fp);
@@ -1764,7 +2107,7 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 
 	case 'S':
         KEY( "Salary",      ch->pcdata->salary,		fread_number( fp ) );
-	    KEY( "Salary_time",ch->pcdata->salary_date, fread_number( fp ) );
+	    KEY( "Salary_time",ch->pcdata->salary_date, fread_pfile_integer<long>( fp ) );
 	    KEY( "Sex",		ch->sex,		fread_number( fp ) );
 	    KEY( "ShortDescr",	ch->short_descr,	fread_string( fp ) );
 	    //KEY( "Susceptible",	ch->susceptible,	fread_number( fp ) );
@@ -1815,69 +2158,38 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 
 	    if ( !str_cmp( word, "Site" ) )
 	    {
-		if ( !preload )
-		{
-		  buf = str_printf("Last connected from: %s\n", fread_word( fp ) );
-		  send_to_char( buf, ch );
-		}
-		else
-		  fread_to_eol( fp );
+		buf = str_printf("Last connected from: %s\n", fread_word( fp ) );
+		send_to_char( buf, ch );
 		fMatch = TRUE;
-		if ( preload )
-		  word = "End";
-		else
-		  break;
+		break;
 	    }
 
 	    if ( !str_cmp( word, "Skill" ) )
 	    {
-		int value;
-
-		if ( preload )
-		  word = "End";
-		else
-		{
-		  value = fread_number( fp );
-		  if ( file_ver < 3 )
+		const int value = fread_number( fp );
+		if ( file_version < 3 )
 		    sn = skill_lookup( fread_word( fp ) );
-		  else
+		else
 		    sn = bsearch_skill_exact( fread_word( fp ), gsn_first_skill, gsn_first_weapon-1 );
-		  if ( sn < 0 )
-		    bug( "Fread_char: unknown skill.", 0 );
-		  else
-		  {
+		if ( sn < 0 )
+		    bug( "Fread_char: unknown skill." );
+		else
 		    ch->pcdata->learned[sn] = value;
-		    
-		  }
-		  fMatch = TRUE;
-		  break;
-		}
+		fMatch = TRUE;
+		break;
 	    }
 
 	    if ( !str_cmp( word, "Spell" ) )
 	    {
-		int value;
-
-		if ( preload )
-		  word = "End";
+		const int value = fread_number( fp );
+		sn = bsearch_skill_exact( fread_word( fp ), gsn_first_spell, gsn_first_skill-1 );
+		if ( sn < 0 )
+		    bug( "Fread_char: unknown spell." );
 		else
-		{
-		  value = fread_number( fp );
-
-		  sn = bsearch_skill_exact( fread_word( fp ), gsn_first_spell, gsn_first_skill-1 );
-		  if ( sn < 0 )
-		    bug( "Fread_char: unknown spell.", 0 );
-		  else
-		  {
 		    ch->pcdata->learned[sn] = value;
-		    
-		  }
-		  fMatch = TRUE;
-		  break;
-		}
+		fMatch = TRUE;
 	    }
-	    if ( str_cmp( word, "End" ) )
-		break;
+	    break;
 
 	case 'E':
 	    if ( !str_cmp( word, "End" ) )
@@ -1934,14 +2246,17 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 		if ( !ch->pcdata->prompt )
 		  ch->pcdata->prompt = STRALLOC("");
 		  
-		if ( lastplayed != 0 )
+		if ( lastplayed > 0 && current_time > lastplayed )
 		{
-		   int hitgain;
-		   hitgain = ( ( int ) ( current_time - lastplayed ) / 60 );
-                   ch->hit = URANGE( 1 , ch->hit + hitgain , ch->max_hit );		   
-		   ch->move = URANGE( 1 , ch->move + hitgain , ch->max_move );		   
+		   const auto raw_gain = static_cast<long long>( current_time - lastplayed ) / 60;
+		   const int hitgain = static_cast<int>( std::min<long long>( raw_gain, INT_MAX ) );
+		   ch->hit = std::clamp<long long>( ch->hit + static_cast<long long>( hitgain ),
+		                                  1, std::max<int>( 1, ch->max_hit ) );
+		   ch->move = std::clamp<long long>( ch->move + static_cast<long long>( hitgain ),
+		                                   1, std::max<int>( 1, ch->max_move ) );
 		   if ( ch->skill_level[FORCE_ABILITY] > 1 )
-		      ch->mana = URANGE( 0 , ch->mana + hitgain , ch->max_mana );		   
+		      ch->mana = std::clamp<long long>( ch->mana + static_cast<long long>( hitgain ),
+		                                      0, std::max<int>( 0, ch->max_mana ) );
 		   better_mental_state( ch , hitgain );
 		}
                 for ( sn = 0; sn < top_sn; sn++ )
@@ -1962,28 +2277,24 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 
 	case 'T':
 
-            KEY( "Targ",	ch->pcdata->target,	fread_string( fp ) );
+	    if ( !str_cmp(word, "Targ") )
+	    {
+		if (ch->pcdata->target)
+		    STRFREE(ch->pcdata->target);
+		ch->pcdata->target = fread_string(fp);
+		fMatch = TRUE;
+		break;
+	    }
 	    KEY( "Toplevel",	ch->top_level,		fread_number( fp ) );
 	    if ( !str_cmp( word, "Tongue" ) )
 	    {
-		int value;
-
-		if ( preload )
-		  word = "End";
+		const int value = fread_number( fp );
+		sn = bsearch_skill_exact( fread_word( fp ), gsn_first_tongue, gsn_top_sn-1 );
+		if ( sn < 0 )
+		    bug( "Fread_char: unknown tongue." );
 		else
-		{
-		  value = fread_number( fp );
-
-		  sn = bsearch_skill_exact( fread_word( fp ), gsn_first_tongue, gsn_top_sn-1 );
-		  if ( sn < 0 )
-		    bug( "Fread_char: unknown tongue.", 0 );
-		  else
-		  {
 		    ch->pcdata->learned[sn] = value;
-		    
-		  }
-		  fMatch = TRUE;
-		}
+		fMatch = TRUE;
 		break;
 	    }
 	    KEY( "Trust", ch->trust, fread_number( fp ) );
@@ -2014,30 +2325,19 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 		fMatch = TRUE;
 		break;
 	    }*/
-	    KEY( "Version",	file_ver,		fread_number( fp ) );
+	    KEY( "Version",	file_version,		fread_number( fp ) );
 	    break;
 
 	case 'W':
 	    if ( !str_cmp( word, "Weapon" ) )
 	    {
-		int value;
-
-		if ( preload )
-		  word = "End";
+		const int value = fread_number( fp );
+		sn = bsearch_skill_exact( fread_word( fp ), gsn_first_weapon, gsn_first_tongue-1 );
+		if ( sn < 0 )
+		    bug( "Fread_char: unknown weapon." );
 		else
-		{
-		  value = fread_number( fp );
-
-		  sn = bsearch_skill_exact( fread_word( fp ), gsn_first_weapon, gsn_first_tongue-1 );
-		  if ( sn < 0 )
-		    bug( "Fread_char: unknown weapon.", 0 );
-		  else
-		  {
 		    ch->pcdata->learned[sn] = value;
-		    
-		  }
-		  fMatch = TRUE;
-		}
+		fMatch = TRUE;
 		break;
 	    }
 	    KEY( "Wimpy",	ch->wimpy,		fread_number( fp ) );
@@ -2058,30 +2358,25 @@ void fread_char( CHAR_DATA *ch, FILE *fp, bool preload )
 			break;		
 		}		
 //	    KEY( "Wanted",	ch->pcdata->wanted_flags,  fread_number( fp ) );
-	    if ( !str_cmp( word, "Weapon" ) )		
-		{
-			fread_bitset(fp, ch->pcdata->wanted_flags);
-			fMatch = TRUE;
-			break;
-		}
 
 	    break;
 	}
 
 	if ( !fMatch )
 	{
-	    bug( buf.c_str(), "Fread_char: no match: %s", word );
+	    bug( "Fread_char: no match: %s", word );
 	}
     }
-	if ( !ch->channels.any() ) 
-	{
-		ch->channels.set_range(0, CHANNEL_MAX - 1);
-	}			
-
 }
 
 
-void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
+void fread_obj(GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type, ObjectNest &nest)
+{
+    fread_obj_versioned(game, ch, fp, os_type, SAVEVERSION, nest);
+}
+
+static void fread_obj_versioned(GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type,
+                               int file_version, ObjectNest &nest, EquipmentSlots *equipment)
 {
     OBJ_DATA *obj;
     const char *word;
@@ -2089,13 +2384,16 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
     bool fMatch;
     bool fNest;
     bool fVnum;
-    ROOM_INDEX_DATA *room;
+    bool has_objflags = false;
+    bool has_values = false;
+    ROOM_INDEX_DATA *room = NULL;
 
     CREATE( obj, OBJ_DATA, 1 );
 	obj->game = game;
     obj->count		= 1;
     obj->wear_loc	= -1;
     obj->weight		= 1;
+    obj->armed_by	= STRALLOC( "" );
 
     fNest		= TRUE;		/* Requiring a Nest 0 is a waste */
     fVnum		= TRUE;
@@ -2136,7 +2434,7 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 
 		    sn = skill_lookup( fread_word( fp ) );
 		    if ( sn < 0 )
-			bug( "Fread_obj: unknown skill.", 0 );
+			bug( "Fread_obj: unknown skill." );
 		    else
 			paf->type = sn;
 		}
@@ -2146,7 +2444,8 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 		paf->bitvector	= first_set_bit(fread_number( fp ));
 		if ( paf->location == APPLY_WEAPONSPELL
 		||   paf->location == APPLY_WEARSPELL
-		||   paf->location == APPLY_REMOVESPELL )
+		||   paf->location == APPLY_REMOVESPELL
+		||   paf->location == APPLY_STRIPSN )
 		  paf->modifier		= slot_lookup( pafmod );
 		else
 		  paf->modifier		= pafmod;
@@ -2170,7 +2469,7 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 
 		    sn = skill_lookup( fread_word( fp ) );
 		    if ( sn < 0 )
-			bug( "Fread_obj: unknown skill.", 0 );
+			bug( "Fread_obj: unknown skill." );
 		    else
 			paf->type = sn;
 		}
@@ -2180,7 +2479,8 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 		paf->bitvector	= fread_number( fp );
 		if ( paf->location == APPLY_WEAPONSPELL
 		||   paf->location == APPLY_WEARSPELL
-		||   paf->location == APPLY_REMOVESPELL )
+		||   paf->location == APPLY_REMOVESPELL
+		||   paf->location == APPLY_STRIPSN )
 		  paf->modifier		= slot_lookup( pafmod );
 		else
 		  paf->modifier		= pafmod;
@@ -2188,7 +2488,13 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 		fMatch				= TRUE;
 		break;
 	    }		
-	    KEY( "Actiondesc",	obj->action_desc,	fread_string( fp ) );
+	    if ( !str_cmp( word, "Actiondesc" ) )
+	    {
+		if ( obj->action_desc )
+		    STRFREE( obj->action_desc );
+		obj->action_desc = fread_string( fp );
+		fMatch = TRUE;
+	    }
 	    break;
 
 	case 'C':
@@ -2216,12 +2522,14 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 		ed->keyword		= fread_string( fp );
 		ed->description		= fread_string( fp );
 		LINK(ed, obj->first_extradesc, obj->last_extradesc, next, prev );
+		++top_ed;
 		fMatch 				= TRUE;
+		break;
 	    }
 
 	    if ( !str_cmp( word, "End" ) )
 	    {
-		if ( !fNest || !fVnum )
+		if ( !fNest || !fVnum || !obj->pIndexData )
 		{
 			if( obj->name )
 				bug( "%s: %s incomplete object.", __FUNCTION__, obj->name );
@@ -2234,6 +2542,17 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 		{
 		    sh_int wear_loc = obj->wear_loc;
 
+		    if ( os_type == OS_CORPSE && !room )
+		    {
+			bug( "Fread_obj: Corpse without room" );
+			room = get_room_index( ROOM_VNUM_LIMBO );
+			if ( !room )
+			{
+			    free_obj( obj );
+			    return;
+			}
+		    }
+
 		    if ( !obj->name )
 			obj->name = QUICKLINK( obj->pIndexData->name );
 		    if ( !obj->description )
@@ -2242,6 +2561,28 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 			obj->short_descr = QUICKLINK( obj->pIndexData->short_descr );
 		    if ( !obj->action_desc )
 			obj->action_desc = QUICKLINK( obj->pIndexData->action_desc );
+		    if ( !has_objflags && has_values )
+		    {
+			if ( obj->item_type == ITEM_WEAPON )
+			{
+			    int wtype = obj->value[3];
+			    if ( wtype >= 0 && static_cast<size_t>(wtype) + WEAPON_FIRST < WEAPON_MAX )
+				set_weapon_flag( obj->objflags, WEAPON_FIRST + static_cast<size_t>(wtype) );
+			    else
+			    {
+				bug( "Fread_obj: vnum %d bad weapon type value[3] = %d.",
+				     obj->pIndexData->vnum, wtype );
+				set_weapon_flag( obj->objflags, WEAPON_FIRST );
+			    }
+			}
+			else if ( obj->item_type == ITEM_PIPE && obj->value[3] != 0 )
+			{
+			    uint32_t uflags = static_cast<uint32_t>(obj->value[3]);
+			    for ( size_t bit = 1; bit < PIPE_MAX - PIPE_FIRST; ++bit )
+				if ( uflags & (1U << bit) )
+				    obj->objflags.set( PIPE_FIRST + bit );
+			}
+		    }
 		    LINK(obj, first_object, last_object, next, prev );
 		    obj->pIndexData->count += obj->count;
 		    if ( !obj->serial )
@@ -2250,60 +2591,60 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 			obj->serial = obj->pIndexData->serial = cur_obj_serial;
 		    }
 		    if ( fNest )
-		      rgObjNest[iNest] = obj;
+		      nest[iNest] = obj;
 		    numobjsloaded += obj->count;
 		    ++physicalobjects;
-		    if ( file_ver > 1 || obj->wear_loc < -1
-		    ||   obj->wear_loc >= MAX_WEAR )
+		    if ( file_version > 1 || !is_valid_wear_location( obj->wear_loc ) )
 		      obj->wear_loc = -1;
 		    /* Corpse saving. -- Altrag */
 		    if ( os_type == OS_CORPSE )
+			obj = obj_to_room( obj, room );
+		    else if ( iNest == 0 || nest[iNest] == NULL )
 		    {
-		        if ( !room )
-		        {
-		          bug( "Fread_obj: Corpse without room", 0);
-		          room = get_room_index(ROOM_VNUM_LIMBO);
-		        }
-		        obj = obj_to_room( obj, room );
-		    }
-		    else if ( iNest == 0 || rgObjNest[iNest] == NULL )
-		    {
-			int slot;
-			bool reslot = FALSE;
+			OBJ_DATA **slot = nullptr;
 
-			if ( file_ver > 1
-			&&   wear_loc > -1
-			&&   wear_loc < MAX_WEAR )
+			if (equipment && ch && file_version > 1 && is_valid_wear_location(wear_loc))
 			{
-			   int x;
-
-			   for ( x = 0; x < MAX_LAYERS; x++ )
-			      if ( !save_equipment[wear_loc][x] )
-			      {
-				  save_equipment[wear_loc][x] = obj;
-				  slot = x;
-				  reslot = TRUE;
-				  break;
-			      }
-			   if ( x == MAX_LAYERS )
-				bug( "Fread_obj: too many layers %d", wear_loc );
+			    auto &layers = (*equipment)[wear_loc];
+			    const auto empty_slot = std::find(layers.begin(), layers.end(), nullptr);
+			    if (empty_slot == layers.end())
+				bug("Fread_obj: too many layers %d", wear_loc);
+			    else
+			    {
+				slot = &*empty_slot;
+				*slot = obj;
+			    }
 			}
-			obj = obj_to_char( obj, ch );
-			if ( reslot )
-			  save_equipment[wear_loc][slot] = obj;
+			if ( !ch )
+			{
+			   bug( "Fread_obj: NULL ch for OS_CARRY object vnum %d.",
+				obj->pIndexData ? obj->pIndexData->vnum : 0 );
+			   extract_obj( obj );
+			   obj = NULL;
+			}
+			else
+			{
+			   obj = obj_to_char(obj, ch, equipment);
+			   if (slot)
+			      *slot = (obj && obj->carried_by == ch) ? obj : nullptr;
+			}
 		    }
 		    else
 		    {
-			if ( rgObjNest[iNest-1] )
+			if ( nest[iNest-1] )
 			{
-			   separate_obj( rgObjNest[iNest-1] );
-			   obj = obj_to_obj( obj, rgObjNest[iNest-1] );
+			   separate_obj(nest[iNest-1]);
+			   obj = obj_to_obj(obj, nest[iNest-1]);
 			}
 			else
+			{
 			   bug( "Fread_obj: nest layer missing %d", iNest-1 );
+			   extract_obj( obj );
+			   obj = NULL;
+			}
 		    }
 		    if ( fNest )
-		      rgObjNest[iNest] = obj;
+		      nest[iNest] = obj;
 		    return;
 		}
 	    }
@@ -2336,11 +2677,13 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 	    if ( !str_cmp( word, "Objflags" ) )
 	    {
 			fread_bitset(fp, obj->objflags);
+			has_objflags = true;
 			fMatch = TRUE;
 	    }
 	    break;	    
 	case 'R':
 	    KEY( "Room", room, get_room_index(fread_number(fp)) );
+	    break;
 
 	case 'S':
 	    KEY( "ShortDescr",	obj->short_descr,	fread_string( fp ) );
@@ -2355,7 +2698,7 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 		if ( iValue < 0 || iValue > 5 )
 		    bug( "Fread_obj: bad iValue %d.", iValue );
 		else if ( sn < 0 )
-		    bug( "Fread_obj: unknown skill.", 0 );
+		    bug( "Fread_obj: unknown skill." );
 		else
 		    obj->value[iValue] = sn;
 		fMatch = TRUE;
@@ -2382,9 +2725,6 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 
 		x1=x2=x3=x4=x5=x6=0;
 		sscanf( ln, "%d %d %d %d %d %d", &x1, &x2, &x3, &x4, &x5, &x6 );
-		/* clean up some garbage */
-//		if ( file_ver < 3 )
-//		   x5=x6=0;
 
 		obj->value[0]	= x1;
 		obj->value[1]	= x2;
@@ -2392,17 +2732,8 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 		obj->value[3]	= x4;
 		obj->value[4]	= x5;
 		obj->value[5]	= x6;
+		has_values	= true;
 		fMatch		= TRUE;
-		if ( obj->item_type == ITEM_PIPE )
-		{
-			int_into_bitset_offset(obj->objflags, obj->value[3], PIPE_FIRST);
-			obj->value[3] = 0;
-		}
-		if ( obj->item_type == ITEM_WEAPON )
-		{
-			int_into_bitset_offset(obj->objflags, obj->value[3], WEAPON_FIRST);
-			obj->value[3] = 0;
-		}
 		break;
 	    }
 
@@ -2456,31 +2787,10 @@ void fread_obj( GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type )
 
 	if ( !fMatch )
 	{
-	    EXTRA_DESCR_DATA *ed;
-	    AFFECT_DATA *paf;
-
-	    bug( "Fread_obj: no match.", 0 );
-	    bug( word, 0 );
+	    bug( "Fread_obj: no match." );
+	    bug( "%s", word );
 	    fread_to_eol( fp );
-	    if ( obj->name )
-		STRFREE( obj->name        );
-	    if ( obj->description )
-		STRFREE( obj->description );
-	    if ( obj->short_descr )
-		STRFREE( obj->short_descr );
-	    while ( (ed=obj->first_extradesc) != NULL )
-	    {
-		STRFREE( ed->keyword );
-		STRFREE( ed->description );
-		UNLINK( ed, obj->first_extradesc, obj->last_extradesc, next, prev );
-		DISPOSE( ed );
-	    }
-	    while ( (paf=obj->first_affect) != NULL )
-	    {
-		UNLINK( paf, obj->first_affect, obj->last_affect, next, prev );
-		DISPOSE( paf );
-	    }
-	    DISPOSE( obj );
+	    free_obj( obj );
 	    return;
 	}
     }
@@ -2509,7 +2819,7 @@ void do_last( CHAR_DATA *ch, char *argument )
 	return;
     }
     name = capitalize(arg);
-    buf =str_printf( "%s%c/%s", PLAYER_DIR, tolower(arg[0]), name.c_str() );
+    buf =str_printf( "%s%c/%s", PLAYER_DIR, tolower(static_cast<unsigned char>(arg[0])), name.c_str() );
     if ( stat( buf.c_str(), &fst ) != -1 )
       buf = str_printf( "%s was last on: %s\n", name.c_str(), ctime( &fst.st_mtime ) );
     else
@@ -2527,15 +2837,18 @@ void write_corpses( CHAR_DATA *ch, const std::string& name )
      corpses.. (ie: decayed corpses while offline) */
   if ( ch && IS_NPC(ch) )
   {
-    bug( "Write_corpses: writing NPC corpse.", 0 );
+    bug( "Write_corpses: writing NPC corpse." );
     return;
   }
   if ( ch )
     namestr = ch->name;
+  if ( namestr.empty() )
+    return;
   /* Go by vnum, less chance of screwups. -- Altrag */
   for ( corpse = first_object; corpse; corpse = corpse->next )
     if ( corpse->pIndexData->vnum == OBJ_VNUM_CORPSE_PC &&
          corpse->in_room != NULL && corpse->value[1] != 1 &&
+         corpse->short_descr != NULL && strlen(corpse->short_descr) >= 14 &&
         !str_cmp(corpse->short_descr+14, namestr) )
     {
       if ( !fp )
@@ -2545,7 +2858,7 @@ void write_corpses( CHAR_DATA *ch, const std::string& name )
         SPRINTF(buf, "%s%s", CORPSE_DIR, capitalize(namestr).c_str());
         if ( !(fp = fopen(buf, "w")) )
         {
-          bug( "Write_corpses: Cannot open file.", 0 );
+          bug( "Write_corpses: Cannot open file." );
           perror(buf);
           return;
         }
@@ -2577,7 +2890,7 @@ void load_corpses( GameContext *game )
   
   if ( !(dp = opendir(CORPSE_DIR)) )
   {
-    bug( "Load_corpses: can't open CORPSE_DIR", 0);
+    bug( "Load_corpses: can't open CORPSE_DIR");
     perror(CORPSE_DIR);
     return;
   }
@@ -2594,6 +2907,7 @@ void load_corpses( GameContext *game )
         perror(strArea);
         continue;
       }
+      ObjectNest nest{};
       for ( ; ; )
       {
         char letter;
@@ -2607,19 +2921,24 @@ void load_corpses( GameContext *game )
         }
         if ( letter != '#' )
         {
-          bug( "Load_corpses: # not found.", 0 );
+          bug( "Load_corpses: # not found." );
           break;
         }
         word = fread_word( fpArea );
+        if ( word[0] == '\0' )
+          break;
         if ( !str_cmp(word, "CORPSE" ) )
-          fread_obj( game, NULL, fpArea, OS_CORPSE );
+        {
+          nest.fill(nullptr);
+          fread_obj(game, NULL, fpArea, OS_CORPSE, nest);
+        }
         else if ( !str_cmp(word, "OBJECT" ) )
-          fread_obj( game, NULL, fpArea, OS_CARRY );
+          fread_obj(game, NULL, fpArea, OS_CARRY, nest);
         else if ( !str_cmp( word, "END" ) )
           break;
         else
         {
-          bug( "Load_corpses: bad section.", 0 );
+          bug( "Load_corpses: bad section." );
           break;
         }
       }
@@ -2644,7 +2963,7 @@ void load_storerooms( GameContext *game )
 
 if ( !(dp = opendir(STOREROOM_DIR)) )
   {
-    bug( "Load_storeroom: can't open STOREROOM_DIR", 0);
+    bug( "Load_storeroom: can't open STOREROOM_DIR");
     perror(STOREROOM_DIR);
     return;
   }
@@ -2654,9 +2973,8 @@ if ( !(dp = opendir(STOREROOM_DIR)) )
   {
     if ( de->d_name[0] != '.' )
     {
-	    int iNest;
 //	    bool found;
-	    OBJ_DATA *tobj, *tobj_next;
+	    OBJ_DATA *tobj;
 	    ROOM_INDEX_DATA *storeroom;
 
       SPRINTF(strArea, "%s%s", STOREROOM_DIR, de->d_name );
@@ -2669,18 +2987,29 @@ if ( !(dp = opendir(STOREROOM_DIR)) )
 
 	    storeroom = get_room_index(atoi(de->d_name));
 	    if( !storeroom )
-  		continue;
+	    {
+		FCLOSE( fpArea );
+		continue;
+	    }
   	    
 	    if ( !BV_IS_SET( storeroom->room_flags, ROOM_CLANSTOREROOM ) )
 	    {
+              FCLOSE( fpArea );
               SPRINTF( buf, "%s%d", STOREROOM_DIR, storeroom->vnum );
               remove( buf );
+              continue;
             }
   	    
 	      
+	    if ( !supermob )
+	    {
+		bug( "load_storerooms: NULL supermob" );
+		FCLOSE( fpArea );
+		continue;
+	    }
+
 	    rset_supermob(storeroom);
-	    for ( iNest = 0; iNest < MAX_NEST; iNest++ )
-		rgObjNest[iNest] = NULL;
+	    ObjectNest nest{};
 
 //	    found = TRUE;
 	    for ( ; ; )
@@ -2697,33 +3026,36 @@ if ( !(dp = opendir(STOREROOM_DIR)) )
 
 		if ( letter != '#' )
 		{
-		    bug( "load_storerooms: # not found.", 0 );
-		    bug( de->d_name, 0 );
+		    bug( "load_storerooms: # not found." );
+		    bug( "%s", de->d_name );
 		    break;
 		}
 
 		word = fread_word( fpArea );
+		if ( word[0] == '\0' )
+		  break;
 		if ( !str_cmp( word, "OBJECT" ) )	/* Objects	*/
-		  fread_obj  ( game, supermob, fpArea, OS_CARRY );
+		  fread_obj(game, supermob, fpArea, OS_CARRY, nest);
 		else
 		if ( !str_cmp( word, "END"    ) )	/* Done		*/
 		  break;
 		else
 		{
-		    bug( "load_storerooms: bad section.", 0 );
-		    bug( de->d_name, 0 );
+		    bug( "load_storerooms: bad section." );
+		    bug( "%s", de->d_name );
 		    break;
 		}
 	    }
 
 	    FCLOSE( fpArea );
 
-	    for ( tobj = supermob->first_carrying; tobj; tobj = tobj_next )
+	    while ( ( tobj = supermob->first_carrying ) != NULL )
 	    {
-		tobj_next = tobj->next_content;
 		obj_from_char( tobj );
                 if( tobj->item_type != ITEM_MONEY )
 		  obj_to_room( tobj, storeroom );
+		else
+		  extract_obj( tobj );
 	    }
 	    
 	    release_supermob(game);
@@ -2746,7 +3078,7 @@ void save_storeroom( ROOM_INDEX_DATA *room )
 
     if ( !room )
     {
-	bug( "save_storeroom: null ch!", 0 );
+	bug( "save_storeroom: null ch!" );
 	return;
     }
 
@@ -2755,8 +3087,8 @@ void save_storeroom( ROOM_INDEX_DATA *room )
     if ( ( fp = fopen( strsave, "w" ) ) == NULL )
     {
 		perror( strsave );
-		bug( "Save_storeroom: fopen", 0 );
-		bug( strsave, 0 );
+		bug( "Save_storeroom: fopen" );
+		bug( "%s", strsave );
 	
     }
     else
@@ -2778,7 +3110,6 @@ void save_storeroom( ROOM_INDEX_DATA *room )
 void load_vendors( GameContext *game )
 {
   DIR *dp;
-  CHAR_DATA *mob;
   struct dirent *de;
   extern FILE *fpArea;
   extern char strArea[MAX_INPUT_LENGTH];
@@ -2786,7 +3117,7 @@ void load_vendors( GameContext *game )
 
 if ( !(dp = opendir(VENDOR_DIR)) )
   {
-    bug( "Load_vendors: can't open VENDOR_DIR", 0);
+    bug( "Load_vendors: can't open VENDOR_DIR");
     perror(VENDOR_DIR);
     return;
   }
@@ -2796,6 +3127,7 @@ if ( !(dp = opendir(VENDOR_DIR)) )
   {
     if ( de->d_name[0] != '.' )
     {
+      CHAR_DATA *mob = NULL;
       SPRINTF(strArea, "%s%s", VENDOR_DIR, de->d_name );
       fprintf(stderr, "Vendor -> %s\n", strArea);
       if ( !(fpArea = fopen(strArea, "r")) )
@@ -2803,6 +3135,7 @@ if ( !(dp = opendir(VENDOR_DIR)) )
         perror(strArea);
         continue;
       }
+      ObjectNest nest{};
       for ( ; ; )
       {
 		  char letter;
@@ -2816,16 +3149,30 @@ if ( !(dp = opendir(VENDOR_DIR)) )
         }
         if ( letter != '#' )
         {
-          bug( "Load_vendor: # not found.", 0 );
+          bug( "Load_vendor: # not found." );
           break;
         }
         word = fread_word( fpArea );
-		  if ( !strcmp(word, "VENDOR" ) )
+        if ( word[0] == '\0' )
+          break;
+        if ( !strcmp(word, "VENDOR" ) )
           mob = fread_vendor( game, fpArea );
         else if ( !strcmp(word, "OBJECT" ) )
-          fread_obj( game, mob, fpArea, OS_CARRY );
+        {
+          if ( !mob )
+          {
+            bug( "Load_vendors: #OBJECT without valid #VENDOR in %s", de->d_name );
+            break;
+          }
+          fread_obj(game, mob, fpArea, OS_CARRY, nest);
+        }
         else if ( !strcmp( word, "END" ) )
           break;
+        else
+        {
+          bug( "Load_vendors: bad section: %s", word );
+          break;
+        }
        }
       FCLOSE(fpArea);
     }
@@ -2862,10 +3209,6 @@ if ( !(dp = opendir(VENDOR_DIR)) )
    fprintf( fp, "Position %d\n", mob->position );
    fwrite_bitset(fp,"FlagsEx",mob->act);
 //   fprintf( fp, "Flags %d\n", mob->act );
- /* Might need these later --Shaddai
-   de_equip_char( mob );
-   re_equip_char( mob );
-   */
    if ( mob->first_carrying )
  	fwrite_obj( mob, mob->last_carrying, fp, 0, OS_CARRY );
    fprintf( fp, "EndMobile\n" );
@@ -2875,29 +3218,42 @@ if ( !(dp = opendir(VENDOR_DIR)) )
  /*
   * This will read one mobile structure pointer to by fp --Shaddai
   */
- CHAR_DATA *  fread_mobile( GameContext *game, FILE *fp )
+ CHAR_DATA *  fread_mobile( GameContext *game, FILE *fp, int file_version )
  {
    CHAR_DATA *mob = NULL;
    const char *word;
    bool fMatch;
    int inroom = 0;
    ROOM_INDEX_DATA *pRoomIndex = NULL;
+   ObjectNest nest{};
  
    word   = feof( fp ) ? "EndMobile" : fread_word( fp );
    if ( !strcmp(word, "Vnum") )
    {
      int vnum;
+     MOB_INDEX_DATA *pMobIndex;
      
      vnum = fread_number( fp );
-     mob = create_mobile( game, get_mob_index(vnum) );
-     if ( !mob )
+     pMobIndex = get_mob_index( vnum );
+     if ( !pMobIndex )
      {
  	for ( ; ; ) {
  	  word   = feof( fp ) ? "EndMobile" : fread_word( fp );
  	  /* So we don't get so many bug messages when something messes up
  	   * --Shaddai 
  	   */
- 	  if ( !strcmp( word, "EndMobile" ) )
+ 	  if ( word[0] == '\0' || !strcmp( word, "EndMobile" ) )
+ 		break;
+         }
+ 	bug("Fread_mobile: No index data for vnum %d", vnum );
+ 	return NULL;
+     }
+     mob = create_mobile( game, pMobIndex );
+     if ( !mob )
+     {
+ 	for ( ; ; ) {
+ 	  word   = feof( fp ) ? "EndMobile" : fread_word( fp );
+ 	  if ( word[0] == '\0' || !strcmp( word, "EndMobile" ) )
  		break;
          }
  	bug("Fread_mobile: No index data for vnum %d", vnum );
@@ -2911,26 +3267,38 @@ if ( !(dp = opendir(VENDOR_DIR)) )
  	  /* So we don't get so many bug messages when something messes up
  	   * --Shaddai 
  	   */
- 	  if ( !strcmp( word, "EndMobile" ) )
+ 	  if ( word[0] == '\0' || !strcmp( word, "EndMobile" ) )
  		break;
          }
- 	extract_char(mob, TRUE);
- 	bug("Fread_mobile: Vnum not found", 0 );
+ 	bug("Fread_mobile: Vnum not found" );
  	return NULL;
    }
    for ( ; ;) {
         word   = feof( fp ) ? "EndMobile" : fread_word( fp );
+        if ( word[0] == '\0' )
+            word = "EndMobile";
         fMatch = FALSE; 
-        switch ( UPPER(word[0]) ) {
+        switch ( UPPER(static_cast<unsigned char>(word[0])) ) {
  	case '*':
             fMatch = TRUE;
             fread_to_eol( fp );
             break;  
  	case '#':
  		if ( !strcmp( word, "#OBJECT" ) )
- 			fread_obj ( game, mob, fp, OS_CARRY );
+ 		{
+			fread_obj_versioned(game, mob, fp, OS_CARRY, file_version, nest);
+ 			fMatch = TRUE;
+ 		}
+ 		break;
  	case 'D':
- 		KEY( "Description", mob->description, fread_string(fp));
+ 		if ( !str_cmp( word, "Description" ) )
+ 		{
+ 			if ( mob->description )
+ 				STRFREE( mob->description );
+ 			mob->description = fread_string( fp );
+ 			fMatch = TRUE;
+ 			break;
+ 		}
  		break;
  	case 'E':
  		if ( !strcmp( word, "EndMobile" ) )
@@ -2940,6 +3308,8 @@ if ( !(dp = opendir(VENDOR_DIR)) )
  		pRoomIndex = get_room_index( inroom );
  		if ( !pRoomIndex )
  			pRoomIndex = get_room_index( ROOM_VNUM_TEMPLE );
+ 		if ( !pRoomIndex )
+ 			pRoomIndex = get_room_index( ROOM_VNUM_LIMBO );
  		char_to_room(mob, pRoomIndex);
  		return mob;
  		}
@@ -2958,11 +3328,26 @@ if ( !(dp = opendir(VENDOR_DIR)) )
 			break;
 		}	
  		//KEY( "Flags", mob->act, fread_number( fp ));
+ 		break;
  	case 'L':
- 		KEY( "Long", mob->long_descr, fread_string(fp ) );
+ 		if ( !str_cmp( word, "Long" ) )
+ 		{
+ 			if ( mob->long_descr )
+ 				STRFREE( mob->long_descr );
+ 			mob->long_descr = fread_string( fp );
+ 			fMatch = TRUE;
+ 			break;
+ 		}
  		break;
  	case 'N':
- 		KEY( "Name", mob->name, fread_string( fp ) );
+ 		if ( !str_cmp( word, "Name" ) )
+ 		{
+ 			if ( mob->name )
+ 				STRFREE( mob->name );
+ 			mob->name = fread_string( fp );
+ 			fMatch = TRUE;
+ 			break;
+ 		}
  		break;
  	case 'P':
  		KEY( "Position", mob->position, fread_number( fp ) );
@@ -2971,13 +3356,20 @@ if ( !(dp = opendir(VENDOR_DIR)) )
  		KEY( "Room",  inroom, fread_number(fp));
  		break;
  	case 'S':
- 		KEY( "Short", mob->short_descr, fread_string(fp));
+ 		if ( !str_cmp( word, "Short" ) )
+ 		{
+ 			if ( mob->short_descr )
+ 				STRFREE( mob->short_descr );
+ 			mob->short_descr = fread_string( fp );
+ 			fMatch = TRUE;
+ 			break;
+ 		}
  		break;
  	}
  	if ( !fMatch )
  	{
- 	   bug ( "Fread_mobile: no match.", 0 );
- 	   bug ( word, 0 );
+ 	   bug ( "Fread_mobile: no match." );
+ 	   bug ( "%s", word );
  	}
    }
    return NULL;
@@ -2991,7 +3383,6 @@ if ( !(dp = opendir(VENDOR_DIR)) )
  {
    FILE *fp;
    CHAR_DATA *mob;
-   char buf[MAX_STRING_LENGTH];
  
    if ( IS_NPC( ch ) || !ch->pcdata->pet )
  	return;
@@ -2999,7 +3390,7 @@ if ( !(dp = opendir(VENDOR_DIR)) )
    FCLOSE( fpReserve );
    if ( (fp = fopen( argument, "w")) == NULL )
    {
- 	bug(buf, "Write_char_mobile: couldn't open %s for writing!\n", 
+ 	bug( "Write_char_mobile: couldn't open %s for writing!", 
  		argument );
  	fpReserve = fopen( NULL_FILE, "r" );
  	return;
@@ -3019,12 +3410,11 @@ if ( !(dp = opendir(VENDOR_DIR)) )
  {
    FILE *fp;
 //   CHAR_DATA *mob;
-   char buf[MAX_STRING_LENGTH];
  
    FCLOSE( fpReserve );
    if ( (fp = fopen( argument, "r")) == NULL )
    {
- 	bug(buf, "Read_char_mobile: couldn't open %s for reading!\n", 
+ 	bug( "Read_char_mobile: couldn't open %s for reading!", 
  		argument );
  	fpReserve = fopen( NULL_FILE, "r" );
  	return;

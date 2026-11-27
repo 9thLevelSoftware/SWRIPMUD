@@ -1,0 +1,15 @@
+#PLANET
+Name         Coruscant~
+Filename     coruscant.planet~
+Spaceobject  Coruscant~
+GovernedBy   The Empire~
+Area         coruscant_streets~
+Area         corus.pt2~
+Area         newacad.are~
+Area         corus.jail~
+Area         monument.plaza~
+Area         grand_towers~
+Area         grand_towers_suites~
+End
+
+#END

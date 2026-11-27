@@ -128,7 +128,7 @@ A tech customs oficer watches for carried weapons.
 6 6 0 0 0 0 32 0
 0 0 0 0 0 0 0 0
 > rand_prog 5~
-mpat 11274 drop all
+mpat 10299 drop all
 ~
 |
 #11108
@@ -223,14 +223,14 @@ Say Great Work
 mpwithdraw 5000
 give 5000 credits $n
 drop 5000 credits
-mpat 11283 drop all
+mpat 10299 drop all
 mpecho The Tech quickly delivers the blaster.
 endif
 if ovnuminv(10422) >= 1
 Say Decent craftmanship
 mpwithdraw 500
 give 500 credits $n
-mpat 11283 drop all
+mpat 10299 drop all
 mpecho The tech quickly delivers the vibroblade.
 endif
 ~

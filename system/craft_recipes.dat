@@ -102,7 +102,7 @@ Gsn makeblade~
 RoomReq factory~
 Timer 25
 OutputMode create_proto~
-ResultVnum 10422
+ResultVnum 10432
 ResultItemType weapon~
 AllowCustomName 1~
 RequiresExtraArg 0~
@@ -539,9 +539,11 @@ DescriptionTemplate {name}~
 Slot toolkit~ toolkit~ 1 1 true~ keep~ 0~
 Slot thread~ thread~ 1 1 true~ keep~ 0~
 Slot metal~ rare_metal~ 1 1 true~ consume~ 0~
-Slot fabric~ fabric~ 1 1 true~ consume~ 0~
 Slot hide~ fabric~ 1 1 true~ consume~ 0~
+SlotVnum 26009
 Slot plating~ fabric~ 1 1 true~ consume~ 0~
+SlotVnum 26008
+Slot fabric~ fabric~ 1 1 true~ consume~ 0~
 Assign value0~ const(4)~
 Assign value2~ const(2)~
 Assign weight~ const(80)~
@@ -554,7 +556,7 @@ Gsn disguise~
 RoomReq factory~
 Timer 25
 OutputMode create_proto~
-ResultVnum 10420
+ResultVnum 10433
 ResultItemType disguise~
 AllowCustomName 1~
 RequiresExtraArg 1~

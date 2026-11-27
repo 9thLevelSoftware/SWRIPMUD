@@ -1,0 +1,16 @@
+#SPACE
+Name         Ryloth~
+Filename     ryloth.space~
+Type         1
+Locationa    Kala'uun Spaceport Landing Pad~
+Doca         800
+Locationb    Kala'uun Serin Landing Bay~
+Docb         822
+Locationc    ~
+Docc         0
+Xpos         6842
+Ypos         8430
+Zpos         -5127
+End
+
+#END

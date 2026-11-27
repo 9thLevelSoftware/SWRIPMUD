@@ -404,21 +404,21 @@ CommandGroupEx -1
 End
 
 #COMMAND
-Name        ahelp~
-Code        do_ahelp
-Position    0
-Level       101
-Log         0
-CommandGroupEx 7 -1
-End
-
-#COMMAND
 Name        alinks~
 Code        do_alinks
 Position    0
 Level       102
 Log         0
 CommandGroupEx 1 2 3 -1
+End
+
+#COMMAND
+Name        arm~
+Code        do_arm
+Position    5
+Level       0
+Log         0
+CommandGroupEx -1
 End
 
 #COMMAND
@@ -435,15 +435,6 @@ Name        beep~
 Code        do_beep
 Position    5
 Level       1
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
-Name        bomb~
-Code        do_bomb
-Position    5
-Level       0
 Log         0
 CommandGroupEx -1
 End
@@ -782,15 +773,6 @@ CommandGroupEx -1
 End
 
 #COMMAND
-Name        clear~
-Code        reserved
-Position    0
-Level       0
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
 Name        cedit~
 Code        do_cedit
 Position    0
@@ -829,15 +811,6 @@ End
 #COMMAND
 Name        config~
 Code        do_config
-Position    0
-Level       0
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
-Name        councils~
-Code        reserved
 Position    0
 Level       0
 Log         0
@@ -975,15 +948,6 @@ Name        courseactual~
 Code        do_trajectory_actual
 Position    0
 Level       1
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
-Name        copydesc~
-Code        reserved
-Position    0
-Level       109
 Log         0
 CommandGroupEx -1
 End
@@ -1184,15 +1148,6 @@ Position    5
 Level       1
 Log         0
 CommandGroupEx -1
-End
-
-#COMMAND
-Name        degradeship~
-Code        do_degradeship
-Position    0
-Level       105
-Log         0
-CommandGroupEx 0 -1
 End
 
 #COMMAND
@@ -1403,15 +1358,6 @@ CommandGroupEx -1
 End
 
 #COMMAND
-Name        fly~
-Code        do_fly
-Position    5
-Level       0
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
 Name        foldarea~
 Code        do_foldarea
 Position    0
@@ -1485,6 +1431,15 @@ End
 
 #COMMAND
 Name        fuel~
+Code        do_fuel
+Position    0
+Level       105
+Log         0
+CommandGroupEx 0 -1
+End
+
+#COMMAND
+Name        refuel~
 Code        do_fuel
 Position    0
 Level       105
@@ -1587,15 +1542,6 @@ Name        gossip~
 Code        do_ooc
 Position    0
 Level       5
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
-Name        governments~
-Code        reserved
-Position    0
-Level       1
 Log         0
 CommandGroupEx -1
 End
@@ -1952,6 +1898,15 @@ CommandGroupEx -1
 End
 
 #COMMAND
+Name        lookmap~
+Code        do_lookmap
+Position    5
+Level       0
+Log         0
+CommandGroupEx -1
+End
+
+#COMMAND
 Name        land~
 Code        do_land
 Position    5
@@ -2087,27 +2042,9 @@ CommandGroupEx 7 -1
 End
 
 #COMMAND
-Name        loop~
-Code        reserved
-Position    0
-Level       105
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
 Name        loadcargo~
 Code        do_loadcargo
 Position    0
-Level       1
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
-Name        makespice~
-Code        do_makespice
-Position    5
 Level       1
 Log         0
 CommandGroupEx -1
@@ -2321,15 +2258,6 @@ CommandGroupEx -1
 End
 
 #COMMAND
-Name        mpadvance~
-Code        do_mpadvance
-Position    0
-Level       0
-Log         1
-CommandGroupEx -1
-End
-
-#COMMAND
 Name        mpapply~
 Code        do_mpapply
 Position    0
@@ -2341,15 +2269,6 @@ End
 #COMMAND
 Name        mpapplyb~
 Code        do_mpapplyb
-Position    0
-Level       0
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
-Name        mppkset~
-Code        do_mppkset
 Position    0
 Level       0
 Log         0
@@ -2386,15 +2305,6 @@ End
 #COMMAND
 Name        mpslay~
 Code        do_mp_slay
-Position    0
-Level       0
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
-Name        mppractice~
-Code        do_mp_practice
 Position    0
 Level       0
 Log         0
@@ -2447,12 +2357,12 @@ CommandGroupEx 4 -1
 End
 
 #COMMAND
-Name        makecouncil~
-Code        reserved
+Name        maketemplateship~
+Code        do_maketemplateship
 Position    0
-Level       103
+Level       105
 Log         1
-CommandGroupEx 0 -1
+CommandGroupEx 4 -1
 End
 
 #COMMAND
@@ -2489,15 +2399,6 @@ Position    0
 Level       102
 Log         3
 CommandGroupEx 3 -1
-End
-
-#COMMAND
-Name        mdelete~
-Code        do_mdelete
-Position    0
-Level       103
-Log         1
-CommandGroupEx 0 -1
 End
 
 #COMMAND
@@ -2564,15 +2465,6 @@ CommandGroupEx 3 -1
 End
 
 #COMMAND
-Name        mrange~
-Code        do_mrange
-Position    0
-Level       103
-Log         0
-CommandGroupEx 0 -1
-End
-
-#COMMAND
 Name        mset~
 Code        do_mset
 Position    0
@@ -2594,7 +2486,7 @@ End
 Name        murde~
 Code        do_murde
 Position    7
-Level       5
+Level       1
 Log         0
 CommandGroupEx -1
 End
@@ -2609,30 +2501,12 @@ CommandGroupEx -1
 End
 
 #COMMAND
-Name        muse~
-Code        reserved
-Position    0
-Level       102
-Log         0
-CommandGroupEx 0 -1
-End
-
-#COMMAND
 Name        mwhere~
 Code        do_mwhere
 Position    0
 Level       102
 Log         0
 CommandGroupEx 2 7 -1
-End
-
-#COMMAND
-Name        mpfavor~
-Code        reserved
-Position    0
-Level       1
-Log         0
-CommandGroupEx -1
 End
 
 #COMMAND
@@ -2678,24 +2552,6 @@ Position    0
 Level       103
 Log         0
 CommandGroupEx 7 -1
-End
-
-#COMMAND
-Name        mortalize~
-Code        do_mortalize
-Position    0
-Level       105
-Log         0
-CommandGroupEx 0 -1
-End
-
-#COMMAND
-Name        market~
-Code        reserved
-Position    0
-Level       1
-Log         0
-CommandGroupEx -1
 End
 
 #COMMAND
@@ -2771,15 +2627,6 @@ CommandGroupEx -1
 End
 
 #COMMAND
-Name        note~
-Code        do_noteroom
-Position    5
-Level       0
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
 Name        newbiechat~
 Code        do_newbiechat
 Position    0
@@ -2795,15 +2642,6 @@ Position    0
 Level       101
 Log         0
 CommandGroupEx 6 8 -1
-End
-
-#COMMAND
-Name        newclan~
-Code        do_newclan
-Position    0
-Level       0
-Log         0
-CommandGroupEx -1
 End
 
 #COMMAND
@@ -2907,7 +2745,7 @@ End
 
 #COMMAND
 Name        openhatch~
-Code        do_open
+Code        do_openhatch
 Position    5
 Level       0
 Log         0
@@ -2930,15 +2768,6 @@ Position    0
 Level       102
 Log         3
 CommandGroupEx 3 9 -1
-End
-
-#COMMAND
-Name        odelete~
-Code        do_odelete
-Position    0
-Level       103
-Log         1
-CommandGroupEx 2 -1
 End
 
 #COMMAND
@@ -2996,48 +2825,12 @@ CommandGroupEx 3 -1
 End
 
 #COMMAND
-Name        orange~
-Code        do_orange
-Position    0
-Level       103
-Log         0
-CommandGroupEx 0 -1
-End
-
-#COMMAND
-Name        orders~
-Code        do_orders
-Position    0
-Level       0
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
-Name        ordertalk~
-Code        do_ordertalk
-Position    0
-Level       0
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
 Name        ostat~
 Code        do_ostat
 Position    0
 Level       102
 Log         0
 CommandGroupEx 3 9 -1
-End
-
-#COMMAND
-Name        ot~
-Code        do_ordertalk
-Position    0
-Level       0
-Log         0
-CommandGroupEx -1
 End
 
 #COMMAND
@@ -3056,15 +2849,6 @@ Position    0
 Level       102
 Log         0
 CommandGroupEx 2 8 -1
-End
-
-#COMMAND
-Name        opentourney~
-Code        reserved
-Position    0
-Level       105
-Log         1
-CommandGroupEx 0 -1
 End
 
 #COMMAND
@@ -3195,7 +2979,7 @@ End
 
 #COMMAND
 Name        pagelength~
-Code        reserved
+Code        do_pager
 Position    0
 Level       1
 Log         0
@@ -3239,7 +3023,7 @@ CommandGroupEx 2 8 -1
 End
 
 #COMMAND
-Name        purge~
+Name        lowpurge~
 Code        do_low_purge
 Position    0
 Level       101
@@ -3338,15 +3122,6 @@ CommandGroupEx -1
 End
 
 #COMMAND
-Name        qpset~
-Code        reserved
-Position    0
-Level       102
-Log         1
-CommandGroupEx 0 -1
-End
-
-#COMMAND
 Name        radar~
 Code        do_radar
 Position    5
@@ -3358,15 +3133,6 @@ End
 #COMMAND
 Name        recharge~
 Code        do_recharge
-Position    5
-Level       0
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
-Name        refuel~
-Code        do_refuel
 Position    5
 Level       0
 Log         0
@@ -3518,6 +3284,15 @@ CommandGroupEx 8 9 -1
 End
 
 #COMMAND
+Name        recite~
+Code        do_recite
+Position    5
+Level       0
+Log         0
+CommandGroupEx -1
+End
+
+#COMMAND
 Name        redit~
 Code        do_redit
 Position    0
@@ -3542,15 +3317,6 @@ Position    0
 Level       0
 Log         0
 CommandGroupEx -1
-End
-
-#COMMAND
-Name        repairstat~
-Code        do_repairstat
-Position    0
-Level       102
-Log         0
-CommandGroupEx 3 8 -1
 End
 
 #COMMAND
@@ -3968,15 +3734,6 @@ CommandGroupEx 7 -1
 End
 
 #COMMAND
-Name        setcouncil~
-Code        reserved
-Position    0
-Level       103
-Log         1
-CommandGroupEx 0 -1
-End
-
-#COMMAND
 Name        setstarsystem~
 Code        do_setspaceobject
 Position    0
@@ -4238,24 +3995,6 @@ CommandGroupEx 7 -1
 End
 
 #COMMAND
-Name        showclass~
-Code        reserved
-Position    0
-Level       103
-Log         0
-CommandGroupEx 0 -1
-End
-
-#COMMAND
-Name        setclass~
-Code        reserved
-Position    0
-Level       105
-Log         1
-CommandGroupEx 0 -1
-End
-
-#COMMAND
 Name        starsystems~
 Code        do_spaceobjects
 Position    0
@@ -4316,15 +4055,6 @@ Position    0
 Level       1
 Log         0
 CommandGroupEx -1
-End
-
-#COMMAND
-Name        senate~
-Code        do_senate
-Position    0
-Level       105
-Log         0
-CommandGroupEx 0 -1
 End
 
 #COMMAND
@@ -4472,15 +4202,6 @@ CommandGroupEx -1
 End
 
 #COMMAND
-Name        think~
-Code        reserved
-Position    0
-Level       103
-Log         0
-CommandGroupEx 0 -1
-End
-
-#COMMAND
 Name        time~
 Code        do_time
 Position    0
@@ -4599,7 +4320,7 @@ End
 
 #COMMAND
 Name        tanswer~
-Code        reserved
+Code        do_trivia_answer
 Position    0
 Level       0
 Log         0
@@ -4608,7 +4329,7 @@ End
 
 #COMMAND
 Name        tchat~
-Code        reserved
+Code        do_trivia_chat
 Position    0
 Level       0
 Log         0
@@ -4617,7 +4338,7 @@ End
 
 #COMMAND
 Name        tscore~
-Code        reserved
+Code        do_trivia_score
 Position    0
 Level       0
 Log         0
@@ -4626,7 +4347,7 @@ End
 
 #COMMAND
 Name        tquestion~
-Code        reserved
+Code        do_trivia_question
 Position    0
 Level       0
 Log         0
@@ -4635,7 +4356,7 @@ End
 
 #COMMAND
 Name        twinner~
-Code        reserved
+Code        do_trivia_winner
 Position    0
 Level       0
 Log         0
@@ -4644,7 +4365,7 @@ End
 
 #COMMAND
 Name        trivia~
-Code        reserved
+Code        do_trivia
 Position    0
 Level       101
 Log         0
@@ -4653,7 +4374,7 @@ End
 
 #COMMAND
 Name        tjoin~
-Code        reserved
+Code        do_trivia_join
 Position    0
 Level       0
 Log         0
@@ -4769,24 +4490,6 @@ CommandGroupEx 7 -1
 End
 
 #COMMAND
-Name        upgradeship~
-Code        do_upgradeship
-Position    5
-Level       104
-Log         0
-CommandGroupEx 0 -1
-End
-
-#COMMAND
-Name        unload~
-Code        do_unload
-Position    0
-Level       105
-Log         0
-CommandGroupEx 0 -1
-End
-
-#COMMAND
 Name        unjail~
 Code        do_unjail
 Position    0
@@ -4806,6 +4509,15 @@ End
 
 #COMMAND
 Name        unloadcargo~
+Code        do_unloadcargo
+Position    0
+Level       1
+Log         0
+CommandGroupEx -1
+End
+
+#COMMAND
+Name        unload~
 Code        do_unloadcargo
 Position    0
 Level       1
@@ -4899,15 +4611,6 @@ Name        wake~
 Code        do_wake
 Position    4
 Level       0
-Log         0
-CommandGroupEx -1
-End
-
-#COMMAND
-Name        wartalk~
-Code        reserved
-Position    4
-Level       2
 Log         0
 CommandGroupEx -1
 End
@@ -5046,5 +4749,50 @@ Level       102
 Log         0
 CommandGroupEx 3 8 -1
 End
+#COMMAND
+Name        checkareaships~
+Code        do_checkareaships
+Position    0
+Level       102
+Log         0
+CommandGroupEx 4 -1
+End
+
+#COMMAND
+Name        dnd~
+Code        do_dnd
+Position    0
+Level       101
+Log         0
+CommandGroupEx -1
+End
+
+#COMMAND
+Name        murder~
+Code        do_murder
+Position    7
+Level       1
+Log         1
+CommandGroupEx -1
+End
+
+#COMMAND
+Name        restoreship~
+Code        do_restoreship
+Position    0
+Level       105
+Log         1
+CommandGroupEx 4 -1
+End
+
+#COMMAND
+Name        shipdelete~
+Code        do_shipdelete
+Position    0
+Level       105
+Log         1
+CommandGroupEx 4 -1
+End
+
 
 #END

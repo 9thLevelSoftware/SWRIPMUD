@@ -1,68 +1,200 @@
 #!/bin/bash
 
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec /bin/bash "$0" "$@"
+fi
+
+unset CDPATH
+
 # Set the port number.
 port=7000
-if [ -n "$1" ]; then port=$1; fi
+if [ -n "${1:-}" ]; then port="$1"; fi
+case "$port" in
+    ''|*[!0-9]*)
+        echo "Error: Invalid port number '$port'." >&2
+        exit 1
+        ;;
+esac
+if [ "${#port}" -gt 5 ] || [ "$port" -le 1024 ] || [ "$port" -gt 65535 ]; then
+    echo "Error: Port number must be between 1025 and 65535." >&2
+    exit 1
+fi
 
 # Obtain SWR base directory.
-swrdir=~/swr
-if [ -n "$2" ]; then swrdir=$2; fi
-
-# Check that startup script or game binary isn't already running.
-[ -e $swrdir/log/startup.pid ] && if [ /proc/`cat $swrdir/log/startup.pid`/exe \
--ef $swrdir/bin/startup ]; then
-echo Error: Startup script already running.
-exit 1
-fi
-[ -e $swrdir/log/current.log ] && if [ /proc/`sed "2,\\$d;s/^.*PID: //" \
-$swrdir/log/current.log`/exe -ef $swrdir/bin/swrip ]; then
-echo Error: Game binary already running.
-exit 1
+script_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+script_dir="$(cd "$(dirname "$script_path")" && pwd -P)" || exit 1
+default_swrdir="$(cd "$script_dir/.." && pwd -P)" || exit 1
+if [ -n "${2:-}" ]; then
+    swrdir="$2"
+elif [ ! -d "$default_swrdir/area" ] && [ -d "$HOME/swr/area" ]; then
+    swrdir="$HOME/swr"
+else
+    swrdir="$default_swrdir"
 fi
 
-cd $swrdir/area
-ulimit -s 1024
+swrdir="$(cd "$swrdir" 2>/dev/null && pwd -P)" || {
+    echo "Error: SWR base directory does not exist." >&2
+    exit 1
+}
+
+cd "$swrdir/area" 2>/dev/null || {
+    echo "Error: Area directory '$swrdir/area' does not exist." >&2
+    exit 1
+}
+
+if [ ! -x "$swrdir/bin/swrip" ]; then
+    echo "Error: Game binary '$swrdir/bin/swrip' not found or not executable." >&2
+    exit 1
+fi
+
+mkdir -p "$swrdir/log" 2>/dev/null || {
+    echo "Error: Cannot create log directory '$swrdir/log'." >&2
+    exit 1
+}
+
+# Check that startup script isn't already running (atomic per-swrdir lock).
+exec 9>>"$swrdir/log/startup.lock" || {
+    echo "Error: Cannot open lock file '$swrdir/log/startup.lock'." >&2
+    exit 1
+}
+if ! flock -n 9; then
+    echo "Error: Startup script already running." >&2
+    exit 1
+fi
+
+# Check that game binary isn't already running for this swrdir.
+swrip_real="$(readlink -f "$swrdir/bin/swrip" 2>/dev/null || true)"
+area_real="$(readlink -f "$swrdir/area" 2>/dev/null || true)"
+
+is_our_swrip_pid() {
+    pid="$1"
+    case "$pid" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    kill -0 "$pid" 2>/dev/null || return 1
+
+    if [ "/proc/$pid/exe" -ef "$swrdir/bin/swrip" ]; then
+        return 0
+    fi
+
+    exe_target="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    if [ -n "$swrip_real" ] && [ "$exe_target" = "$swrip_real (deleted)" ]; then
+        return 0
+    fi
+
+    arg0=""
+    { IFS= read -r -d '' arg0 < "/proc/$pid/cmdline"; } 2>/dev/null || true
+    case "$arg0" in
+        swrip|*/swrip)
+            cwd_target="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+            if [ -n "$area_real" ] && [ "$cwd_target" = "$area_real" ]; then
+                return 0
+            fi
+            ;;
+    esac
+
+    return 1
+}
+
+if [ -e "$swrdir/log/current.log" ]; then
+    game_pids="$(grep -oE 'PID: [0-9]+' "$swrdir/log/current.log" 2>/dev/null | awk '{print $2}')"
+    unset saved_ifs
+    [ "${IFS+set}" = "set" ] && saved_ifs="$IFS"
+    IFS=$' \t\n'
+    for game_pid in $game_pids; do
+        if is_our_swrip_pid "$game_pid"; then
+            if [ "${saved_ifs+set}" = "set" ]; then IFS="$saved_ifs"; else unset IFS; fi
+            echo "Error: Game binary already running (PID $game_pid)." >&2
+            exit 1
+        fi
+    done
+    if [ "${saved_ifs+set}" = "set" ]; then IFS="$saved_ifs"; else unset IFS; fi
+fi
+
+for proc_dir in /proc/[0-9]*; do
+    [ -d "$proc_dir" ] || continue
+    proc_pid="${proc_dir#/proc/}"
+    if [ "$proc_pid" = "$$" ] || [ "$proc_pid" = "${BASHPID:-}" ]; then
+        continue
+    fi
+    if is_our_swrip_pid "$proc_pid"; then
+        echo "Error: Game binary already running (PID $proc_pid)." >&2
+        exit 1
+    fi
+done
+
+# Ensure stack limit is at least 8192 KB (do not shrink default to 1024 KB).
+cur_stack="$(ulimit -Ss 2>/dev/null || echo unlimited)"
+if [ "$cur_stack" != "unlimited" ] && [ "$cur_stack" -lt 8192 ] 2>/dev/null; then
+    ulimit -Ss 8192 2>/dev/null || true
+fi
 rm -f shutdown.txt
-
-# Write startup PID file.
-echo $$ > ../log/startup.pid
+rm -f "$swrdir/log/startup.pid"
 
 (
-until [ -e shutdown.txt ]
-do
-    # If you want to have logs in a different directory,
-    #   change the 'logfile=' line to reflect the directory name.
-index=1000
-while
-logfile=../log/$index.log
-[ -e $logfile ]
-do
-if [ $index -lt 1100 ]
-then
-let index=index+1
-else
-rm -f $logfile
-fi
+    trap 'rm -f "$swrdir/log/startup.pid"' EXIT
+    echo "$BASHPID" > "$swrdir/log/startup.pid"
+    rapid_failures=0
+
+    until [ -e shutdown.txt ]
+    do
+        # If you want to have logs in a different directory,
+        #   change the 'logfile=' line to reflect the directory name.
+        index=1000
+        while
+            logfile="../log/$index.log"
+            [ -e "$logfile" ] || [ -L "$logfile" ]
+        do
+            index=$((index + 1))
+        done
+        ln -sf "$index.log" "$swrdir/log/current.log"
+
+        # Record starting time
+        date > "$logfile"
+        date > "$swrdir/area/boot.txt"
+
+        # Run game (close lock FD 9 so startup.lock tracks supervisor only).
+        start_ts=$SECONDS
+        nohup "$swrdir/bin/swrip" "$port" </dev/null >>"$logfile" 2>&1 9>&-
+        rc=$?
+        elapsed=$((SECONDS - start_ts))
+
+        # Make back up of bug log and start fresh
+        if [ -e "$swrdir/system/bugs.txt" ]; then
+            if [ -e "$swrdir/system/bugs.txt.bak" ]; then
+                rm -f "$swrdir/system/bugs.txt.bak"
+            fi
+            mv "$swrdir/system/bugs.txt" "$swrdir/system/bugs.txt.bak"
+            touch "$swrdir/system/bugs.txt"
+        fi
+
+        [ -e shutdown.txt ] && break
+
+        if [ "$elapsed" -lt 5 ] && [ "$rc" -ne 0 ]; then
+            rapid_failures=$((rapid_failures + 1))
+            if [ "$rapid_failures" -ge 5 ]; then
+                echo "Error: Game exited immediately $rapid_failures times in a row (last exit $rc); stopping startup loop." >> "$logfile"
+                break
+            fi
+            sleep "$rapid_failures" 9>&-
+        else
+            rapid_failures=0
+            # Restart, giving old connections a chance to die.
+            sleep 15 9>&-
+        fi
+    done
+
+    rm -f shutdown.txt "$swrdir/log/current.log" "$swrdir/log/current.log.size" "$swrdir/log/startup.pid"
+) </dev/null >/dev/null 2>&1 &
+
+bg_pid=$!
+waited=0
+while [ "$waited" -lt 100 ]; do
+    if [ -s "$swrdir/log/startup.pid" ] || ! kill -0 "$bg_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.01
+    waited=$((waited + 1))
 done
-ln -sf $logfile ../log/current.log
-
-    # Record starting time
-    date > $logfile
-    date > ../area/boot.txt
-
-    # Run game.
-nohup ../bin/swrip $port >& $logfile
-
-# make back up of bug log and start fresh
-if [ -e $swrdir/system/bugs.txt ]
-then
-if [ -e $swrdir/system/bugs.txt.bak ]; then rm $swrdir/system/bugs.txt.bak; fi
-mv $swrdir/system/bugs.txt $swrdir/system/bugs.txt.bak
-touch $swrdir/system/bugs.txt
-fi
-
-    # Restart, giving old connections a chance to die.
-sleep 15
-done
-rm -f shutdown.txt ../log/current.log ../log/current.log.size ../log/startup.pid
-)&

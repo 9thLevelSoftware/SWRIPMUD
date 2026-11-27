@@ -54,9 +54,8 @@ const flag_name  where_name [] =
   	{ WEAR_MISSILE_WIELD,   "<missile wielded>   "},
 	{ WEAR_FLOATING,        "<floating>		     "},
 	{ WEAR_OVER,            "<worn over body>	 "},
-	{ MAX_WEAR, },
+	{ WEAR_RESERVED,        "_reserved_" },
 	{ WEAR_DISGUISE,        "<disguise>          "},
-    { WEAR_MAX,          "max                 "},
     { (size_t)-1, nullptr } // terminator	
 };    
 
@@ -104,9 +103,12 @@ int get_race_from_name( const std::string&arg )
 {
   int iRace;
 
+	 if ( arg.empty() )
+	    return -1;
+
 	 for ( iRace = 0; iRace < MAX_RACE; iRace++ )
 	 {
-	    if ( toupper(arg[0]) == toupper(race_table[iRace].race_name[0])
+	    if ( toupper((unsigned char)arg[0]) == toupper((unsigned char)race_table[iRace].race_name[0])
 	    &&   !str_prefix( arg, race_table[iRace].race_name ) )
 		break;
 	 }
@@ -119,9 +121,12 @@ int get_class_from_name( const std::string& arg )
 {
   int iClass;
   
+	if ( arg.empty() )
+	   return -1;
+
   	for ( iClass = 0; iClass < MAX_ABILITY; iClass++ )
 	{
-	    if ( toupper(arg[0]) == toupper(ability_name[iClass][0])
+	    if ( toupper((unsigned char)arg[0]) == toupper((unsigned char)ability_name[iClass][0])
 	    &&   !str_prefix( arg, ability_name[iClass] ) )
 		break;
 	}
@@ -143,7 +148,7 @@ const std::string format_obj_to_char( OBJ_DATA *obj, CHAR_DATA *ch, bool fShort 
     if ( IS_OBJ_STAT(obj, ITEM_HIDDEN)	  )   buf += "(Hidden) "	  ;
     if ( IS_OBJ_STAT(obj, ITEM_BURRIED)	  )   buf += "(Burried) "	  ;
     if ( IS_IMMORTAL(ch) && IS_OBJ_STAT(obj, ITEM_PROTOTYPE) ) buf += "(PROTO) "	  ;
-   if( ( IS_AFFECTED( ch, AFF_DETECTTRAPS ) || BV_IS_SET( ch->act, PLR_HOLYLIGHT ) ) && is_trapped( obj ) )
+   if( ( IS_AFFECTED( ch, AFF_DETECTTRAPS ) || (!IS_NPC(ch) && BV_IS_SET( ch->act, PLR_HOLYLIGHT )) ) && is_trapped( obj ) )
         buf += "(Trap) ";
 
     if ( fShort )
@@ -243,7 +248,7 @@ void show_list_to_char( OBJ_DATA *list, CHAR_DATA *ch, bool fShort, bool fShowNo
     int count, offcount, tmp, ms, cnt;
     bool fCombine;
 
-    if ( !ch->desc )
+    if ( !ch || !ch->desc )
         return;
 
     /*
@@ -268,7 +273,7 @@ void show_list_to_char( OBJ_DATA *list, CHAR_DATA *ch, bool fShort, bool fShowNo
         count++;
 
     ms = ( ch->mental_state ? ch->mental_state : 1 )
-        * ( IS_NPC(ch) ? 1 :
+        * ( ( IS_NPC(ch) || !ch->pcdata ) ? 1 :
             ( ch->pcdata->condition[COND_DRUNK]
                 ? ( ch->pcdata->condition[COND_DRUNK] / 12 )
                 : 1 ) );
@@ -416,6 +421,28 @@ void show_list_to_char( OBJ_DATA *list, CHAR_DATA *ch, bool fShort, bool fShowNo
 }
 
 
+static const char *safe_pers( CHAR_DATA *victim, CHAR_DATA *ch )
+{
+    if ( !victim )
+        return "";
+    if ( !ch )
+        return IS_NPC( victim )
+            ? (victim->short_descr ? victim->short_descr : (victim->name ? victim->name : ""))
+            : (victim->name ? victim->name : "");
+    if ( !can_see( ch, victim ) )
+        return IS_IMMORTAL( victim ) ? "A Great One" : "someone";
+    if ( IS_NPC( victim ) )
+        return victim->short_descr ? victim->short_descr : (victim->name ? victim->name : "");
+    const char *name = victim->name ? victim->name : "";
+    const char *title = (victim->pcdata && victim->pcdata->title) ? victim->pcdata->title : NULL;
+    if ( get_trust( ch ) <= LEVEL_IMMORTAL && title != NULL && victim->name != NULL )
+    {
+        if ( !nifty_is_name( victim->name, title ) )
+            return title;
+    }
+    return name;
+}
+
 /*
  * Show fancy descriptions for certain spell affects		-Thoric
  */
@@ -427,20 +454,24 @@ void show_visible_affects_to_char( CHAR_DATA *victim, CHAR_DATA *ch )
     {
 	set_char_color( AT_MAGIC, ch );
 	ch_printf( ch, "%s looks ahead free of expression.\n",
-	    IS_NPC( victim ) ? capitalize(victim->short_descr).c_str() : (victim->name) );
+	    IS_NPC( victim ) ? capitalize(victim->short_descr ? victim->short_descr : "").c_str() : (victim->name ? victim->name : "") );
     }
     if ( !IS_NPC(victim) && !victim->desc
     &&    victim->switched && IS_AFFECTED(victim->switched, AFF_POSSESS) )
     {
 	set_char_color( AT_MAGIC, ch );
-	buf = PERS( victim, ch );
+	buf = safe_pers( victim, ch );
 	buf += " appears to be in a deep trance...\n";
+	send_to_char( buf, ch );
     }
 }
 
 void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
 {
     std::string buf, buf1, message;
+
+    if ( !ch || !victim )
+        return;
 
     if ( IS_NPC(victim) )
       buf += " ";
@@ -459,7 +490,7 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
       || (IS_NPC(victim) && BV_IS_SET(victim->act, ACT_MOBINVIS)) ) 
     {
         if (!IS_NPC(victim))
-            buf1 = str_printf( "(Invis %d) ", victim->pcdata->wizinvis);
+            buf1 = str_printf( "(Invis %d) ", victim->pcdata ? victim->pcdata->wizinvis : 0);
         else 
             buf1 = str_printf("(Mobinvis %d) ", victim->mobinvis);
 	buf += buf1;
@@ -481,7 +512,7 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
 						buf += "(Writing) " ;
 
     set_char_color( AT_PERSON, ch );
-    if ( victim->position == victim->defposition && victim->long_descr[0] != '\0' )
+    if ( victim->position == victim->defposition && victim->long_descr && victim->long_descr[0] != '\0' )
     {
 	buf += victim->long_descr;
 	send_to_char( buf, ch );
@@ -489,10 +520,10 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
 	return;
     }
     
-    if ( !IS_NPC(victim) && !BV_IS_SET(ch->act, PLR_BRIEF) )
+    if ( !IS_NPC(victim) && (IS_NPC(ch) || !BV_IS_SET(ch->act, PLR_BRIEF)) && victim->pcdata && victim->pcdata->title )
 	    buf += victim->pcdata->title;
     else
-        buf += PERS( victim, ch );  
+        buf += safe_pers( victim, ch );  
     
     switch ( victim->position )
     {
@@ -503,10 +534,11 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
     case POS_SLEEPING: 
 	if (victim->on != NULL)
 	{
+	    const char *on_desc = victim->on->short_descr ? victim->on->short_descr : "something";
 	    if (victim->on->value[2] == SLEEP_AT)
   	    {
 		message = str_printf(" is sleeping at %s",
-		    victim->on->short_descr);
+		    on_desc);
               if( ((ch->position < POS_FIGHTING) && (ch->position > POS_STUNNED)) 
               && ch->on && (ch->on == victim->on ) )
               	message += " with you";
@@ -516,7 +548,7 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
 	    else if (victim->on->value[2] == SLEEP_ON)
 	    {
 		message = str_printf(" is sleeping on %s",
-		    victim->on->short_descr); 
+		    on_desc); 
               if( ((ch->position < POS_FIGHTING) && (ch->position > POS_STUNNED)) 
               && ch->on && (ch->on == victim->on ) )
               	message += " with you";
@@ -526,7 +558,7 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
 	    else
 	    {
 		message = str_printf(" is sleeping in %s",
-		    victim->on->short_descr);
+		    on_desc);
               if( ((ch->position < POS_FIGHTING) && (ch->position > POS_STUNNED)) 
               && ch->on && (ch->on == victim->on ) )
               	message += " with you";
@@ -546,10 +578,11 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
     case POS_RESTING:  
         if (victim->on != NULL)
 	{
+            const char *on_desc = victim->on->short_descr ? victim->on->short_descr : "something";
             if (victim->on->value[2] == REST_AT)
             {
                 message = str_printf(" is resting at %s",
-                    victim->on->short_descr);
+                    on_desc);
               if( ((ch->position < POS_FIGHTING) && (ch->position > POS_STUNNED)) 
               && ch->on && (ch->on == victim->on ) )
               	message += " with you";
@@ -559,7 +592,7 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
             else if (victim->on->value[2] == REST_ON)
             {
                 message = str_printf(" is resting on %s",
-                    victim->on->short_descr);
+                    on_desc);
               if( ((ch->position < POS_FIGHTING) && (ch->position > POS_STUNNED)) 
               && ch->on && (ch->on == victim->on ) )
               	message += " with you";
@@ -569,7 +602,7 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
             else 
             {
                 message = str_printf(" is resting in %s",
-                    victim->on->short_descr);
+                    on_desc);
               if( ((ch->position < POS_FIGHTING) && (ch->position > POS_STUNNED)) 
               && ch->on && (ch->on == victim->on ) )
               	message += " with you";
@@ -591,10 +624,11 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
     case POS_SITTING:  
         if (victim->on != NULL)
         {
+            const char *on_desc = victim->on->short_descr ? victim->on->short_descr : "something";
             if (victim->on->value[2] == SIT_AT)
             {
                 message = str_printf(" is sitting at %s",
-                    victim->on->short_descr);
+                    on_desc);
               if( (ch->position == POS_SITTING) 
               && ch->on && (ch->on == victim->on ) )
               	message += " with you";
@@ -604,7 +638,7 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
             else if (victim->on->value[2] == SIT_ON)
             {
                 message = str_printf(" is sitting on %s",
-                    victim->on->short_descr);
+                    on_desc);
               if( (ch->position == POS_SITTING) 
               && ch->on && (ch->on == victim->on ) )
               	message += " with you";
@@ -614,7 +648,7 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
             else
             {
                 message = str_printf(" is sitting in %s",
-                    victim->on->short_descr);
+                    on_desc);
               if( (ch->position == POS_SITTING) 
               	&& ch->on && (ch->on == victim->on ) )
               	message += " with you";
@@ -637,18 +671,18 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
 	if ( IS_IMMORTAL(victim) )
             buf += " is here before you." ;
 	else
-        if ( ( victim->in_room->sector_type == SECT_UNDERWATER )
+        if ( victim->in_room && ( victim->in_room->sector_type == SECT_UNDERWATER )
         && !IS_AFFECTED(victim, AFF_AQUA_BREATH) && !IS_NPC(victim) )
             buf += " is drowning here." ;
 	else
-	if ( victim->in_room->sector_type == SECT_UNDERWATER )
+	if ( victim->in_room && victim->in_room->sector_type == SECT_UNDERWATER )
             buf += " is here in the water." ;
 	else
-	if ( ( victim->in_room->sector_type == SECT_OCEANFLOOR )
+	if ( victim->in_room && ( victim->in_room->sector_type == SECT_OCEANFLOOR )
 	&& !IS_AFFECTED(victim, AFF_AQUA_BREATH) && !IS_NPC(victim) )
 	    buf += " is drowning here." ;
 	else
-	if ( victim->in_room->sector_type == SECT_OCEANFLOOR )
+	if ( victim->in_room && victim->in_room->sector_type == SECT_OCEANFLOOR )
 	    buf += " is standing here in the water." ;
 	else
 	if ( IS_AFFECTED(victim, AFF_FLOATING)
@@ -669,7 +703,7 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
 	else
 	if ( victim->in_room == victim->mount->in_room )
 	{
-	    buf += PERS( victim->mount, ch );
+	    buf += safe_pers( victim->mount, ch );
 	    buf += ".";
 	}
 	else
@@ -681,9 +715,9 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
 	    buf += "thin air???" ;
 	else if ( who_fighting( victim ) == ch )
 	    buf += "YOU!" ;
-	else if ( victim->in_room == victim->fighting->who->in_room )
+	else if ( victim->fighting->who && victim->in_room == victim->fighting->who->in_room )
 	{
-	    buf += PERS( victim->fighting->who, ch );
+	    buf += safe_pers( victim->fighting->who, ch );
 	    buf += ".";
 	}
 	else
@@ -692,7 +726,8 @@ void show_char_to_char_0( CHAR_DATA *victim, CHAR_DATA *ch )
     }
 
     buf += "\n";
-    buf[0] = UPPER(buf[0]);
+    if ( !buf.empty() )
+        buf[0] = UPPER(buf[0]);
     send_to_char( buf, ch );
     show_visible_affects_to_char( victim, ch );
     return;
@@ -712,9 +747,9 @@ void show_char_to_char_1( CHAR_DATA *victim, CHAR_DATA *ch )
     act( AT_ACTION, "$n looks at $N.",  ch, NULL, victim, TO_NOTVICT );
     }
 
-    ch_printf( ch, "%s is a %s %s\n", PERS(victim, ch), get_sex( victim ).c_str(), get_flag_name(npc_race, victim->race, MAX_NPC_RACE) );
+    ch_printf( ch, "%s is a %s %s\n", safe_pers(victim, ch), get_sex( victim ).c_str(), get_flag_name(npc_race, victim->race, MAX_NPC_RACE) );
 
-    if ( victim->description[0] != '\0' )
+    if ( victim->description && victim->description[0] != '\0' )
     {
 	send_to_char( victim->description, ch );
     }
@@ -756,7 +791,7 @@ void show_char_to_char_1( CHAR_DATA *victim, CHAR_DATA *ch )
     /*
      * Crash fix here by Thoric
      */
-    if ( IS_NPC(ch) || victim == ch )
+    if ( IS_NPC(ch) || !ch->pcdata || victim == ch )
       return;
 
     if( IS_IMMORTAL(victim) && (victim->top_level > ch->top_level) )
@@ -799,7 +834,7 @@ void show_char_to_char( CHAR_DATA *list, CHAR_DATA *ch )
 	 }
 	}
 	else if ( room_is_dark( ch->in_room )
-	&&        IS_AFFECTED(rch, AFF_INFRARED ) )
+	&&        IS_AFFECTED(ch, AFF_INFRARED ) )
 	{
 	    set_char_color( AT_BLOOD, ch );
 	    send_to_char( "The red form of a living creature is here.\n", ch );
@@ -811,44 +846,17 @@ void show_char_to_char( CHAR_DATA *list, CHAR_DATA *ch )
 
 void show_ships_to_char( SHIP_DATA *ship, CHAR_DATA *ch )
 {
-    SHIP_DATA *rship = NULL;
-//  SHIP_DATA *nship=NULL;
-
-/*  for ( rship = ship; rship && rship != nship; rship = nship )
+    while ( ship )
     {
-        ch_printf( ch , "&C%-35s     ", rship->name );  
-        if ( ( nship = rship->next_in_room ) !=NULL && rship != nship )
+        ch_printf( ch, "&C%-35s     ", ship->name ? ship->name : "(unnamed)" );
+        ship = ship->next_in_room;
+        if ( ship )
         {
-            ch_printf( ch , "%-35s", nship->name );  
-            nship = nship->next_in_room;
+            ch_printf( ch, "%-35s", ship->name ? ship->name : "(unnamed)" );
+            ship = ship->next_in_room;
         }
-        if ( nship == rship )
-          break;
-        ch_printf( ch, "\n&w");
+        send_to_char( "\n&w", ch );
     }
-*/
-
-/* Adjusted look to search through all ships and display if at the room.
-   Waste of CPU time, I know, but there is a bug in the next_in_room code I
-   Simply can not find - DV 2-15-04 */
-  for ( rship = first_ship; rship; rship = rship->next )
-    {
-      if ( rship->location == ch->in_room->vnum )
-      {
-        ch_printf( ch , "&C%-35s     ", rship->name );  
-        for ( rship = rship->next; rship; rship = rship->next )
-          if ( rship && (rship->location == ch->in_room->vnum) )
-	        break;
-
-        if ( rship )
-            ch_printf( ch , "%-35s", rship->name ); 
-        ch_printf( ch, "\n&w");
-      }
-        if ( !rship )
-          break; 
-    }
-
-    return;
 }
 
 
@@ -891,6 +899,147 @@ int get_door( const std::string& arg )
     return door;
 }
 
+static void show_room_viewport(CHAR_DATA *ch, ROOM_INDEX_DATA *to_room)
+{
+    if (!ch || !ch->desc || !to_room || to_room == ch->in_room)
+        return;
+
+    if (!IS_NPC(ch)
+        && !BV_IS_SET(ch->act, PLR_HOLYLIGHT)
+        && !IS_AFFECTED(ch, AFF_TRUESIGHT)
+        && room_is_dark(to_room))
+    {
+        set_char_color(AT_DGREY, ch);
+        send_to_char("It is pitch black ... \n", ch);
+        for (CHAR_DATA *rch = to_room->first_person; rch; rch = rch->next_in_room)
+        {
+            if (rch == ch)
+                continue;
+            if (can_see(ch, rch))
+                show_char_to_char_0(rch, ch);
+            else if (rch->race == RACE_DEFEL
+                && !IS_AFFECTED(rch, AFF_INVISIBLE)
+                && !BV_IS_SET(rch->act, PLR_WIZINVIS))
+            {
+                set_char_color(AT_BLOOD, ch);
+                send_to_char("You see a pair of red eyes staring back at you.\n", ch);
+            }
+            else if (IS_AFFECTED(ch, AFF_INFRARED))
+            {
+                set_char_color(AT_BLOOD, ch);
+                send_to_char("The red form of a living creature is here.\n", ch);
+            }
+        }
+        return;
+    }
+
+    set_char_color(AT_RMNAME, ch);
+    send_to_char(to_room->name ? to_room->name : "", ch);
+    send_to_char(" ", ch);
+
+    if (!ch->desc->original && get_trust(ch) >= LEVEL_IMMORTAL)
+    {
+        if (BV_IS_SET(ch->act, PLR_ROOMVNUM))
+        {
+            set_char_color(AT_BLUE, ch);
+            ch_printf(ch, "{%d}", to_room->vnum);
+        }
+        if (ch->pcdata && BV_IS_SET(ch->pcdata->flags, PCFLAG_ROOM))
+        {
+            set_char_color(AT_CYAN, ch);
+            send_to_char("[", ch);
+            send_to_char(bitset_to_string(to_room->room_flags, r_flags), ch);
+            send_to_char("]", ch);
+        }
+    }
+
+    send_to_char("\n", ch);
+    set_char_color(AT_RMDESC, ch);
+
+    if (BV_IS_SET(to_room->room_flags, ROOM_CAN_LAND))
+        send_to_char("&GYou can rent ships here. ( Type rent )&R&W\n", ch);
+
+    if (is_bus_stop(to_room->vnum))
+        send_to_char("&GA Serin shuttle picks up passengers here. ( Type findserin )&R&W\n", ch);
+
+    if (!IS_NPC(ch) && BV_IS_SET(ch->act, PLR_AUTOEXIT))
+    {
+        std::string exits_buf = "Obvious exits:\n";
+        bool found = FALSE;
+        set_char_color(AT_EXITS, ch);
+        for (EXIT_DATA *pexit = to_room->first_exit; pexit; pexit = pexit->next)
+        {
+            if (pexit->to_room && !IS_SET(pexit->exit_info, EX_HIDDEN))
+            {
+                const char *dir_str = (pexit->vdir >= 0 && pexit->vdir <= MAX_DIR + 1)
+                    ? dir_name[pexit->vdir] : "none";
+                const char *room_name = pexit->to_room->name ? pexit->to_room->name : "";
+                found = TRUE;
+                if (IS_SET(pexit->exit_info, EX_CLOSED))
+                {
+                    exits_buf += str_printf("%-5s - (closed)\n",
+                        capitalize(dir_str).c_str());
+                }
+                else if (IS_SET(pexit->exit_info, EX_WINDOW))
+                {
+                    exits_buf += str_printf("%-5s - (window)\n",
+                        capitalize(dir_str).c_str());
+                }
+                else if (IS_SET(pexit->exit_info, EX_xAUTO))
+                {
+                    const char *kw = (pexit->keyword && pexit->keyword[0] != '\0')
+                        ? pexit->keyword : dir_str;
+                    exits_buf += str_printf("%-5s - %s\n",
+                        capitalize(kw).c_str(),
+                        room_is_dark(pexit->to_room) ? "Too dark to tell" : room_name);
+                }
+                else
+                {
+                    exits_buf += str_printf("%-5s - %s\n",
+                        capitalize(dir_str).c_str(),
+                        room_is_dark(pexit->to_room) ? "Too dark to tell" : room_name);
+                }
+            }
+        }
+        if (!found)
+            exits_buf += "None.\n";
+        send_to_char(exits_buf, ch);
+    }
+
+    for (SHIP_DATA *rship = first_ship; rship; rship = rship->next)
+    {
+        if (rship->location == to_room->vnum)
+        {
+            ch_printf(ch, "&C%-35s     ", rship->name ? rship->name : "(unnamed)");
+            for (rship = rship->next; rship; rship = rship->next)
+                if (rship && rship->location == to_room->vnum)
+                    break;
+            if (rship)
+                ch_printf(ch, "%-35s", rship->name ? rship->name : "(unnamed)");
+            ch_printf(ch, "\n&w");
+        }
+        if (!rship)
+            break;
+    }
+
+    show_list_to_char(to_room->first_content, ch, FALSE, FALSE);
+
+    for (CHAR_DATA *rch = to_room->first_person; rch; rch = rch->next_in_room)
+    {
+        if (rch == ch)
+            continue;
+        if (can_see(ch, rch))
+            show_char_to_char_0(rch, ch);
+        else if (rch->race == RACE_DEFEL
+            && !IS_AFFECTED(rch, AFF_INVISIBLE)
+            && !BV_IS_SET(rch->act, PLR_WIZINVIS))
+        {
+            set_char_color(AT_BLOOD, ch);
+            send_to_char("You see a pair of red eyes staring back at you.\n", ch);
+        }
+    }
+}
+
 void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
 {
     std::string argument = argument_in;
@@ -908,7 +1057,7 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
     int number, cnt;
     SPACE_DATA *spaceobject;
 
-    if (!ch->desc)
+    if (!ch || !ch->desc || !ch->in_room)
         return;
 
     if (ch->position < POS_SLEEPING)
@@ -949,7 +1098,7 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
 
         /* 'look' or 'look auto' */
         set_char_color(AT_RMNAME, ch);
-        send_to_char(ch->in_room->name, ch);
+        send_to_char(ch->in_room->name ? ch->in_room->name : "", ch);
         send_to_char(" ", ch);
 
         if (!ch->desc->original)
@@ -963,7 +1112,7 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
                     ch_printf(ch, "%d", ch->in_room->vnum);
                     send_to_char("}", ch);
                 }
-                if (BV_IS_SET(ch->pcdata->flags, PCFLAG_ROOM))
+                if (ch->pcdata && BV_IS_SET(ch->pcdata->flags, PCFLAG_ROOM))
                 {
                     set_char_color(AT_CYAN, ch);
                     send_to_char("[", ch);
@@ -978,7 +1127,7 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
 
         if (arg1.empty()
         || (!IS_NPC(ch) && !BV_IS_SET(ch->act, PLR_BRIEF)))
-            send_to_char(ch->in_room->description, ch);
+            send_to_char(ch->in_room->description ? ch->in_room->description : "", ch);
 
         if (BV_IS_SET(ch->in_room->room_flags, ROOM_CAN_LAND))
             send_to_char("&GYou can rent ships here. ( Type rent )&R&W\n", ch);
@@ -988,6 +1137,9 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
 
         if (!IS_NPC(ch) && BV_IS_SET(ch->act, PLR_AUTOEXIT))
             do_exits(ch, "");
+
+        if (!IS_NPC(ch) && BV_IS_SET(ch->act, PLR_AUTOMAP))
+            show_room_map(ch);
 
         show_ships_to_char(ch->in_room->first_ship, ch);
         show_list_to_char(ch->in_room->first_content, ch, FALSE, FALSE);
@@ -1006,12 +1158,7 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
                     if ((to_room = get_room_index(ship->location)) != NULL)
                     {
                         ch_printf(ch, "\n");
-                        original = ch->in_room;
-                        char_from_room(ch);
-                        char_to_room(ch, to_room);
-                        do_glance(ch, "");
-                        char_from_room(ch);
-                        char_to_room(ch, original);
+                        show_room_viewport(ch, to_room);
                     }
                     else
                         ch_printf(ch, "no room?\n");
@@ -1025,44 +1172,53 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
                         if (space_in_range(ship, spaceobject) && spaceobject->name && str_cmp(spaceobject->name, ""))
                             ch_printf(ch, "%s\n", spaceobject->name);
 
-                    for (target = first_ship; target; target = target->next)
                     {
-                        if (target != ship && target->spaceobject)
+                        long long ship_sensor = ship->mod ? ship->mod->sensor : ship->sensor;
+                        for (target = first_ship; target; target = target->next)
                         {
-                            if (abs((int)(target->vx - ship->vx)) < 100 * (ship->mod->sensor + 10) * ((target->shipclass == SHIP_DEBRIS ? 2 : target->shipclass) + 1) &&
-                                abs((int)(target->vy - ship->vy)) < 100 * (ship->mod->sensor + 10) * ((target->shipclass == SHIP_DEBRIS ? 2 : target->shipclass) + 1) &&
-                                abs((int)(target->vz - ship->vz)) < 100 * (ship->mod->sensor + 10) * ((target->shipclass == SHIP_DEBRIS ? 2 : target->shipclass) + 1))
+                            if (target != ship && target->spaceobject)
                             {
-                                ch_printf(ch, "%s    %.0f %.0f %.0f\n",
-                                    target->name,
-                                    (target->vx - ship->vx),
-                                    (target->vy - ship->vy),
-                                    (target->vz - ship->vz));
-                            }
-                            else if (abs((int)(target->vx - ship->vx)) < 100 * (ship->mod->sensor + 10) * ((target->shipclass == SHIP_DEBRIS ? 2 : target->shipclass) + 3) &&
-                                     abs((int)(target->vy - ship->vy)) < 100 * (ship->mod->sensor + 10) * ((target->shipclass == SHIP_DEBRIS ? 2 : target->shipclass) + 3) &&
-                                     abs((int)(target->vz - ship->vz)) < 100 * (ship->mod->sensor + 10) * ((target->shipclass == SHIP_DEBRIS ? 2 : target->shipclass) + 3))
-                            {
-                                if (target->shipclass == FIGHTER_SHIP)
-                                    ch_printf(ch, "A small metallic mass    %.0f %.0f %.0f\n",
+                                long long tclass = (long long)(target->shipclass == SHIP_DEBRIS ? 2 : target->shipclass);
+                                double range1 = 100.0 * (double)(ship_sensor + 10LL) * (double)(tclass + 1LL);
+                                double range2 = 100.0 * (double)(ship_sensor + 10LL) * (double)(tclass + 3LL);
+                                double dx = fabs((double)target->vx - (double)ship->vx);
+                                double dy = fabs((double)target->vy - (double)ship->vy);
+                                double dz = fabs((double)target->vz - (double)ship->vz);
+
+                                if (!isfinite(dx) || !isfinite(dy) || !isfinite(dz))
+                                    continue;
+
+                                if (dx < range1 && dy < range1 && dz < range1)
+                                {
+                                    ch_printf(ch, "%s    %.0f %.0f %.0f\n",
+                                        target->name ? target->name : "",
                                         (target->vx - ship->vx),
                                         (target->vy - ship->vy),
                                         (target->vz - ship->vz));
-                                if (target->shipclass == MIDSIZE_SHIP)
-                                    ch_printf(ch, "A goodsize metallic mass    %.0f %.0f %.0f\n",
-                                        (target->vx - ship->vx),
-                                        (target->vy - ship->vy),
-                                        (target->vz - ship->vz));
-                                if (target->shipclass == SHIP_DEBRIS)
-                                    ch_printf(ch, "scattered metallic reflections    %.0f %.0f %.0f\n",
-                                        (target->vx - ship->vx),
-                                        (target->vy - ship->vy),
-                                        (target->vz - ship->vz));
-                                else if (target->shipclass >= CAPITAL_SHIP)
-                                    ch_printf(ch, "A huge metallic mass    %.0f %.0f %.0f\n",
-                                        (target->vx - ship->vx),
-                                        (target->vy - ship->vy),
-                                        (target->vz - ship->vz));
+                                }
+                                else if (dx < range2 && dy < range2 && dz < range2)
+                                {
+                                    if (target->shipclass == FIGHTER_SHIP)
+                                        ch_printf(ch, "A small metallic mass    %.0f %.0f %.0f\n",
+                                            (target->vx - ship->vx),
+                                            (target->vy - ship->vy),
+                                            (target->vz - ship->vz));
+                                    if (target->shipclass == MIDSIZE_SHIP)
+                                        ch_printf(ch, "A goodsize metallic mass    %.0f %.0f %.0f\n",
+                                            (target->vx - ship->vx),
+                                            (target->vy - ship->vy),
+                                            (target->vz - ship->vz));
+                                    if (target->shipclass == SHIP_DEBRIS)
+                                        ch_printf(ch, "scattered metallic reflections    %.0f %.0f %.0f\n",
+                                            (target->vx - ship->vx),
+                                            (target->vy - ship->vy),
+                                            (target->vz - ship->vz));
+                                    else if (target->shipclass >= CAPITAL_SHIP)
+                                        ch_printf(ch, "A huge metallic mass    %.0f %.0f %.0f\n",
+                                            (target->vx - ship->vx),
+                                            (target->vy - ship->vy),
+                                            (target->vz - ship->vz));
+                                }
                             }
                         }
                     }
@@ -1131,6 +1287,7 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
             break;
 
         case ITEM_DRINK_CON:
+        {
             if (obj->value[1] <= 0)
             {
                 send_to_char("It is empty.\n", ch);
@@ -1138,13 +1295,17 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
                 break;
             }
 
+            const char *liq_color = (obj->value[2] >= 0 && obj->value[2] < LIQ_MAX)
+                ? liq_table[obj->value[2]].liq_color : "strange";
+
             ch_printf(ch, "It's %s full of a %s liquid.\n",
                 obj->value[1] < obj->value[0] / 4 ? "less than" :
                 obj->value[1] < 3 * obj->value[0] / 4 ? "about" : "more than",
-                liq_table[obj->value[2]].liq_color);
+                liq_color);
 
             if (doexaprog) oprog_examine_trigger(ch, obj);
             break;
+        }
 
         case ITEM_PORTAL:
             for (pexit = ch->in_room->first_exit; pexit; pexit = pexit->next)
@@ -1152,6 +1313,8 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
                 if (pexit->vdir == DIR_PORTAL
                 &&  IS_SET(pexit->exit_info, EX_PORTAL))
                 {
+                    if (!pexit->to_room)
+                        continue;
                     if (room_is_private(ch, pexit->to_room)
                     &&  get_trust(ch) < ch->game->get_sysdata()->level_override_private)
                     {
@@ -1163,8 +1326,11 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
                     char_from_room(ch);
                     char_to_room(ch, pexit->to_room);
                     do_look_str(ch, std::string("auto"));
-                    char_from_room(ch);
-                    char_to_room(ch, original);
+                    if (!char_died(ch))
+                    {
+                        char_from_room(ch);
+                        char_to_room(ch, original);
+                    }
                     return;
                 }
             }
@@ -1292,90 +1458,36 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
         return;
     }
 
-    /* finally fixed the annoying look 2.obj desc bug    -Thoric */
     number = number_argument(arg1, arg);
-
-    for (cnt = 0, obj = ch->last_carrying; obj; obj = obj->prev_content)
+    cnt = 0;
+    for (OBJ_DATA *list : {ch->last_carrying, ch->in_room->last_content})
     {
-        if (can_see_obj(ch, obj))
+        for (obj = list; obj; obj = obj->prev_content)
         {
-            if ((pdesc = get_extra_descr(arg, obj->first_extradesc)) != NULL)
-            {
-                if ((cnt += obj->count) < number)
-                    continue;
-                send_to_char(pdesc, ch);
-                if (doexaprog)
-                    oprog_examine_trigger(ch, obj);
-                return;
-            }
+            if (!can_see_obj(ch, obj))
+                continue;
 
-            if ((pdesc = get_extra_descr(arg, obj->pIndexData->first_extradesc)) != NULL)
-            {
-                if ((cnt += obj->count) < number)
-                    continue;
-                send_to_char(pdesc, ch);
-                if (doexaprog)
-                    oprog_examine_trigger(ch, obj);
-                return;
-            }
+            auto *prototype_desc = obj->pIndexData ? obj->pIndexData->first_extradesc : nullptr;
+            pdesc = get_extra_descr(arg, obj->first_extradesc);
+            if (!pdesc)
+                pdesc = get_extra_descr(arg, prototype_desc);
 
-            if (nifty_is_name_prefix(arg, obj->name))
+            if (!pdesc && (!obj->name || !nifty_is_name_prefix(arg, obj->name)))
+                continue;
+            if ((cnt += obj->count) < number)
+                continue;
+
+            if (!pdesc && obj->name)
             {
-                if ((cnt += obj->count) < number)
-                    continue;
-                pdesc = get_extra_descr(obj->name, obj->pIndexData->first_extradesc);
+                pdesc = get_extra_descr(obj->name, prototype_desc);
                 if (!pdesc)
                     pdesc = get_extra_descr(obj->name, obj->first_extradesc);
-                if (!pdesc)
-                    send_to_char("You see nothing special.\r\n", ch);
-                else
-                    send_to_char(pdesc, ch);
-                if (doexaprog)
-                    oprog_examine_trigger(ch, obj);
-                return;
-            }
-        }
-    }
-
-    for (obj = ch->in_room->last_content; obj; obj = obj->prev_content)
-    {
-        if (can_see_obj(ch, obj))
-        {
-            if ((pdesc = get_extra_descr(arg, obj->first_extradesc)) != NULL)
-            {
-                if ((cnt += obj->count) < number)
-                    continue;
-                send_to_char(pdesc, ch);
-                if (doexaprog)
-                    oprog_examine_trigger(ch, obj);
-                return;
             }
 
-            if ((pdesc = get_extra_descr(arg, obj->pIndexData->first_extradesc)) != NULL)
-            {
-                if ((cnt += obj->count) < number)
-                    continue;
-                send_to_char(pdesc, ch);
-                if (doexaprog)
-                    oprog_examine_trigger(ch, obj);
-                return;
-            }
-
-            if (nifty_is_name_prefix(arg, obj->name))
-            {
-                if ((cnt += obj->count) < number)
-                    continue;
-                pdesc = get_extra_descr(obj->name, obj->pIndexData->first_extradesc);
-                if (!pdesc)
-                    pdesc = get_extra_descr(obj->name, obj->first_extradesc);
-                if (!pdesc)
-                    send_to_char("You see nothing special.\r\n", ch);
-                else
-                    send_to_char(pdesc, ch);
-                if (doexaprog)
-                    oprog_examine_trigger(ch, obj);
-                return;
-            }
+            send_to_char(pdesc ? pdesc : "You see nothing special.\r\n", ch);
+            if (doexaprog)
+                oprog_examine_trigger(ch, obj);
+            return;
         }
     }
 
@@ -1386,6 +1498,19 @@ void do_look_str(CHAR_DATA *ch, const std::string& argument_in)
 void do_look(CHAR_DATA *ch, char *argument)
 {
     do_look_str(ch, argument ? std::string(argument) : std::string());
+}
+
+void do_lookmap( CHAR_DATA *ch, char * )
+{
+    if ( !ch || !ch->desc || !ch->in_room || ch->position <= POS_SLEEPING || !check_blind( ch ) )
+        return;
+    if ( !IS_NPC(ch) && !BV_IS_SET(ch->act, PLR_HOLYLIGHT)
+         && !IS_AFFECTED(ch, AFF_TRUESIGHT) && room_is_dark(ch->in_room) )
+    {
+        send_to_char( "It is pitch black ... \n", ch );
+        return;
+    }
+    show_room_map( ch );
 }
 
 void show_condition( CHAR_DATA *ch, CHAR_DATA *victim )
@@ -1399,7 +1524,7 @@ void show_condition( CHAR_DATA *ch, CHAR_DATA *victim )
         percent = -1;
 
 
-    buf = PERS(victim, ch);
+    buf = safe_pers(victim, ch);
 
     if ( (IS_NPC ( victim ) && BV_IS_SET( victim->act , ACT_DROID ) ) ||
          ( victim->race == RACE_DROID ) )
@@ -1510,13 +1635,13 @@ void do_examine( CHAR_DATA *ch, char *argument )
 
     if ( !argument )
     {
-        bug( "do_examine: null argument.", 0 );
+        bug( "do_examine: null argument." );
 	    return;
     }
 
     if ( !ch )
     {
-        bug( "do_examine: null ch.", 0 );
+        bug( "do_examine: null ch." );
 	    return;
     }
 
@@ -1708,10 +1833,12 @@ void do_examine( CHAR_DATA *ch, char *argument )
 		}
             }
 		
+	    break;
+
 	case ITEM_CONTAINER:
 	    if ( IS_OBJ_STAT( obj, ITEM_COVERING ) )
 	      break;
-
+	    [[fallthrough]];
 	case ITEM_DRINK_CON:
 	    send_to_char( "When you look inside, you see:\n", ch );
 	    do_look_str( ch, str_printf("in %s noprog", arg.c_str() ) );
@@ -1737,9 +1864,12 @@ void do_exits( CHAR_DATA *ch, char *argument )
     bool found;
     bool fAuto;
 
+    if ( !ch || !ch->in_room )
+        return;
+
     set_char_color( AT_EXITS, ch );
     buf.clear();
-    fAuto  = !str_cmp( argument, "auto" );
+    fAuto  = argument && !str_cmp( argument, "auto" );
 
     if ( !check_blind( ch ) )
 	    return;
@@ -1759,38 +1889,43 @@ void do_exits( CHAR_DATA *ch, char *argument )
 	if ( pexit->to_room
 	&&  !IS_SET(pexit->exit_info, EX_HIDDEN) )
 	{
+	    const char *dir_str = (pexit->vdir >= 0 && pexit->vdir <= MAX_DIR + 1)
+	        ? dir_name[pexit->vdir] : "none";
+	    const char *room_name = pexit->to_room->name ? pexit->to_room->name : "";
 	    found = TRUE;
 	    if ( !fAuto )
 	    {	
             if ( IS_SET(pexit->exit_info, EX_CLOSED) )
             {
                 buf += str_printf("%-5s - (closed)\n",
-                capitalize( dir_name[pexit->vdir] ).c_str() );
+                capitalize( dir_str ).c_str() );
             }
             else if ( IS_SET(pexit->exit_info, EX_WINDOW) )
             {
                 buf += str_printf("%-5s - (window)\n",
-                capitalize( dir_name[pexit->vdir] ).c_str() );
+                capitalize( dir_str ).c_str() );
             }
             else if ( IS_SET(pexit->exit_info, EX_xAUTO) )
             {
-            buf += str_printf("%-5s - %s\n",
-                capitalize( pexit->keyword ).c_str(),
-                room_is_dark( pexit->to_room )
-                ?  "Too dark to tell"
-                : pexit->to_room->name );
+                const char *kw = (pexit->keyword && pexit->keyword[0] != '\0')
+                    ? pexit->keyword : dir_str;
+                buf += str_printf("%-5s - %s\n",
+                    capitalize( kw ).c_str(),
+                    room_is_dark( pexit->to_room )
+                    ?  "Too dark to tell"
+                    : room_name );
             }
             else
                 buf += str_printf("%-5s - %s\n",
-                capitalize( dir_name[pexit->vdir] ).c_str(),
+                capitalize( dir_str ).c_str(),
                 room_is_dark( pexit->to_room )
                 ?  "Too dark to tell"
-                : pexit->to_room->name );
+                : room_name );
 	    }
 	    else
 	    {
 	        buf += str_printf(" %s",
-		    capitalize( dir_name[pexit->vdir] ).c_str() );
+		    capitalize( dir_str ).c_str() );
 	    }
 	}
     }
@@ -2110,11 +2245,13 @@ void do_hedit( CHAR_DATA *ch, char *argument )
 {
     HELP_DATA *pHelp;
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
 	send_to_char( "You have no descriptor.\n", ch );
 	return;
     }
+
+    CHECK_SUBRESTRICTED( ch );
 
     switch( ch->substate )
     {
@@ -2201,13 +2338,13 @@ void do_hset( CHAR_DATA *ch, char *argument )
         FCLOSE( fpReserve );
         if ( ( fpout = fopen( "help.are", "w" ) ) == NULL )
         {
-        bug( "hset save: fopen", 0 );
+        bug( "hset save: fopen" );
         perror( "help.are" );
         fpReserve = fopen( NULL_FILE, "r" );
         return;
         }
         
-        fprintf( fpout, "#HELPS\n\n" );
+        fprintf( fpout, "#AREA   Help Index~\n\n#HELPS\n\n" );
         for ( pHelp = first_help; pHelp; pHelp = pHelp->next )
             fprintf( fpout, "%d %s~\n%s~\n\n",
                 pHelp->level, pHelp->keyword, help_fix(pHelp->text) );
@@ -2228,6 +2365,24 @@ void do_hset( CHAR_DATA *ch, char *argument )
     }
     if ( !str_cmp( arg1, "remove" ) )
     { 	
+        olc_invalidate_target( pHelp, "The help entry you were editing was removed; editing aborted.\n" );
+        for ( CHAR_DATA *ech = first_char; ech; ech = ech->next )
+        {
+            if ( ech->dest_buf == pHelp &&
+                 ( ech->substate == SUB_HELP_EDIT ||
+                   ( ech->substate == SUB_RESTRICTED && ech->desc && ech->desc->connected == CON_EDITING ) ) )
+            {
+                stop_editing( ech );
+                ech->substate = SUB_NONE;
+                ech->dest_buf = NULL;
+                ech->spare_ptr = NULL;
+                ech->last_cmd = NULL;
+                if ( ech->desc && ech->desc->connected == CON_EDITING )
+                    ech->desc->connected = CON_PLAYING;
+                if ( ech->desc && !ech->desc->closing && !ech->desc->write_failed && ech->desc->descriptor >= 0 )
+                    send_to_char( "The help entry you were editing was removed; editing aborted.\n", ech );
+            }
+        }
         UNLINK( pHelp, first_help, last_help, next, prev );
         STR_DISPOSE( pHelp->text );
         STR_DISPOSE( pHelp->keyword );
@@ -2363,6 +2518,47 @@ void do_who( CHAR_DATA *ch, char *argument )
   WHO_DATA *first_newbie = NULL;
   WHO_DATA *first_imm = NULL;
 
+  if ( !ch )
+    return;
+
+  struct WhoNullChGuard
+  {
+    CHAR_DATA *ch_ptr = nullptr;
+    PC_DATA *orig_pcdata = nullptr;
+    sh_int orig_top_level = 0;
+    sh_int orig_trust = 0;
+    ROOM_INDEX_DATA *orig_in_room = nullptr;
+    bool active = false;
+
+    WhoNullChGuard(CHAR_DATA *c)
+    {
+      if ( c && !c->pcdata )
+      {
+        active = true;
+        ch_ptr = c;
+        orig_pcdata = c->pcdata;
+        orig_top_level = c->top_level;
+        orig_trust = c->trust;
+        orig_in_room = c->in_room;
+        c->top_level = 1;
+        c->trust = 0;
+        c->pcdata = new PC_DATA();
+        c->in_room = get_room_index( ROOM_VNUM_LIMBO );
+      }
+    }
+    ~WhoNullChGuard()
+    {
+      if ( active && ch_ptr )
+      {
+        delete ch_ptr->pcdata;
+        ch_ptr->pcdata = orig_pcdata;
+        ch_ptr->top_level = orig_top_level;
+        ch_ptr->trust = orig_trust;
+        ch_ptr->in_room = orig_in_room;
+      }
+    }
+  };
+
   /*
    * Set default arguments.
    */ 
@@ -2377,24 +2573,18 @@ void do_who( CHAR_DATA *ch, char *argument )
 #endif
   fShowHomepage  = FALSE;
   fClanMatch	   = FALSE; /* SB who clan  */
+  whoout         = NULL;
 
   for ( iRace = 0; iRace < MAX_RACE; iRace++ )
     rgfRace[iRace] = FALSE;
 
-  if ( !ch->pcdata )
-  {
-    NullCh = TRUE;
-//    CREATE( ch, CHAR_DATA, 1 ); moved to requests to get game
-    ch->top_level = 1;
-    ch->trust = 0;
-    ch->pcdata = new PC_DATA();
-    ch->in_room = get_room_index( ROOM_VNUM_LIMBO );
-  }
+  NullCh = ( !ch->pcdata ) ? TRUE : FALSE;
+  WhoNullChGuard null_ch_guard( ch );
   /*
    * Parse arguments.
    */
 
-  std::string argstr = argument;   
+  std::string argstr = argument ? argument : "";   
   nNumber = 0;
   for ( ;; )
   {
@@ -2475,11 +2665,11 @@ void do_who( CHAR_DATA *ch, char *argument )
                 fShowHomepage = TRUE;
 	        else		 /* SB who clan (order), guild */
             {
-                if (!str_cmp( arg, "clan" ) && ch->pcdata && ch->pcdata->clan)
+                if (!str_cmp( arg, "clan" ) && ch->pcdata && ch->pcdata->clan && ch->pcdata->clan->name)
                     arg = ch->pcdata->clan->name;
                 if ( (pClan = get_clan (arg)) && (fClanMatch != TRUE))
                 {
-                    if ((ch->top_level >= LEVEL_IMMORTAL) || (ch->pcdata && ch->pcdata->clan && !strcmp(ch->pcdata->clan->name, pClan->name)))
+                    if ((ch->top_level >= LEVEL_IMMORTAL) || (ch->pcdata && ch->pcdata->clan && ch->pcdata->clan->name && pClan->name && !strcmp(ch->pcdata->clan->name, pClan->name)))
                     {
                     fClanMatch = TRUE;
                     }
@@ -2515,8 +2705,8 @@ void do_who( CHAR_DATA *ch, char *argument )
 	  * Now find matching chars.
 	  */
 	 nMatch = 0;
-	 buf[0] = '\0';
-	 if ( ch && !NullCh)
+	 buf.clear();
+	 if ( !NullCh )
 	    set_pager_color( AT_GREEN, ch );
 	 else
 	 {
@@ -2524,6 +2714,11 @@ void do_who( CHAR_DATA *ch, char *argument )
 	  whoout = fopen( WEBWHO_FILE, "w" );
 	else
 	  whoout = fopen( WHO_FILE, "w" );
+	if ( !whoout )
+	{
+	  bug( "do_who: cannot open who output file" );
+	  return;
+	}
 	 }
 
 /* start from last to first to get it in the proper order */
@@ -2534,17 +2729,20 @@ void do_who( CHAR_DATA *ch, char *argument )
         char force_char = ' ';
 
 	if ( (d->connected != CON_PLAYING && d->connected != CON_EDITING)
+	|| !d->character
 	|| ( !can_see( ch, d->character ) && IS_IMMORTAL( d->character ) )
 	|| d->original)
 		 continue;
 	wch   = d->original ? d->original : d->character;
+	if ( !wch || !wch->pcdata )
+		 continue;
 	if ( wch->top_level < iLevelLower
 	||   wch->top_level > iLevelUpper
 	|| ( fImmortalOnly  && wch->top_level < LEVEL_IMMORTAL )
 #ifdef MCCP
 	|| ( fCompressOnly && !d->out_compress )
 #endif
-	|| ( fRaceRestrict && !rgfRace[wch->race] )
+	|| ( fRaceRestrict && (wch->race < 0 || wch->race >= MAX_RACE || !rgfRace[wch->race]) )
 	|| ( fClanMatch && ( pClan != wch->pcdata->clan ))  /* SB */ )
 		 continue;
 	nMatch++;
@@ -2561,12 +2759,17 @@ void do_who( CHAR_DATA *ch, char *argument )
 	&&   wch->pcdata->homepage
 	&&   wch->pcdata->homepage[0] != '\0' )
 	  char_name = str_printf( "<A HREF=\"%s\">%s</A>",
-		show_tilde( wch->pcdata->homepage ), wch->name );
+		show_tilde( wch->pcdata->homepage ), wch->name ? wch->name : "" );
 	else
 	  char_name = "";
 
 	if ( IS_GOD(ch) )
-	  race_text = str_printf( "(%s) ", race_table[wch->race].race_name);
+	{
+	  const char *rname = (wch->race >= 0 && wch->race < MAX_RACE)
+		? race_table[wch->race].race_name
+		: get_flag_name(npc_race, wch->race, MAX_NPC_RACE);
+	  race_text = str_printf( "(%s) ", rname ? rname : "Unknown" );
+	}
 	else
 	  race_text = "";
 	  
@@ -2591,7 +2794,7 @@ void do_who( CHAR_DATA *ch, char *argument )
 	case MAX_LEVEL -  4: race = "Builder";	break;
 	}
 
-        if ( !nifty_is_name(wch->name, wch->pcdata->title) && ch->top_level > wch->top_level )
+        if ( wch->pcdata->title && wch->name && !nifty_is_name(wch->name, wch->pcdata->title) && ch->top_level > wch->top_level )
           extra_title = str_printf( " [%s]", wch->name );
         else
           extra_title = "";
@@ -2611,14 +2814,14 @@ void do_who( CHAR_DATA *ch, char *argument )
 
 	  clan_name = " (" ;
 
-	    if ( !str_cmp( wch->name, pclan->leader ) )
+	    if ( wch->name && pclan->leader && !str_cmp( wch->name, pclan->leader ) )
               clan_name += "Leader, ";
-            if ( !str_cmp( wch->name, pclan->number1 ) )
+            if ( wch->name && pclan->number1 && !str_cmp( wch->name, pclan->number1 ) )
               clan_name += "First, ";
-            if ( !str_cmp( wch->name, pclan->number2 ) )
+            if ( wch->name && pclan->number2 && !str_cmp( wch->name, pclan->number2 ) )
               clan_name += "Second, ";
 
-	  clan_name += pclan->name;
+	  clan_name += pclan->name ? pclan->name : "(none)";
 	  clan_name += ")";
 	}
 	else
@@ -2764,7 +2967,6 @@ buf = str_printf(
 
     if ( NullCh )
     {
-        DISPOSE(ch->pcdata);
         fprintf( whoout, "%d player%s.\n", nMatch, nMatch == 1 ? "" : "s" );
         FCLOSE( whoout );
         return;
@@ -2900,19 +3102,32 @@ void do_where( CHAR_DATA *ch, char *argument )
         else
            pager_printf( ch, "Players near you in %s:\n", ch->in_room->area->name );
 	found = FALSE;
-	for ( d = first_descriptor; d; d = d->next )
-	    if ( (d->connected == CON_PLAYING || d->connected == CON_EDITING )
-	    && ( victim = d->character ) != NULL
-	    &&   !IS_NPC(victim)
-	    &&   victim->in_room
-	    &&   (victim->in_room->area == ch->in_room->area || get_trust(ch) >= LEVEL_IMMORTAL )
-	    &&   can_see( ch, victim ) )
+	{
+	    std::vector<DESCRIPTOR_DATA *> targets;
+	    for ( d = first_descriptor; d; d = d->next )
 	    {
-		found = TRUE;
-		pager_printf( ch, "%-28s %s\n",
-		    victim->name, victim->in_room->name );
+		if ( comm_desc_alive( d ) && (d->connected == CON_PLAYING || d->connected == CON_EDITING ) )
+		    targets.push_back( d );
 	    }
-	if ( !found )
+	    for ( DESCRIPTOR_DATA *td : targets )
+	    {
+		if ( char_died( ch ) )
+		    return;
+		if ( !comm_desc_alive( td ) || (td->connected != CON_PLAYING && td->connected != CON_EDITING ) )
+		    continue;
+		if ( ( victim = td->character ) != NULL
+		&&   !IS_NPC(victim)
+		&&   victim->in_room
+		&&   (victim->in_room->area == ch->in_room->area || get_trust(ch) >= LEVEL_IMMORTAL )
+		&&   can_see( ch, victim ) )
+		{
+		    found = TRUE;
+		    pager_printf( ch, "%-28s %s\n",
+			victim->name, victim->in_room->name );
+		}
+	    }
+	}
+	if ( !char_died( ch ) && !found )
 	    send_to_char( "None\n", ch );
     }
     else
@@ -2928,7 +3143,7 @@ void do_where( CHAR_DATA *ch, char *argument )
 	    {
 		found = TRUE;
 		pager_printf( ch, "%-28s %s\n",
-		    PERS(victim, ch), victim->in_room->name );
+		    safe_pers(victim, ch), victim->in_room->name );
 		break;
 	    }
 	if ( !found )
@@ -3142,8 +3357,7 @@ void do_practice( CHAR_DATA *ch, char *argument )
         if ( ch->gold < skill_table[sn]->min_level*10 )
 	{
 	    buf = str_printf("$n tells you, 'I charge %d credits to teach that. You don't have enough.'", skill_table[sn]->min_level*10);
-	    act( AT_TELL, "$n tells you 'You don't have enough credits.'",
-		mob, NULL, ch, TO_VICT );
+	    act( AT_TELL, buf, mob, NULL, ch, TO_VICT );
 	    return;
 	}
 
@@ -3259,7 +3473,8 @@ void do_teach( CHAR_DATA *ch, char *argument )
 	}
 	else
 	{
-	    victim->pcdata->learned[sn] += int_app[get_curr_int(ch)].learn;
+	    victim->pcdata->learned[sn] = UMIN(adept,
+	        victim->pcdata->learned[sn] + int_app[get_curr_int(ch)].learn);
 	    buf = str_printf("You teach %s $T.", victim->name );
 	    act( AT_ACTION, buf,
 		    ch, NULL, skill_table[sn]->name, TO_CHAR );
@@ -3443,8 +3658,7 @@ void do_commands( CHAR_DATA *ch, char *argument )
 	    for ( command = command_hash[hash]; command; command = command->next )
 		if ( command->level <  LEVEL_HERO
 		&&   command->level <= get_trust( ch )
-		&&  (command->name[0] != 'm'
-		&&   command->name[1] != 'p') )
+		&&  command->name && !(command->name[0] == 'm' && command->name[1] == 'p') )
 		{
 		    pager_printf( ch, "%-12s", command->name );
 		    if ( ++col % 6 == 0 )
@@ -3460,10 +3674,9 @@ void do_commands( CHAR_DATA *ch, char *argument )
 	    for ( command = command_hash[hash]; command; command = command->next )
 		if ( command->level <  LEVEL_HERO
 		&&   command->level <= get_trust( ch )
-		&& ( command->name )
+		&&  command->name
 		&&  !str_prefix(argument, command->name)
-		&&  (command->name[0] != 'm'
-		&&   command->name[1] != 'p') )
+		&&  !(command->name[0] == 'm' && command->name[1] == 'p') )
 		{
 		    pager_printf( ch, "%-12s", command->name );
 		    found = TRUE;
@@ -4134,10 +4347,10 @@ void do_whois( CHAR_DATA *ch, char *argument)
   std::string buf;
   char buf2[MAX_STRING_LENGTH]; // used for do_command.
 
-  if(IS_NPC(ch))
+  if( !ch || !ch->in_room || IS_NPC(ch))
     return;
 
-  if(argument[0] == '\0')
+  if(!argument || argument[0] == '\0')
   {
     send_to_char("You must input the name of a player online.\n", ch);
     return;
@@ -4151,14 +4364,13 @@ void do_whois( CHAR_DATA *ch, char *argument)
     return;
   }
 
-  if(IS_NPC(victim))
+  if(IS_NPC(victim) || !victim->pcdata)
   {
     send_to_char("That's not a player!\n", ch);
     return;
   }
 
-  if( victim->pcdata && victim->pcdata->whoCloak && ch->top_level < LEVEL_IMMORTAL
-)
+  if( victim->pcdata->whoCloak && ch->top_level < LEVEL_IMMORTAL )
   {
     send_to_char("No such player online.\n", ch);
     return;
@@ -4167,18 +4379,18 @@ void do_whois( CHAR_DATA *ch, char *argument)
   if (IS_GOD(ch))
   {
     ch_printf(ch, "%s is a %s %s",
-	victim->name,
+	victim->name ? victim->name : "(unknown)",
 	victim->sex == SEX_MALE ? "male" :
 	victim->sex == SEX_FEMALE ? "female" : "neutral",
 	get_flag_name(npc_race, victim->race, MAX_NPC_RACE));
     ch_printf(ch, " in room %d.\n",
-	victim->in_room->vnum);
+	victim->in_room ? victim->in_room->vnum : -1);
   }
   else
     ch_printf(ch, "%s.\n",
-	victim->name );
+	victim->name ? victim->name : "(unknown)" );
 
-  if ( victim->pcdata->clan && ( ( ch->pcdata->clan
+  if ( victim->pcdata->clan && ( ( ch->pcdata && ch->pcdata->clan
   && ch->pcdata->clan == victim->pcdata->clan )
   || IS_IMMORTAL( ch ) ) )
   {
@@ -4188,7 +4400,7 @@ void do_whois( CHAR_DATA *ch, char *argument)
 	   send_to_char( ", and belongs to the guild ", ch );
 	else
 	   send_to_char( ", and belongs to organization ", ch );
-	send_to_char( victim->pcdata->clan->name, ch );
+	send_to_char( victim->pcdata->clan->name ? victim->pcdata->clan->name : "(none)", ch );
   }
   send_to_char( ".\n", ch );
 
@@ -4226,15 +4438,18 @@ void do_whois( CHAR_DATA *ch, char *argument)
 	(victim->pcdata->release_date == 0) ? "not " : "");
 
     if(victim->pcdata->release_date != 0)
+    {
+      const char *rel_time = ctime(&victim->pcdata->release_date);
       ch_printf(ch, "%s was helled by %s, and will be released on %24.24s.\n",
 	victim->sex == SEX_MALE ? "He" :
 	victim->sex == SEX_FEMALE ? "She" : "It",
-        victim->pcdata->helled_by,
-	ctime(&victim->pcdata->release_date));
+        victim->pcdata->helled_by ? victim->pcdata->helled_by : "(unknown)",
+	rel_time ? rel_time : "(invalid)");
+    }
 
     if(get_trust(victim) < get_trust(ch))
     {
-      int n = snprintf(buf2, sizeof(buf2), "list %s", buf.c_str());
+      int n = snprintf(buf2, sizeof(buf2), "list %s", victim->name ? victim->name : "");
         if (n < 0 || n >= (int)sizeof(buf2))
                 buf2[sizeof(buf2) - 1] = '\0';
       do_comment(ch, buf2);
@@ -4253,12 +4468,14 @@ void do_whois( CHAR_DATA *ch, char *argument)
       buf += ".\n";
       send_to_char(buf, ch);
     }
-    if ( victim->desc && victim->desc->host[0]!='\0' )   /* added by Gorog */
+    if ( victim->desc && victim->desc->host && victim->desc->host[0]!='\0' )   /* added by Gorog */
     {
-      buf = str_printf("%s's IP info: %s ", victim->name, victim->desc->hostip);
+      buf = str_printf("%s's IP info: %s ",
+          victim->name ? victim->name : "(unknown)",
+          victim->desc->hostip ? victim->desc->hostip : "(unknown)");
       if (get_trust(ch) > LEVEL_GOD)
       {
-        buf  += str_printf("%s", victim->desc->user);
+        buf  += str_printf("%s", victim->desc->user ? victim->desc->user : "(unknown)");
         buf += "@";
         buf += victim->desc->host;
       }
@@ -4267,7 +4484,7 @@ void do_whois( CHAR_DATA *ch, char *argument)
     }
     if (get_trust(ch) >= LEVEL_GOD && get_trust(ch) >= get_trust( victim ) && victim->pcdata )
     {
-        buf = str_printf("Email: %s\n" , victim->pcdata->email );
+        buf = str_printf("Email: %s\n" , victim->pcdata->email ? victim->pcdata->email : "(none)" );
         send_to_char(buf, ch);
     }
   }
@@ -4304,30 +4521,43 @@ void do_showstatistic_web( CHAR_DATA *ch, char *argument )
 {
 //  PC_DATA *pcdata;
     CHAR_DATA *raceCh;
-    int race, plrclass, iR, iC, iC2;
+    int race, plrclass = -1, iR, iC, iC2;
     bool chk_race = FALSE;
     FILE *whoout;
-    
-    whoout = fopen( WEBWHO_FILE, "w" );
-    
-    if( !whoout )
-      bug( "fopen: WEBWHO won't open" );
+    std::string arg_str = argument ? argument : "";
 
-    race = get_race_from_name( argument );
+    if ( !ch || !ch->game )
+    {
+        bug( "do_showstatistic_web: NULL ch or game" );
+        return;
+    }
+
+    whoout = fopen( WEBWHO_FILE, "w" );
+
+    if( !whoout )
+    {
+        bug( "fopen: WEBWHO won't open" );
+        return;
+    }
+
+    race = get_race_from_name( arg_str );
     if ( race < 0 )
-      plrclass = get_class_from_name( argument );
+      plrclass = get_class_from_name( arg_str );
     else
       chk_race = TRUE;
       
-    if( race < 0 && plrclass < 0 )
+    if( (chk_race && (race < 0 || race >= MAX_RACE))
+     || (!chk_race && (plrclass < 0 || plrclass >= MAX_ABILITY)) )
     {
     	fprintf( whoout, "No such race or class\n" );
+    	FCLOSE( whoout );
     	return;
     }
 
     if ( race == RACE_GOD )
     {
         fprintf( whoout, "Gods are indefeasible\n" );
+        FCLOSE( whoout );
         return;
     }
 
@@ -4415,6 +4645,7 @@ void do_showstatistic_web( CHAR_DATA *ch, char *argument )
     	  }
     	}
     }
+    FCLOSE( whoout );
     delete( raceCh->pcdata );    
     DISPOSE( raceCh );
 }
@@ -4424,20 +4655,28 @@ void do_showstatistic( CHAR_DATA *ch, char *argument )
 {
 //  PC_DATA *pcdata;
     CHAR_DATA *raceCh;
-    int race, plrclass, iR, iC, iC2;
+    int race, plrclass = -1, iR, iC, iC2;
     bool chk_race = FALSE;
     std::string buf, buf2;
+    std::string arg_str = argument ? argument : "";
+
+    if ( !ch )
+        return;
 
     if( !ch->pcdata )
-      do_showstatistic_web( NULL, argument );
+    {
+      do_showstatistic_web( ch, argument );
+      return;
+    }
 
-    race = get_race_from_name( argument );
+    race = get_race_from_name( arg_str );
     if ( race < 0 )
-      plrclass = get_class_from_name( argument );
+      plrclass = get_class_from_name( arg_str );
     else
       chk_race = TRUE;
       
-    if( race < 0 && plrclass < 0 )
+    if( (chk_race && (race < 0 || race >= MAX_RACE))
+     || (!chk_race && (plrclass < 0 || plrclass >= MAX_ABILITY)) )
     {
     	send_to_char( "No such race or class.\n", ch );
     	return;

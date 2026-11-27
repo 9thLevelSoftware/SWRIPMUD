@@ -24,23 +24,13 @@
 #include <time.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <sys/stat.h>
 #include "mud.h"
 
-#define VENDOR_FEE  .05 /*fee vendor charges, taken out of all goods with teh getcredits command*/
-
-#define COST_EQUATION  (int) (cost*cost_equation( obj ))
-
-float cost_equation( OBJ_DATA *obj )
-{
-      float count = obj->pIndexData->count;
-
-	count = URANGE( 50, count, 500 );
-      
-	return (100/(count));
-}
-
-
+static constexpr int VENDOR_FEE_DIVISOR = 20; // Five percent of the vendor earnings.
 
 #if defined(KEY)
 #undef KEY
@@ -94,19 +84,37 @@ CHAR_DATA *find_keeper( CHAR_DATA *ch )
   return find_keeper_q( ch, TRUE );
 }
 
+static const SHOP_DATA *buying_shop(const CHAR_DATA *keeper)
+{
+    if ( !keeper->owner )
+        return keeper->pIndexData ? keeper->pIndexData->pShop : nullptr;
+
+    static const SHOP_DATA player_vendor_shop = [] {
+        SHOP_DATA shop{};
+        BV_SET_BIT(shop.shop_type, SHOP_BUY);
+        shop.open_hour = 0;
+        shop.close_hour = 23;
+        return shop;
+    }();
+    return &player_vendor_shop;
+}
+
 CHAR_DATA *find_keeper_q( CHAR_DATA *ch, bool message )
 {
-    CHAR_DATA *keeper;
-    SHOP_DATA *pShop;
+    if ( !ch )
+        return NULL;
 
-    pShop = NULL;
-    for ( keeper = ch->in_room->first_person;
+    CHAR_DATA *keeper;
+    const SHOP_DATA *pShop = nullptr;
+    for ( keeper = ch->in_room ? ch->in_room->first_person : NULL;
 	  keeper;
 	  keeper = keeper->next_in_room )
-	if ( IS_NPC(keeper) && (pShop = keeper->pIndexData->pShop) != NULL )
+	if ( IS_NPC(keeper) && keeper->pIndexData
+	&&   (pShop = buying_shop(keeper)) != nullptr
+	&&   BV_IS_SET(pShop->shop_type, SHOP_BUY) )
 	    break;
 
-    if ( !pShop )
+    if ( !keeper )
 
     {
       if ( message )
@@ -129,7 +137,7 @@ CHAR_DATA *find_keeper_q( CHAR_DATA *ch, bool message )
     else
       if( time_info.hour < pShop->open_hour || time_info.hour > pShop->close_hour )
       {
-        if( time_info.hour > pShop->open_hour )
+        if( time_info.hour < pShop->open_hour )
         {
 	  do_say( keeper, "Sorry, come back later." );
 	  return NULL;
@@ -154,15 +162,18 @@ CHAR_DATA *find_keeper_q( CHAR_DATA *ch, bool message )
  */
 CHAR_DATA *find_fixer( CHAR_DATA *ch )
 {
-    CHAR_DATA *keeper;
-    SHOP_DATA *rShop;
+    if ( !ch )
+        return NULL;
 
-    rShop = NULL;
-    for ( keeper = ch->in_room->first_person; keeper; keeper = keeper->next_in_room )
-		if ( IS_NPC(keeper) && (rShop = keeper->pIndexData->pShop) != NULL && BV_IS_SET(rShop->shop_type, SHOP_FIX) )
+    CHAR_DATA *keeper;
+    SHOP_DATA *rShop = NULL;
+    for ( keeper = ch->in_room ? ch->in_room->first_person : NULL; keeper; keeper = keeper->next_in_room )
+		if ( IS_NPC(keeper) && keeper->pIndexData
+		&&   (rShop = keeper->pIndexData->pShop) != NULL
+		&&   ( BV_IS_SET(rShop->shop_type, SHOP_FIX) || BV_IS_SET(rShop->shop_type, SHOP_RECHARGE) ) )
 		    break;
 
-    if ( !rShop )
+    if ( !keeper )
     {
 	send_to_char( "You can't do that here.\n", ch );
 	return NULL;
@@ -172,16 +183,28 @@ CHAR_DATA *find_fixer( CHAR_DATA *ch )
     /*
      * Shop hours.
      */
-    if ( time_info.hour < rShop->open_hour )
+    const int open_hour = rShop->separate_repair ? rShop->repair_open_hour : rShop->open_hour;
+    const int close_hour = rShop->separate_repair ? rShop->repair_close_hour : rShop->close_hour;
+    if ( open_hour > close_hour )
     {
-	do_say( keeper, "Sorry, come back later." );
-	return NULL;
+	if ( time_info.hour < open_hour && time_info.hour > close_hour )
+	{
+	    do_say( keeper, "Sorry, come back later." );
+	    return NULL;
+	}
     }
-
-    if ( time_info.hour > rShop->close_hour )
+    else if ( time_info.hour < open_hour || time_info.hour > close_hour )
     {
-	do_say( keeper, "Sorry, come back tomorrow." );
-	return NULL;
+	if ( time_info.hour < open_hour )
+	{
+	    do_say( keeper, "Sorry, come back later." );
+	    return NULL;
+	}
+	if ( time_info.hour > close_hour )
+	{
+	    do_say( keeper, "Sorry, come back tomorrow." );
+	    return NULL;
+	}
     }
 
     
@@ -197,9 +220,9 @@ CHAR_DATA *find_fixer( CHAR_DATA *ch )
 int get_cost_quit( CHAR_DATA *ch )
 {
 	
-  long cost = 1000;
-  int golddem = 100000;
-  long gold;
+  long long cost = 1000;
+  long long golddem = 100000;
+  long long gold;
   
   if( !ch )
     return 0;
@@ -207,24 +230,37 @@ int get_cost_quit( CHAR_DATA *ch )
   if( ch->top_level <= 6 )
     return 0;
   
-  gold = ch->gold + (IS_NPC(ch) ? 0 : ch->pcdata->bank) + 1;
+  gold = (long long)ch->gold + ((!IS_NPC(ch) && ch->pcdata) ? (long long)ch->pcdata->bank : 0LL) + 1LL;
   
   if( gold < 5000 )
     return 0;
   cost *= gold/golddem;
+  if ( cost < 0 )
+    cost = 0;
+  if ( cost > INT_MAX )
+    cost = INT_MAX;
 
   return (int) cost;
 }
 
+static int scale_shop_cost(int cost, long long condition, long long maximum)
+{
+    if ( cost <= 0 || condition <= 0 || maximum <= 0 )
+        return 0;
+    return static_cast<int>(UMIN(INT_MAX, cost * condition / maximum));
+}
+
 int get_cost( CHAR_DATA *ch, CHAR_DATA *keeper, OBJ_DATA *obj, bool fBuy )
 {
-    SHOP_DATA *pShop;
-    int cost;
-    bool richcustomer;
-    int profitmod;
-
-    if ( !obj || ( pShop = keeper->pIndexData->pShop ) == NULL )
-	return 0;
+    if ( !ch || !obj || !obj->pIndexData || !keeper || !keeper->pIndexData )
+        return 0;
+    const SHOP_DATA *shop = buying_shop(keeper);
+    if ( !shop )
+        return 0;
+    if ( keeper->owner )
+        return fBuy ? UMAX(0, obj->cost) : 0;
+    if ( !fBuy && !BV_IS_SET(shop->buy_type, obj->item_type) )
+        return 0;
 
     if( obj->item_type == ITEM_FIGHTERCOMP || obj->item_type == ITEM_MIDCOMP || obj->item_type == ITEM_CAPITALCOMP )
     {
@@ -263,123 +299,120 @@ int get_cost( CHAR_DATA *ch, CHAR_DATA *keeper, OBJ_DATA *obj, bool fBuy )
         costunit *= 2;
       }
         
-      cost = obj->value[3] * costunit;
-      if( !(obj->value[3]) )
-        cost += obj->value[2] * costunit;
-	            	
-      return cost;
-      
+      const long long rating = obj->value[3] ? obj->value[3] : obj->value[2];
+      return static_cast<int>(URANGE(0LL, rating * costunit, static_cast<long long>(INT_MAX)));
     }
 
-    cost = obj->cost;
-
-    if ( ( ch->gold + (IS_NPC(ch) ? 0 : ch->pcdata->bank) ) > (ch->top_level * 1000) )
-	richcustomer = TRUE;
-    else
-	richcustomer = FALSE;
-
+    const long long threshold = 1000LL * ch->top_level - ch->gold;
+    const long bank = (!IS_NPC(ch) && ch->pcdata) ? ch->pcdata->bank : 0;
+    const bool rich_customer = bank > threshold;
+    long long cost;
     if ( fBuy )
     {
-    	    cost = (int) (cost * (80 + UMIN(ch->top_level, LEVEL_AVATAR))) / 100;
-
-    	    profitmod = 13 - get_curr_cha(ch) + (richcustomer ? 15 : 0)
-	    	      + ((URANGE(5,ch->top_level,LEVEL_AVATAR)-20)/2);
-	        cost = (int) (obj->cost
-	             * UMAX( (pShop->profit_sell+1), pShop->profit_buy+profitmod ) )
-	            / 100;
-    } else {
-	    OBJ_DATA *obj2;
-
-	    profitmod = get_curr_cha(ch) - 13 - (richcustomer ? 15 : 0);
-	    cost = 0;
-			if ( BV_IS_SET(pShop->buy_type, obj->item_type) )
-	        {
-		            cost = (int) (obj->cost
-		            * UMIN( (pShop->profit_buy-1),
-			        pShop->profit_sell+profitmod) ) / 100;
-	        }
-
-            for ( obj2 = keeper->first_carrying; obj2; obj2 = obj2->next_content )
-    	    {
-	            if ( obj->pIndexData == obj2->pIndexData )
-    	        {
-    		        if( obj->item_type != ITEM_SPICE )
-    		          cost /= (obj2->count+1);
-	    	        break;
-	            }
-	        }
-    
-            cost = UMIN( cost , 2500 );
+        const int modifier = 13 - get_curr_cha(ch) + (rich_customer ? 15 : 0)
+                             + (URANGE(5, ch->top_level, LEVEL_AVATAR) - 20) / 2;
+        cost = 1LL * obj->cost * UMAX(shop->profit_sell + 1, shop->profit_buy + modifier) / 100;
     }
-
-
-    if (obj->item_type != ITEM_CARGO && obj->item_type != ITEM_SPICE ) {
-        if( cost > 0 )
-        {
-            cost = COST_EQUATION;
-            if( cost <= 0 )
-            cost = 1;
-        }
-    }
-      
-    if ( obj->item_type == ITEM_ARMOR )
-      cost = (int) (cost * (obj->value[0]+1) / (obj->value[1]+1) );
-    if ( obj->item_type == ITEM_WEAPON )
+    else
     {
-      cost = (int) (cost * (obj->value[0]+1) / INIT_WEAPON_CONDITION+1);
-      cost = (int) (cost * (obj->value[4]+1) / (obj->value[5]+1));
+        const int modifier = get_curr_cha(ch) - 13 - (rich_customer ? 15 : 0);
+        cost = 1LL * obj->cost * UMIN(shop->profit_buy - 1, shop->profit_sell + modifier) / 100;
+        if ( obj->item_type != ITEM_SPICE )
+            for ( const OBJ_DATA *stock = keeper->first_carrying; stock; stock = stock->next_content )
+                if ( obj->pIndexData == stock->pIndexData )
+                {
+                    const int divisor = stock->count + 1;
+                    if ( divisor <= 0 )
+                        return 0;
+                    cost /= divisor;
+                    break;
+                }
+        cost = UMIN(cost, 2500);
     }
-    	
-    if ( obj->item_type == ITEM_DEVICE )
-	cost = (int) (cost * (obj->value[2]+1) / (obj->value[1]+1));
 
-    return cost;
+    if ( cost <= 0 )
+        return 0;
+    if ( obj->item_type != ITEM_CARGO && obj->item_type != ITEM_SPICE )
+        cost = UMAX(1, (cost * 100) / URANGE(50, obj->pIndexData->count, 500));
+
+    const int price = static_cast<int>(UMIN(INT_MAX, cost));
+    switch ( obj->item_type )
+    {
+    case ITEM_ARMOR:
+        return scale_shop_cost(price, obj->value[0] + 1LL, obj->value[1] + 1LL);
+    case ITEM_WEAPON:
+        return scale_shop_cost(
+            scale_shop_cost(price, obj->value[0] + 1LL, INIT_WEAPON_CONDITION + 1LL),
+            obj->value[4] + 1LL, obj->value[5] + 1LL);
+    case ITEM_DEVICE:
+        return scale_shop_cost(price, obj->value[2] + 1LL, obj->value[1] + 1LL);
+    default:
+        return price;
+    }
 }
 
 int get_repaircost( CHAR_DATA *keeper, OBJ_DATA *obj )
 {
-    REPAIR_DATA *rShop;
+    SHOP_DATA *pShop;
     int cost;
     bool found;
 
-    if ( !obj || ( rShop = keeper->pIndexData->rShop ) == NULL )
-	return 0;
+    if ( !obj || !keeper || !keeper->pIndexData || ( pShop = keeper->pIndexData->pShop ) == NULL )
+	return -1;
 
     cost = 0;
     found = FALSE;
-	if ( BV_IS_SET(rShop->fix_type, obj->item_type) )
+    const FLAG_SET &repair_type = pShop->separate_repair ? pShop->repair_type : pShop->buy_type;
+    if ( BV_IS_SET(repair_type, obj->item_type) )
+    {
+	bool eligible = false;
+	if ( ( obj->item_type == ITEM_ARMOR || obj->item_type == ITEM_WEAPON )
+	&&   BV_IS_SET(pShop->shop_type, SHOP_FIX) )
+	    eligible = true;
+	else if ( obj->item_type == ITEM_DEVICE
+	     &&   BV_IS_SET(pShop->shop_type, SHOP_RECHARGE) )
+	    eligible = true;
+
+	if ( eligible )
 	{
-	    cost = (int) (obj->cost * rShop->profit_fix / 100);
+	    long long calc = (long long)obj->cost * pShop->profit_fix / 100;
+	    cost = static_cast<int>(std::clamp(calc, 1LL, static_cast<long long>(INT_MAX)));
 	    found = TRUE;
 	}
+    }
 
     if ( !found )
       cost = -1;
 
-    if ( cost == 0 )
-      cost = 1;
-
     if ( found && cost > 0 )
     {
+      long long delta = 0;
       switch (obj->item_type)
       {
 	case ITEM_ARMOR:
 	  if (obj->value[0] >= obj->value[1])
 	    cost = -2;
 	  else
-	    cost *= (obj->value[1] - obj->value[0]);
+	    delta = cost * (static_cast<long long>(obj->value[1]) - obj->value[0]);
 	  break;
 	case ITEM_WEAPON:
-	  if (INIT_WEAPON_CONDITION == obj->value[0])
+	  if (obj->value[0] >= INIT_WEAPON_CONDITION)
 	    cost = -2;
 	  else
-	    cost *= (INIT_WEAPON_CONDITION - obj->value[0]);
+	    delta = cost * (static_cast<long long>(INIT_WEAPON_CONDITION) - obj->value[0]);
 	  break;
 	case ITEM_DEVICE:
 	  if (obj->value[2] >= obj->value[1])
 	    cost = -2;
 	  else
-	    cost *= (obj->value[1] - obj->value[2]);
+	    delta = cost * (static_cast<long long>(obj->value[1]) - obj->value[2]);
+	  break;
+      }
+      if ( cost > 0 && delta > 0 )
+      {
+	  if ( delta > INT_MAX )
+	      delta = INT_MAX;
+	  cost = (int)delta;
       }
     }
 
@@ -393,6 +426,9 @@ void do_buy( CHAR_DATA *ch, char *argument )
     std::string arg;
 	std::string argstr = argument;
     int maxgold;
+
+    if ( !ch || !ch->in_room )
+        return;
 
     argstr = one_argument( argstr, arg );
 
@@ -437,7 +473,8 @@ void do_buy( CHAR_DATA *ch, char *argument )
 	    return;
 	}
 
-	if ( ch->gold < 10 * pet->top_level * pet->top_level )
+	const long long pet_price = 10LL * pet->top_level * pet->top_level;
+	if ( ch->gold < pet_price )
 	{
 	    send_to_char( "You can't afford it.\n", ch );
 	    return;
@@ -449,10 +486,6 @@ void do_buy( CHAR_DATA *ch, char *argument )
 	    return;
 	}
 
-	maxgold = 10 * pet->top_level * pet->top_level;
-	ch->gold	-= maxgold;
-	boost_economy( ch->in_room->area, maxgold );
-
 	if (!ch->game)
 	{
     	send_to_char( "You must be in a game to buy a pet.\n", ch );
@@ -460,7 +493,11 @@ void do_buy( CHAR_DATA *ch, char *argument )
 	}
 	
 	pet		= create_mobile( ch->game, pet->pIndexData );
-//	BV_SET_BIT(ch->act, PLR_BOUGHT_PET);
+        if ( !pet )
+            return;
+        ch->gold -= static_cast<int>(pet_price);
+        boost_economy(ch->in_room->area, static_cast<int>(pet_price));
+	BV_SET_BIT(ch->act, PLR_BOUGHT_PET);
 	BV_SET_BIT(pet->act, ACT_PET);
 	BV_SET_BIT(pet->affected_by, AFF_CHARM);
 
@@ -504,15 +541,17 @@ void do_buy( CHAR_DATA *ch, char *argument )
 
 	if ( is_number( arg ) )
 	{
-	    noi = strtoi( arg );
-	    argstr = one_argument( argstr, arg );
-	    if ( noi > mnoi )
+            errno = 0;
+            const long quantity = strtol(arg.c_str(), nullptr, 10);
+            if ( errno == ERANGE || quantity < 1 || quantity > mnoi )
 	    {
 		act( AT_TELL, "$n tells you 'I don't sell that many items at"
 		  " once.'", keeper, NULL, ch, TO_VICT );
 		ch->reply = keeper;
 		return;
 	    }
+	    noi = static_cast<int>(quantity);
+	    argstr = one_argument( argstr, arg );
 	}
 
 	obj  = get_obj_carry( keeper, arg );
@@ -523,7 +562,15 @@ void do_buy( CHAR_DATA *ch, char *argument )
               bool ofound = FALSE;
               
               onum =0;
-              oref = strtoi(arg.c_str()+1);
+              char *end;
+              errno = 0;
+              const long ref = strtol(arg.c_str() + 1, &end, 10);
+              if ( errno == ERANGE || *end || ref < 1 || ref > INT_MAX )
+              {
+                  send_to_char("Buy what?\n", ch);
+                  return;
+              }
+              oref = static_cast<int>(ref);
               for ( obj = keeper->last_carrying; obj; obj = obj->prev_content )
 	      { 
 	        if ( obj->wear_loc == WEAR_NONE
@@ -548,10 +595,14 @@ void do_buy( CHAR_DATA *ch, char *argument )
         }
           
 	
-	cost = ( get_cost( ch, keeper, obj, TRUE ) * noi );
-
-        if (keeper->home != NULL && obj->cost > 0)
-          cost= obj->cost;
+        const bool unlimited = IS_OBJ_STAT(obj, ITEM_INVENTORY) && !keeper->owner;
+        const long long total = 1LL * get_cost(ch, keeper, obj, TRUE) * noi;
+        if ( total > INT_MAX || (keeper->owner && total + keeper->gold > INT_MAX) )
+        {
+            send_to_char("That transaction is too large.\n", ch);
+            return;
+        }
+        cost = static_cast<int>(total);
 	
 	
 	if ( cost <= 0 || !can_see_obj( ch, obj ) )
@@ -562,7 +613,7 @@ void do_buy( CHAR_DATA *ch, char *argument )
 	    return;
 	}
 
-	if ( !IS_OBJ_STAT( obj, ITEM_INVENTORY ) && ( noi > 1 ) )
+	if ( !unlimited && noi > 1 )
 	{
 	    interpret( keeper, "laugh" );
 	    act( AT_TELL, "$n tells you 'I don't have enough of those in stock"
@@ -571,36 +622,29 @@ void do_buy( CHAR_DATA *ch, char *argument )
 	    return;
 	}
 
-    /* Check local supply for availability
-     * -Aran
-     */
-    if( obj->item_type == ITEM_CARGO ) {
-        /* Cargo type */
-        int v0 = obj->value[0];
-            
-        /* Look at 10% of daily net produce */
-        int consume = 36 * ch->in_room->area->depletion[v0];
-        int produce = 36 * ch->in_room->area->production[v0];
-
-        /* Change in supply over the next 10% of the day */
-        int supply = produce - consume;
-
-        /* Change in suplpy if we sell the cargo */
-        supply = supply - obj->value[1];
-
-        /* Don't sell if change drops area to less than 75% of current */
-        if ((ch->in_room->area->supply[v0] + supply) <
-                (int)(0.75f * (float)ch->in_room->area->supply[v0])) {
-            interpret( keeper, "mutter" );
-            act( AT_TELL, "$n tells you 'Our local supply is running low. "
-                          "Come back when we have more to sell.'",
-                          keeper, NULL, ch, TO_VICT);
-            ch->reply = keeper;
-            return;
+        AREA_DATA *area = ch->in_room->area;
+        int cargo_supply = 0;
+        if ( obj->item_type == ITEM_CARGO )
+        {
+            const int type = obj->value[0];
+            if ( !area || type < 0 || type >= static_cast<int>(sizeof(area->supply) / sizeof(area->supply[0]))
+                 || obj->value[1] <= 0 )
+            {
+                send_to_char("That cargo is unavailable.\n", ch);
+                return;
+            }
+            const long long after_sale = area->supply[type] - 1LL * obj->value[1] * noi;
+            const long long production = 36LL * (1LL * area->production[type] - area->depletion[type]);
+            if ( after_sale < 0 || after_sale + production < 3LL * area->supply[type] / 4 )
+            {
+                act(AT_TELL, "$n tells you 'Our local supply is running low. Come back later.'",
+                    keeper, NULL, ch, TO_VICT);
+                ch->reply = keeper;
+                return;
+            }
+            cargo_supply = static_cast<int>(after_sale);
         }
-    }
 
-    
 	if ( ch->gold < cost )
 	{
 	    act( AT_TELL, "$n tells you 'You can't afford to buy $p.'",
@@ -618,20 +662,38 @@ void do_buy( CHAR_DATA *ch, char *argument )
 	    return;
 	}
 
-	if ( ch->carry_number + get_obj_number( obj ) > can_carry_n( ch ) )
-	{
-	    send_to_char( "You can't carry that many items.\n", ch );
-	    return;
-	}
+        OBJ_INDEX_DATA *bag_index = nullptr;
+        if ( noi > 1 && !(bag_index = get_obj_index(OBJ_VNUM_SHOPPING_BAG)) )
+        {
+            send_to_char("The shopkeeper has no bags for a bulk purchase.\n", ch);
+            return;
+        }
 
-	if ( ch->carry_weight + ( get_obj_weight( obj ) * noi )
-		+ (noi > 1 ? 2 : 0) > can_carry_w( ch ) )
-	{
-	    send_to_char( "You can't carry that much weight.\n", ch );
-	    return;
-	}
+        const int stock_count = UMAX(1, obj->count);
+        if ( ch->carry_number + 1LL * noi * (get_obj_number(obj) / stock_count)
+             + (bag_index ? 1 : 0) > can_carry_n(ch) )
+        {
+            send_to_char("You can't carry that many items.\n", ch);
+            return;
+        }
+        if ( ch->carry_weight + 1LL * noi * (get_obj_weight(obj) / stock_count)
+             + (bag_index ? bag_index->weight : 0) > can_carry_w(ch) )
+        {
+            send_to_char("You can't carry that much weight.\n", ch);
+            return;
+        }
 
-        separate_obj( obj );
+        OBJ_DATA *purchased = unlimited ? create_object(obj->pIndexData, obj->level) : obj;
+        if ( !purchased )
+            return;
+        OBJ_DATA *bag = bag_index ? create_object(bag_index, 1) : nullptr;
+        if ( bag_index && !bag )
+        {
+            extract_obj(purchased);
+            return;
+        }
+        if ( !unlimited )
+            separate_obj(purchased);
 
 	if ( noi == 1 )
 	{
@@ -653,77 +715,39 @@ void do_buy( CHAR_DATA *ch, char *argument )
 		ch, NULL, keeper, TO_CHAR );
 	}
 
-	ch->gold     -= cost;
-	keeper->gold += cost;
-
-	if ( ( keeper->gold > maxgold ) && (keeper->owner == NULL ))
-	{
-	    boost_economy( keeper->in_room->area, keeper->gold - maxgold/2 );
-	    keeper->gold = maxgold/2;
-	    act( AT_ACTION, "$n puts some credits into a large safe.", keeper, NULL, NULL, TO_ROOM );
-	}
-	if( obj->item_type == ITEM_CARGO )
-		ch->in_room->area->supply[obj->value[0]] -= obj->value[1]*noi;
-
-	if ( IS_OBJ_STAT( obj, ITEM_INVENTORY ) && ( keeper->home == NULL ) )
-	{
-	    OBJ_DATA *buy_obj, *bag;
-
-	    buy_obj = create_object( obj->pIndexData, obj->level );
-	    if ( obj->count > 1 )
-	    {
-	      obj->pIndexData->count -= ( obj->count - 1 );
-	      obj->count = 1;
-	    }
-
-	    /*
-	     * Due to grouped objects and carry limitations in SMAUG
-	     * The shopkeeper gives you a bag with multiple-buy,
-	     * and also, only one object needs be created with a count
-	     * set to the number bought.		-Thoric
-	     */
-	    if ( noi > 1 )
-	    {
-		bag = create_object( get_obj_index( OBJ_VNUM_SHOPPING_BAG ), 1 );
-		/* perfect size bag ;) */
-		bag->value[0] = bag->weight + (buy_obj->weight * noi);
-		buy_obj->count = noi;
-		obj->pIndexData->count += (noi - 1);
-		numobjsloaded += (noi - 1);
-		obj_to_obj( buy_obj, bag );
-		obj_to_char( bag, ch );
-
-                /* vendor snippit. Forces vendor to save after anyone buys anything*/
- 		if (  keeper->home != NULL )
- 		{
-		  save_vendor (keeper);
-		  bag->cost = 0;
-		}
-	    }
-	    else
-			obj_to_char( buy_obj, ch );
-
-		/* vendor snippit. Forces vendor to save after anyone buys anything*/
- 		if (  keeper->home != NULL )
- 		{
-		  save_vendor (keeper);
-		  buy_obj->cost = 0;
-		}
-	}
+        ch->gold -= cost;
+        const long long keeper_gold = 1LL * keeper->gold + cost;
+        if ( !keeper->owner && area && keeper_gold > maxgold )
+        {
+            boost_economy(area, static_cast<int>(UMIN(INT_MAX, keeper_gold - maxgold / 2)));
+            keeper->gold = maxgold / 2;
+            act(AT_ACTION, "$n puts some credits into a large safe.", keeper, NULL, NULL, TO_ROOM);
+        }
         else
-	{
-	    separate_obj( obj );
-	    
-	    obj_from_char( obj );
-	    obj_to_char( obj, ch );
+            keeper->gold = static_cast<int>(UMIN(INT_MAX, keeper_gold));
 
-	    /* vendor snippit. Forces vendor to save after anyone buys anything*/
- 		if (  keeper->home != NULL )
- 		{
-		  save_vendor (keeper);
-		  obj->cost = 0;
-		}
-	}
+        if ( obj->item_type == ITEM_CARGO )
+            area->supply[obj->value[0]] = cargo_supply;
+
+        if ( !unlimited )
+            obj_from_char(purchased);
+        if ( keeper->owner )
+            purchased->cost = 0;
+
+        if ( bag )
+        {
+            bag->value[0] = static_cast<int>(UMIN(INT_MAX, bag->weight + 1LL * purchased->weight * noi));
+            purchased->count = noi;
+            purchased->pIndexData->count += noi - 1;
+            numobjsloaded += noi - 1;
+            obj_to_obj(purchased, bag);
+            obj_to_char(bag, ch);
+        }
+        else
+            obj_to_char(purchased, ch);
+
+        if ( keeper->owner )
+            save_vendor(keeper);
 
 	return;
     }
@@ -790,8 +814,6 @@ void do_list( CHAR_DATA *ch, char *argument )
 			if ( ( cost = get_cost( ch, keeper, obj, TRUE ) ) > 0
 			&& ( arg.empty() || nifty_is_name_prefix( arg, obj->name ) ) )
 			{
-			if (keeper->home != NULL)
-			cost = obj->cost;
 			if ( !found )
 			{
 				found = TRUE;
@@ -854,7 +876,6 @@ void do_sell( CHAR_DATA *ch, char *argument )
     CHAR_DATA *keeper;
     OBJ_DATA *obj;
     int cost;
-    bool spice = FALSE;
 
     one_argument( argument, arg );
 
@@ -893,39 +914,51 @@ void do_sell( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    if( obj->item_type == ITEM_SPICE )
-      spice = TRUE;
+    if ( ch->gold > INT_MAX - cost )
+    {
+        send_to_char("You cannot carry any more credits.\n", ch);
+        return;
+    }
 
-    if ( cost > keeper->gold && ( economy_has( ch->in_room->area, cost) || spice ) )
+    AREA_DATA *area = ch->in_room->area;
+    int cargo_supply = 0;
+    if ( obj->item_type == ITEM_CARGO )
     {
-	act( AT_TELL, "$n makes a credit transaction.", keeper, obj, ch, TO_VICT );
-        lower_economy( ch->in_room->area, cost-keeper->gold );
+        int type = obj->value[0];
+        if ( !area || type < 0 || type >= static_cast<int>(sizeof(area->supply) / sizeof(area->supply[0]))
+             || obj->value[1] <= 0 || area->supply[type] > INT_MAX - obj->value[1] )
+        {
+            send_to_char("The shopkeeper cannot accept that cargo.\n", ch);
+            return;
+        }
+        cargo_supply = area->supply[type] + obj->value[1];
     }
-    if ( !economy_has( ch->in_room->area, cost ) && !spice )
+
+    const bool spice = obj->item_type == ITEM_SPICE;
+    const int from_keeper = UMIN(cost, UMAX(0, keeper->gold));
+    const int from_economy = cost - from_keeper;
+    if ( from_economy && (!area || (!spice && !economy_has(area, from_economy))) )
     {
-	act( AT_ACTION, "$n can not afford $p right now.", keeper, obj, ch, TO_VICT );
-	return;
+        act(AT_ACTION, "$n can not afford $p right now.", keeper, obj, ch, TO_VICT);
+        return;
     }
-   
+    if ( from_economy )
+    {
+        act(AT_TELL, "$n makes a credit transaction.", keeper, obj, ch, TO_VICT);
+        lower_economy(area, from_economy);
+    }
+
     separate_obj( obj );
     act( AT_ACTION, "$n sells $p.", ch, obj, NULL, TO_ROOM );
     buf = str_printf( "You sell $p for %d credit%s.",
 	cost, cost == 1 ? "" : "s" );
     act( AT_ACTION, buf.c_str(), ch, obj, NULL, TO_CHAR );
     ch->gold     += cost;
-    keeper->gold -= cost;
+    keeper->gold -= from_keeper;
     if ( spice )
-      boost_economy( ch->in_room->area, (int) ( cost*1.5 ) );
-    if ( keeper->gold < 0 )
-	keeper->gold = 0;
-
-    /* Modify area supply after selling cargo
-     * -Aran
-     */
-    if( obj->item_type == ITEM_CARGO ) {
-            int v0 = obj->value[0];
-            ch->in_room->area->supply[v0] += obj->value[1];
-    }
+        boost_economy(area, static_cast<int>(UMIN(INT_MAX, 3LL * cost / 2)));
+    if ( obj->item_type == ITEM_CARGO )
+        area->supply[obj->value[0]] = cargo_supply;
 
     if ( obj->item_type == ITEM_TRASH )
 	extract_obj( obj );
@@ -1008,7 +1041,20 @@ void repair_one_obj( CHAR_DATA *ch, CHAR_DATA *keeper, OBJ_DATA *obj,
                  char *arg, int maxgold )
 {
    std::string buf;
-   int cost;
+   long long cost;
+   const char *fixstr = "repair";
+   const char *fixstr2 = "repairs";
+
+   if ( keeper && keeper->pIndexData && keeper->pIndexData->pShop )
+   {
+       const FLAG_SET &stype = keeper->pIndexData->pShop->shop_type;
+       if ( obj->item_type == ITEM_DEVICE
+       ||   ( BV_IS_SET(stype, SHOP_RECHARGE) && !BV_IS_SET(stype, SHOP_FIX) ) )
+       {
+           fixstr = "recharge";
+           fixstr2 = "recharges";
+       }
+   }
 
    	if ( !can_drop_obj( ch, obj ) )
        	ch_printf( ch, "You can't let go of %s.\n", obj->name );
@@ -1025,31 +1071,36 @@ void repair_one_obj( CHAR_DATA *ch, CHAR_DATA *keeper, OBJ_DATA *obj,
 	else if ( (cost = strcmp("all",arg) ? cost : 11*cost/10) > ch->gold )
 	{
 		buf = str_printf(
-		"$N tells you, 'It will cost %d credit%s to maintain %s...'", cost,
-		cost == 1 ? "" : "s", obj->name );
+		"$N tells you, 'It will cost %lld credit%s to %s %s...'", cost,
+		cost == 1 ? "" : "s", fixstr, obj->name );
 		act( AT_TELL, buf, ch, NULL, keeper, TO_CHAR );
 		act( AT_TELL, "$N tells you, 'Which I see you can't afford.'", ch,
 				NULL, keeper, TO_CHAR );
 	}
 	else
 	{
-		buf = "$n gives $p to $N, who quickly maintains it.";
+		buf = str_printf( "$n gives $p to $N, who quickly %s it.", fixstr2 );
 		act( AT_ACTION, buf.c_str(), ch, obj, keeper, TO_ROOM );
-		buf = str_printf( "$N charges you %d credit%s to maintain $p.",
-			cost, cost == 1 ? "" : "s" );
+		buf = str_printf( "$N charges you %lld credit%s to %s $p.",
+			cost, cost == 1 ? "" : "s", fixstr );
 		act( AT_ACTION, buf.c_str(), ch, obj, keeper, TO_CHAR );
-		ch->gold     -= cost;
-		keeper->gold += cost;
-		if ( keeper->gold < 0 )
-			keeper->gold = 0;
-		else
-		if ( keeper->gold > maxgold )
+		ch->gold -= static_cast<int>(cost);
+		const long long keeper_gold = keeper->gold + cost;
+		if ( keeper_gold > maxgold )
 		{
-			boost_economy( keeper->in_room->area, keeper->gold - maxgold/2 );
+			long long deposit = keeper_gold - maxgold/2;
+			while ( deposit > INT_MAX )
+			{
+				boost_economy( keeper->in_room->area, INT_MAX );
+				deposit -= INT_MAX;
+			}
+			boost_economy( keeper->in_room->area, static_cast<int>(deposit) );
 			keeper->gold = maxgold/2;
 			act( AT_ACTION, "$n puts some credits into a large safe.", keeper, 
 		NULL, NULL, TO_ROOM );
 		}
+		else
+			keeper->gold = static_cast<int>(std::max(0LL, keeper_gold));
 
 		switch ( obj->item_type )
 		{
@@ -1088,24 +1139,13 @@ void do_repair( CHAR_DATA *ch, char *argument )
 
     maxgold = keeper->top_level * 10;
 
-/*
-	switch( keeper->pIndexData->pShop->shop_type )
-    {
-	default:
-	case SHOP_FIX:
-	  fixstr  = "repair";
-	  fixstr2 = "repairs";
-	  break;
-	case SHOP_RECHARGE:
-	  fixstr  = "recharge";
-	  fixstr2 = "recharges";
-	  break;
-    }
-*/
     if ( !strcmp( argument, "all" ) )
     {
-	for ( obj = ch->first_carrying; obj ; obj = obj->next_content )
+	OBJ_DATA *obj_next;
+
+	for ( obj = ch->first_carrying; obj ; obj = obj_next )
 	{
+           obj_next = obj->next_content;
            if ( obj->wear_loc  == WEAR_NONE
            &&   can_see_obj( ch, obj )
 	   && ( obj->item_type == ITEM_ARMOR
@@ -1130,7 +1170,8 @@ void appraise_all( CHAR_DATA *ch, CHAR_DATA *keeper, const std::string& fixstr )
 {
     OBJ_DATA *obj;
     std::string buf;
-    int cost, total=0;
+    int cost;
+    long long total = 0;
 
     for ( obj = ch->first_carrying; obj != NULL ; obj = obj->next_content )
     {
@@ -1155,9 +1196,10 @@ void appraise_all( CHAR_DATA *ch, CHAR_DATA *keeper, const std::string& fixstr )
             }
             else 
             {
+            const char *item_fix = ( obj->item_type == ITEM_DEVICE ) ? "recharge" : fixstr.c_str();
             buf = str_printf(
             "$N tells you, 'It will cost %d credit%s to %s %s'",
-            cost, cost == 1 ? "" : "s", "maintain", obj->name );
+            cost, cost == 1 ? "" : "s", item_fix, obj->name );
             act( AT_TELL, buf, ch, NULL, keeper, TO_CHAR );
             total += cost;
             }
@@ -1167,10 +1209,10 @@ void appraise_all( CHAR_DATA *ch, CHAR_DATA *keeper, const std::string& fixstr )
     {
        send_to_char ("\n", ch);
        buf = str_printf(
-          "$N tells you, 'It will cost %d credit%s in total.'",
+          "$N tells you, 'It will cost %lld credit%s in total.'",
           total, total == 1 ? "" : "s" );
        act( AT_TELL, buf, ch, NULL, keeper, TO_CHAR );
-       buf = "$N tells you, 'Remember there is a 10%% surcharge for repair all.'";
+       buf = "$N tells you, 'Remember there is a 10% surcharge for repair all.'";
        act( AT_TELL, buf, ch, NULL, keeper, TO_CHAR );
     }
 }
@@ -1195,6 +1237,14 @@ void do_appraise( CHAR_DATA *ch, char *argument )
 
     if ( ( keeper = find_fixer( ch ) ) == NULL )
 		return;
+
+    fixstr = "repair";
+    if ( keeper->pIndexData && keeper->pIndexData->pShop )
+    {
+        const FLAG_SET &stype = keeper->pIndexData->pShop->shop_type;
+        if ( BV_IS_SET(stype, SHOP_RECHARGE) && !BV_IS_SET(stype, SHOP_FIX) )
+            fixstr = "recharge";
+    }
 
     if ( !str_cmp( arg, "all") )
     {
@@ -1225,6 +1275,7 @@ void do_appraise( CHAR_DATA *ch, char *argument )
       return;
     }
 
+    fixstr = ( obj->item_type == ITEM_DEVICE ) ? "recharge" : "repair";
     buf = str_printf(
        "$N tells you, 'It will cost %d credit%s to %s that...'", cost,
        cost == 1 ? "" : "s", fixstr.c_str() );
@@ -1240,9 +1291,25 @@ void do_appraise( CHAR_DATA *ch, char *argument )
 /* ------------------ Shop Building and Editing Section ----------------- */
 
 
-void do_makeshop( CHAR_DATA *ch, char *argument )
+static void initialize_shop(GameContext *game, MOB_INDEX_DATA *mob)
 {
     SHOP_DATA *shop;
+    CREATE( shop, SHOP_DATA, 1 );
+	shop->game = game;
+    LINK( shop, first_shop, last_shop, next, prev );
+    shop->keeper	= mob->vnum;
+    shop->profit_buy	= 120;
+    shop->profit_sell	= 90;
+    shop->profit_fix	= 100;
+    BV_SET_BIT(shop->shop_type, SHOP_BUY);
+    shop->open_hour	= 0;
+    shop->close_hour	= 23;
+    mob->pShop		= shop;
+    top_shop++;
+}
+
+void do_makeshop( CHAR_DATA *ch, char *argument )
+{
     int vnum;
     MOB_INDEX_DATA *mob;
 
@@ -1269,157 +1336,8 @@ void do_makeshop( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    CREATE( shop, SHOP_DATA, 1 );
-	shop->game = ch->game;
-    LINK( shop, first_shop, last_shop, next, prev );
-    shop->keeper	= vnum;
-    shop->profit_buy	= 120;
-    shop->profit_sell	= 90;
-    shop->open_hour	= 0;
-    shop->close_hour	= 23;
-    mob->pShop		= shop;
+    initialize_shop(ch->game, mob);
     send_to_char( "Done.\n", ch );
-    return;
-}
-
-void do_shopset_old( CHAR_DATA *ch, char *argument )
-{
-    SHOP_DATA *shop;
-    MOB_INDEX_DATA *mob, *mob2;
-    int vnum;
-    int value;
-    std::string arg1;
-    std::string arg2;
-	std::string argstr = argument;
-    
-    argstr = one_argument( argstr, arg1 );
-    argstr = one_argument( argstr, arg2 );
-
-    if ( arg1.empty() || arg2.empty() )
-    {
-	send_to_char( "Usage: shopset <mob vnum> <field> value\n", ch );
-	send_to_char( "\nField being one of:\n", ch );
-	send_to_char( "  shoptype itemtype buy sell open close keeper\n", ch );
-	return;
-    }
-
-    vnum = strtoi( arg1 );
-
-    if ( (mob = get_mob_index(vnum)) == NULL )
-    {
-	send_to_char( "Mobile not found.\n", ch );
-	return;
-    }
-
-    if ( !can_medit(ch, mob) )
-      return;
-
-    if ( !mob->pShop )
-    {
-	send_to_char( "This mobile doesn't keep a shop.\n", ch );
-	return;
-    }
-    shop = mob->pShop;
-    value = strtoi( argstr );
-
-	if ( !str_cmp( arg2, "itemtype" ))
-	{
-		int value = -1;
-		value = get_otype( argstr );
-		if ( value < 0 || value > ITEMTYPE_MAX )
-		{
-			send_to_char( "Invalid item type!\n", ch );
-			return;
-		}
-		BV_TOGGLE_BIT(shop->buy_type, value);
-		send_to_char( "Done.\n", ch );
-		return;
-	}
-
-	if ( !str_cmp( arg2, "shoptype" ))
-	{
-		int value = -1;
-		value = get_shoptype( argstr );
-		if ( value < 0 || value > SHOP_MAX )
-		{
-			send_to_char( "Invalid shop type!\n", ch );
-			return;
-		}
-		BV_TOGGLE_BIT(shop->shop_type, value);
-		send_to_char( "Done.\n", ch );
-		return;		
-	}
-
-     if ( !str_cmp( arg2, "buy" ) )
-    {
-		if ( value <= (shop->profit_sell) || value > 1000 )
-		{
-			send_to_char( "Out of range.\n", ch );
-			return;
-		}
-		shop->profit_buy = value;
-		send_to_char( "Done.\n", ch );
-		return;
-    }
-
-    if ( !str_cmp( arg2, "sell" ) )
-    {
-	if ( value < 0 || value >= (shop->profit_buy) )
-	{
-	    send_to_char( "Out of range.\n", ch );
-	    return;
-	}
-	shop->profit_sell = value;
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "open" ) )
-    {
-	if ( value < 0 || value > 23 )
-	{
-	    send_to_char( "Out of range.\n", ch );
-	    return;
-	}
-	shop->open_hour = value;
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "close" ) )
-    {
-	if ( value < 0 || value > 23 )
-	{
-	    send_to_char( "Out of range.\n", ch );
-	    return;
-	}
-	shop->close_hour = value;
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "keeper" ) )
-    {
-	if ( (mob2 = get_mob_index(vnum)) == NULL )
-	{
-	    send_to_char( "Mobile not found.\n", ch );
-	    return;
-	}
-	if ( !can_medit(ch, mob) )
-	    return;
-	if ( mob2->pShop )
-	{
-	    send_to_char( "That mobile already has a shop.\n", ch );
-	    return;
-	}
-	mob->pShop  = NULL;
-	mob2->pShop = shop;
-	shop->keeper = value;
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    do_shopset( ch, "" );
     return;
 }
 
@@ -1461,6 +1379,11 @@ void do_shopstat( CHAR_DATA *ch, char *argument )
     ch_printf( ch, "Hours:   open %2d  close %2d\n",
 			shop->open_hour,
 			shop->close_hour );
+    if ( shop->separate_repair )
+    {
+        ch_printf( ch, "Repair types: %s\n", bitset_to_string( shop->repair_type, o_types ).c_str() );
+        ch_printf( ch, "Repair hours: open %2d  close %2d\n", shop->repair_open_hour, shop->repair_close_hour );
+    }
     return;
 }
 
@@ -1499,252 +1422,6 @@ void do_shops( CHAR_DATA *ch, char *argument )
 }
 
 
-/* -------------- Repair Shop Building and Editing Section -------------- */
-
-
-void do_makerepair( CHAR_DATA *ch, char *argument )
-{
-    REPAIR_DATA *repair;
-    int vnum;
-    MOB_INDEX_DATA *mob;
-
-	send_to_char( "Repair shops have been combined with shops. Use makeshop to make a repair shops.\n", ch );
-	return;
-
-    if ( !argument || argument[0] == '\0' )
-    {
-	send_to_char( "Usage: makerepair <mobvnum>\n", ch );
-	return;
-    }
-
-    vnum = atoi( argument );
-    
-    if ( (mob = get_mob_index(vnum)) == NULL )
-    {
-	send_to_char( "Mobile not found.\n", ch );
-	return;
-    }
-
-    if ( !can_medit(ch, mob) )
-      return;
-
-    if ( mob->rShop )
-    {
-	send_to_char( "This mobile already has a repair shop.\n", ch );
-	return;
-    }
-
-    CREATE( repair, REPAIR_DATA, 1 );
-	repair->game = ch->game;
-
-    LINK( repair, first_repair, last_repair, next, prev );
-    repair->keeper	= vnum;
-    repair->profit_fix	= 100;
-    repair->shop_type	= SHOP_FIX;
-    repair->open_hour	= 0;
-    repair->close_hour	= 23;
-    mob->rShop		= repair;
-    send_to_char( "Done.\n", ch );
-    return;
-}
-
-
-void do_repairset( CHAR_DATA *ch, char *argument )
-{
-    REPAIR_DATA *repair;
-    MOB_INDEX_DATA *mob, *mob2;
-    std::string arg1;
-    std::string arg2;
-	std::string argstr = argument;
-    int vnum;
-    int value;
-    
-	send_to_char( "Repair shops have been combined with shops. Use shopset to edit repair shops.\n", ch );
-	return;
-
-    argstr = one_argument( argstr, arg1 );
-    argstr = one_argument( argstr, arg2 );
-
-    if ( arg1.empty() || arg2.empty() )
-    {
-	send_to_char( "Usage: repairset <mob vnum> <field> value\n", ch );
-	send_to_char( "\nField being one of:\n", ch );
-	send_to_char( "  fixtype profit type open close keeper\n", ch );
-	return;
-    }
-
-    vnum = strtoi( arg1 );
-
-    if ( (mob = get_mob_index(vnum)) == NULL )
-    {
-	send_to_char( "Mobile not found.\n", ch );
-	return;
-    }
-
-    if ( !can_medit(ch, mob) )
-      return;
-
-    if ( !mob->rShop )
-    {
-	send_to_char( "This mobile doesn't keep a repair shop.\n", ch );
-	return;
-    }
-    repair = mob->rShop;
-    value = strtoi( argstr );
-
-    if ( !str_cmp( arg2, "fixtype" ) )
-    {
-	if ( !is_number(argstr) )
-	  value = get_otype(argstr);
-	if ( value < 0 || value > ITEMTYPE_MAX )
-	{
-	    send_to_char( "Invalid item type!\n", ch );
-	    return;
-	}
-	BV_TOGGLE_BIT(repair->fix_type, value);
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "profit" ) )
-    {
-	if ( value < 1 || value > 1000 )
-	{
-	    send_to_char( "Out of range.\n", ch );
-	    return;
-	}
-	repair->profit_fix = value;
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "type" ) )
-    {
-	if ( value < 1 || value > 2 )
-	{
-	    send_to_char( "Out of range.\n", ch );
-	    return;
-	}
-	repair->shop_type = value;
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "open" ) )
-    {
-	if ( value < 0 || value > 23 )
-	{
-	    send_to_char( "Out of range.\n", ch );
-	    return;
-	}
-	repair->open_hour = value;
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "close" ) )
-    {
-	if ( value < 0 || value > 23 )
-	{
-	    send_to_char( "Out of range.\n", ch );
-	    return;
-	}
-	repair->close_hour = value;
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "keeper" ) )
-    {
-	if ( (mob2 = get_mob_index(vnum)) == NULL )
-	{
-	  send_to_char( "Mobile not found.\n", ch );
-	  return;
-	}
-	if ( !can_medit(ch, mob) )
-	  return;
-	if ( mob2->rShop )
-	{
-	  send_to_char( "That mobile already has a repair shop.\n", ch );
-	  return;
-	}
-	mob->rShop  = NULL;
-	mob2->rShop = repair;
-	repair->keeper = value;
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    do_repairset( ch, "" );
-    return;
-}
-
-
-void do_repairstat( CHAR_DATA *ch, char *argument )
-{
-    REPAIR_DATA *repair;
-    MOB_INDEX_DATA *mob;
-    int vnum;
-    
-	send_to_char( "Repair shops have been combined with shops. Use shopstat to show a repair shop.\n", ch );
-	return;
-
-    if ( argument[0] == '\0' )
-    {
-	send_to_char( "Usage: repairstat <keeper vnum>\n", ch );
-	return;
-    }
-
-    vnum = atoi( argument );
-    
-    if ( (mob = get_mob_index(vnum)) == NULL )
-    {
-	send_to_char( "Mobile not found.\n", ch );
-	return;
-    }
-
-    if ( !mob->rShop )
-    {
-	send_to_char( "This mobile doesn't keep a repair shop.\n", ch );
-	return;
-    }
-    repair = mob->rShop;
-
-    ch_printf( ch, "Keeper: %d  %s\n", repair->keeper, mob->short_descr );
-    ch_printf( ch, "fixtype: %s\n",
-			bitset_to_string(repair->fix_type, o_types).c_str() );
-    ch_printf( ch, "Profit: %3d%%  Type: %d\n",
-			repair->profit_fix,
-			repair->shop_type );
-    ch_printf( ch, "Hours:   open %2d  close %2d\n",
-			repair->open_hour,
-			repair->close_hour );
-    return;
-}
-
-
-void do_repairshops( CHAR_DATA *ch, char *argument )
-{
-    REPAIR_DATA *repair;
-
-	send_to_char( "Repair shops have been combined with shops. Use shops to show repair shops.\n", ch );
-	return;
-
-    if ( !first_repair )
-    {
-	send_to_char( "There are no repair shops.\n", ch );
-	return;
-    }
-
-    set_char_color( AT_NOTE, ch );
-    for ( repair = first_repair; repair; repair = repair->next )
-	ch_printf( ch, "Keeper: %5d Profit: %3d Type: %d Open: %2d Close: %2d Fix: %s\n",
-		repair->keeper,	     repair->profit_fix, repair->shop_type,
-		repair->open_hour,   repair->close_hour,
-		bitset_to_string(repair->fix_type, o_types).c_str() );
-    return;
-}
-
 /*This is the command used to buy a contract from a vendor to place a player
 owned vendor
 */
@@ -1752,28 +1429,20 @@ void do_buyvendor (CHAR_DATA *ch, char *argument)
 {
   CHAR_DATA *keeper;
   OBJ_DATA *deed;
-  std::string buf, buf1, strsave;
+  std::string buf1, strsave;
   struct stat fst;
 
   if (IS_NPC(ch))
     return;
 
-  if ( !str_cmp( argument, "yes" ) )
+  strsave = str_printf("%s%s", VENDOR_DIR, capitalize(ch->name).c_str());
+  const bool replace_existing = stat(strsave.c_str(), &fst) == 0;
+  if ( replace_existing && str_cmp(argument, "yes") )
   {
-    buf = str_printf("%s/%s", VENDOR_DIR, capitalize( ch->name ).c_str() );
-    remove( buf.c_str() );
+      send_to_char("You already have a shop!\n"
+                   "Type buyvendor yes to replace your old shop.\n", ch);
+      return;
   }
-  
-    strsave = str_printf("%s/%s", VENDOR_DIR, capitalize( ch->name ).c_str() );
-
-    	if ( stat( strsave.c_str(), &fst ) != -1 )
-    	{
-		send_to_char( "You already have a shop!\n", ch);
-		send_to_char( "If you want to buy one anyway, type buyvendor yes.\n", ch);
-		send_to_char( "Your old one will be deleted.\n", ch);
-		return;
-	}
-  
 
   if (  (keeper = find_keeper_q( ch, FALSE ) )  == NULL  )
   {
@@ -1801,8 +1470,25 @@ if ( (get_obj_index (OBJ_VNUM_DEED) ) == NULL )
 		return;
 	}
 
-deed = create_object ( get_obj_index(OBJ_VNUM_DEED), 0);
-obj_to_char (deed, ch);
+deed = create_object(get_obj_index(OBJ_VNUM_DEED), 0);
+if ( !deed )
+    return;
+if ( replace_existing && remove(strsave.c_str()) != 0 )
+{
+    extract_obj(deed);
+    send_to_char("The old shop could not be replaced.\n", ch);
+    return;
+}
+if ( replace_existing )
+{
+    for ( CHAR_DATA *old_vendor = first_char; old_vendor; old_vendor = old_vendor->next )
+        if ( IS_NPC(old_vendor) && old_vendor->owner && !str_cmp(old_vendor->owner, ch->name) )
+        {
+            extract_char(old_vendor, TRUE);
+            break;
+        }
+}
+obj_to_char(deed, ch);
 send_to_char ("&bVery well, you may have a contract for a vendor.\n", ch);
 ch->gold = ch->gold - COST_BUY_VENDOR;
 
@@ -1810,6 +1496,17 @@ ch->gold = ch->gold - COST_BUY_VENDOR;
 
 
 /*this is the command that places the vendor at the specified location*/
+static void prepare_vendor(CHAR_DATA *vendor)
+{
+    MOB_INDEX_DATA *prototype = vendor->pIndexData;
+    std::string description = prototype->long_descr ? prototype->long_descr : "";
+    const auto marker = description.find("%s");
+    if ( marker != std::string::npos )
+        description.replace(marker, 2, vendor->owner);
+    STRFREE(vendor->long_descr);
+    vendor->long_descr = STRALLOC(description);
+}
+
 void do_placevendor (CHAR_DATA *ch, char *argument)
 {
 std::string strsave;
@@ -1817,19 +1514,16 @@ struct stat fst;
 CHAR_DATA *vendor;
 MOB_INDEX_DATA *temp;
 OBJ_DATA *obj;
-std::string vnum1;
-char buf[MAX_STRING_LENGTH]; // Need this one to handle obj desc token format
-
-if (  find_keeper_q (ch, FALSE) )
-{
-send_to_char ("A vendor is already here!\n",ch);
-return;
-}
-
-if ( IS_NPC(ch) )
-	return;
-
-
+if ( !ch || IS_NPC(ch) || !ch->in_room )
+    return;
+for ( CHAR_DATA *occupant = ch->in_room->first_person; occupant; occupant = occupant->next_in_room )
+    if ( IS_NPC(occupant) && occupant->pIndexData
+         && (occupant->owner || (occupant->pIndexData->pShop
+             && BV_IS_SET(occupant->pIndexData->pShop->shop_type, SHOP_BUY))) )
+    {
+        send_to_char("A vendor is already here!\n", ch);
+        return;
+    }
 
 /* better way to do this? what if they have another object called deed?*/
   if ( ( obj = get_obj_carry( ch, "deed" ) ) == NULL )
@@ -1872,16 +1566,13 @@ if (!ch->game)
     return;
 }
 
-char_to_room( create_mobile( ch->game, temp ), ch->in_room );
-vendor = get_char_room(ch, temp->player_name);
-
-SPRINTF_RUNTIME (buf, vendor->long_descr, ch->name);
-vendor->long_descr =  STRALLOC( buf );
-
-SPRINTF (buf, "%s", ch->name);
-
-vendor->owner = STRALLOC(buf);
+vendor = create_mobile(ch->game, temp);
+if ( !vendor )
+    return;
+vendor->owner = STRALLOC(ch->name);
 vendor->home = ch->in_room;
+prepare_vendor(vendor);
+char_to_room(vendor, ch->in_room);
 
 save_vendor (vendor);
 
@@ -1890,166 +1581,97 @@ extract_obj( obj );
 
 act( AT_ACTION, "$n appears in a swirl of smoke.\n", vendor, NULL, NULL, TO_ROOM );
 
-vnum1 = str_printf("%d", vendor->pIndexData->vnum);
-do_makeshop (vendor, (char*)vnum1.c_str() ); /*makes the vendor a shop.. there has to be a
-better way to do it but hell if i know what it is!*/
-
 }
 
 
-
-void do_pricevendor (CHAR_DATA *ch, char *argument)
+void do_pricevendor(CHAR_DATA *ch, char *argument)
 {
-CHAR_DATA *vendor;
-CHAR_DATA *ch1;
-std::string arg1;
-std::string arg2;
-std::string argstr = argument;
-OBJ_DATA *obj;
-struct tm *tms;
+    if ( !ch || IS_NPC(ch) )
+        return;
 
-argstr = one_argument (argstr, arg1);
-argstr = one_argument (argstr, arg2);
-
-if ( arg1.empty() )
-	{
-	    send_to_char("usage:> pricevendor <item> <cost>\n",ch);
-	    return;
-	}
-
-if (arg2.empty())
-	{
-		send_to_char("usage:> pricevendor <item> <cost>\n",ch);
-		return;
-	}
-
-
-if ( ( vendor = find_keeper (ch) ) == NULL )
-{
-return;
-}
-
-if ( !(vendor->owner) )
-  return;
-
-if ( (ch1 = get_char_room(ch, vendor->owner)) == NULL )
-{
-send_to_char ("This isnt your vendor!\n",ch);
-return;
-}
-if ( str_cmp( ch1->name, vendor->owner ) )
-	{
-          send_to_char ("Trying to steal huh?\n",ch);
- 	  tms = localtime(&current_time);
- 	  tms->tm_hour += 24;
-	  ch->pcdata->release_date = mktime(tms);
-	  ch->pcdata->helled_by = STRALLOC("VendorCheat");
-	  act(AT_MAGIC, "$n disappears in a cloud of hellish light.", ch, NULL, ch, TO_NOTVICT);
-	  char_from_room(ch);
-	  char_to_room(ch, get_room_index(6));
-	  act(AT_MAGIC, "$n appears in a could of hellish light.", ch, NULL, ch, TO_NOTVICT);
-	  do_look(ch, "auto");
-	  ch_printf(ch, "The immortals are not pleased with your actions.\n"
-            "You shall remain in hell for 24 Hours.\n");
-	  save_char_obj(ch);	/* used to save ch, fixed by Thoric 09/17/96 */
-          log_printf( "%s just tried to abuse the vendor bug!" , ch->name);
-	  return;
-	}
-
-if ( ch->fighting)
-{
-send_to_char ("Not while you fightZ!\n",ch);
-return;
-}
-
-if ( (obj  = get_obj_carry( vendor, arg1 )) != NULL)
-	{
-		obj->cost = strtoi (arg2);
-		send_to_char("The price has been changed\n",ch);
-		save_vendor(vendor);
-		return;
-	}
-
-
-send_to_char("He doesnt have that item!\n",ch);
-save_vendor(vendor);
-return;
-
-}
-
-
-void do_collectgold (CHAR_DATA *ch, char *argument)
-{
-CHAR_DATA *vendor;
-CHAR_DATA *ch1;
-long gold;
-std::string name;
-  struct tm *tms;
-
-if ( ( vendor = find_keeper (ch) ) == NULL )
-{
-return;
-}
-
-if (vendor->owner == NULL)
-	{
-		send_to_char("thats not a vendor!\n",ch);
-		return;
+    std::string item, price_argument;
+    one_argument(one_argument(argument, item), price_argument);
+    if ( item.empty() || price_argument.empty() )
+    {
+        send_to_char("Usage: pricevendor <item> <cost>\n", ch);
+        return;
     }
 
-name = vendor->owner;
+    CHAR_DATA *vendor = find_keeper(ch);
+    if ( !vendor )
+        return;
+    if ( !vendor->owner || str_cmp(ch->name, vendor->owner) )
+    {
+        send_to_char("This isn't your vendor!\n", ch);
+        return;
+    }
+    if ( ch->fighting )
+    {
+        send_to_char("You can't do that while fighting.\n", ch);
+        return;
+    }
 
-if ( (ch1 = get_char_room(ch, vendor->owner)) == NULL )
-	{
-		send_to_char ("Trying to steal huh?\n",ch);
-		return;
-	}
-if ( str_cmp( ch1->name, vendor->owner ) )
-	{
-          send_to_char ("Trying to steal huh?\n",ch);
- 	  tms = localtime(&current_time);
- 	  tms->tm_hour += 24;
-	  ch->pcdata->release_date = mktime(tms);
-	  ch->pcdata->helled_by = STRALLOC("VendorCheat");
-	  act(AT_MAGIC, "$n disappears in a cloud of hellish light.", ch, NULL, ch, TO_NOTVICT);
-	  char_from_room(ch);
-	  char_to_room(ch, get_room_index(6));
-	  act(AT_MAGIC, "$n appears in a could of hellish light.", ch, NULL, ch, TO_NOTVICT);
-	  do_look(ch, "auto");
-	  ch_printf(ch, "The immortals are not pleased with your actions.\n"
-            "You shall remain in hell for 24 Hours.\n");
-	  save_char_obj(ch);	/* used to save ch, fixed by Thoric 09/17/96 */
-          log_printf( "%s just tried to abuse the vendor bug!" , ch->name);
-	  return;
-	}
+    char *end;
+    errno = 0;
+    const long price = strtol(price_argument.c_str(), &end, 10);
+    if ( errno == ERANGE || *end || price < 1 || price > INT_MAX )
+    {
+        send_to_char("Enter a positive price in credits.\n", ch);
+        return;
+    }
 
+    OBJ_DATA *obj = get_obj_carry(vendor, item);
+    if ( !obj )
+    {
+        send_to_char("Your vendor doesn't have that item.\n", ch);
+        return;
+    }
+    obj->cost = static_cast<int>(price);
+    save_vendor(vendor);
+    send_to_char("The price has been changed.\n", ch);
+}
 
-if ( !(ch == ch1) )
+void do_collectgold(CHAR_DATA *ch, char *argument)
 {
-	log_printf( "collectgold: %s and ch1 = %s\n", name.c_str(), ch1->name);
-	send_to_char ("This isnt your vendor!\n",ch);
-	return;
+    if ( !ch || IS_NPC(ch) )
+        return;
+
+    CHAR_DATA *vendor = find_keeper(ch);
+    if ( !vendor )
+        return;
+    if ( !vendor->owner || str_cmp(ch->name, vendor->owner) )
+    {
+        send_to_char("This isn't your vendor!\n", ch);
+        return;
+    }
+    if ( ch->fighting )
+    {
+        send_to_char("You can't do that while fighting.\n", ch);
+        return;
+    }
+    if ( vendor->gold <= 0 )
+    {
+        send_to_char("Your vendor has no earnings to collect.\n", ch);
+        return;
+    }
+
+    const int fee = vendor->gold / VENDOR_FEE_DIVISOR;
+    const int payout = vendor->gold - fee;
+    if ( ch->gold > INT_MAX - payout )
+    {
+        send_to_char("You cannot carry that many credits.\n", ch);
+        return;
+    }
+
+    if ( vendor->in_room && vendor->in_room->area )
+        boost_economy(vendor->in_room->area, fee);
+    vendor->gold = 0;
+    ch->gold += payout;
+    save_vendor(vendor);
+
+    send_to_char("&GYour vendor gladly hands over his earnings minus a small fee of course..\n", ch);
+    act(AT_ACTION, "$n hands over some money.\n", vendor, NULL, NULL, TO_ROOM);
 }
-
-if ( ch->fighting)
-{
-send_to_char ("Not while you fightZ!\n",ch);
-return;
-}
-
-gold = vendor->gold;
-gold -= (int) (gold * VENDOR_FEE);
-if( vendor->in_room && vendor->in_room->area )
-  boost_economy( vendor->in_room->area, vendor->gold);
-vendor->gold = 0;
-ch->gold += gold;
-
-send_to_char ("&GYour vendor gladly hands over his earnings minus a small fee of course..\n",ch);
-act( AT_ACTION, "$n hands over some money.\n", vendor, NULL, NULL, TO_ROOM );
-
-save_vendor(vendor);
-}
-
 
 /* Write vendor to file */
 void fwrite_vendor( FILE *fp, CHAR_DATA *mob )
@@ -2077,49 +1699,38 @@ fprintf( fp, "END\n" );
 /* read vendor from file */
 CHAR_DATA *  fread_vendor( GameContext *game, FILE *fp )
 {
-  CHAR_DATA *mob = NULL;
+    if ( !game || !fp )
+        return nullptr;
 
-  const char *word;
-  bool fMatch;
-  int inroom = 0;
-  ROOM_INDEX_DATA *pRoomIndex = NULL;
-  CHAR_DATA *victim;
-  CHAR_DATA *vnext;
-char buf [MAX_INPUT_LENGTH];
-char vnum1 [MAX_INPUT_LENGTH];
-  word   = feof( fp ) ? "END" : fread_word( fp );
-  if ( !strcmp(word, "Vnum") )
-  {
-    int vnum;
-
-    vnum = fread_number( fp );
-    mob = create_mobile( game, get_mob_index(vnum));
-    if ( !mob )
+    const char *word = fread_word(fp);
+    if ( str_cmp(word, "Vnum") )
     {
-	for ( ; ; )
-		{
-	  word   = feof( fp ) ? "END" : fread_word( fp );
-	  if ( !strcmp( word, "END" ) )
-		break;
-        }
-	bug("Fread_mobile: No index data for vnum %d", vnum );
-	return NULL;
+        bug("Fread_vendor: Vnum not found");
+        return nullptr;
     }
-  }
-  else
-  {
-	for ( ; ; )
-		{
-	  word   = feof( fp ) ? "END" : fread_word( fp );
-	  if ( !strcmp( word, "END" ) )
-		break;
-        }
-	extract_char(mob, TRUE);
-	bug("Fread_vendor: Vnum not found", 0 );
-	return NULL;
-  }
+
+    const int vnum = fread_number(fp);
+    MOB_INDEX_DATA *prototype = get_mob_index(vnum);
+    if ( !prototype )
+    {
+        bug("Fread_vendor: No index data for vnum %d", vnum);
+        return nullptr;
+    }
+
+    CHAR_DATA *mob = create_mobile(game, prototype);
+    if ( !mob )
+        return nullptr;
+    int inroom = 0;
+    bool fMatch;
+    ObjectNest nest{};
   for ( ; ;) {
-       word   = feof( fp ) ? "END" : fread_word( fp );
+       word = feof(fp) ? "" : fread_word(fp);
+       if ( feof(fp) && !*word )
+       {
+           bug("Fread_vendor: missing END");
+           extract_char(mob, TRUE);
+           return nullptr;
+       }
        fMatch = FALSE;
        switch ( UPPER(word[0]) ) {
 	case '*':
@@ -2129,7 +1740,8 @@ char vnum1 [MAX_INPUT_LENGTH];
 	case '#':
 		if ( !strcmp( word, "#OBJECT" ) )
 			{
-			fread_obj ( game, mob, fp, OS_CARRY );
+			fread_obj(game, mob, fp, OS_CARRY, nest);
+                fMatch = TRUE;
 			}
 			break;
 	case 'D':
@@ -2139,35 +1751,27 @@ char vnum1 [MAX_INPUT_LENGTH];
 
 		if ( !strcmp( word, "END" ) )
 		{
-		if ( inroom == 0 )
-			inroom = ROOM_VNUM_VENSTOR;
-		mob->home = get_room_index(inroom);
-		pRoomIndex = get_room_index( inroom );
-		if ( !pRoomIndex )
-			{
-			pRoomIndex = get_room_index( ROOM_VNUM_VENSTOR );
-			mob->home = get_room_index( ROOM_VNUM_VENSTOR );
-		    }
+            ROOM_INDEX_DATA *room = get_room_index(inroom ? inroom : ROOM_VNUM_VENSTOR);
+            if ( !room )
+                room = get_room_index(ROOM_VNUM_VENSTOR);
+            if ( !room || !mob->owner || !*mob->owner )
+            {
+                bug("Fread_vendor: missing valid home or owner for vnum %d", vnum);
+                extract_char(mob, TRUE);
+                return nullptr;
+            }
 
-	  mob->in_room = pRoomIndex;
-	  /* the following code is to make sure no more then one player owned vendor
-	  is in the room - meckteck */
-	  for ( victim = mob->in_room->first_person; victim; victim = vnext )
-			{
-		vnext = victim->next_in_room;
-		if (victim->home != NULL)
-		{
-		extract_char( victim, TRUE);
-        break;
-		}
+            for ( CHAR_DATA *occupant = room->first_person; occupant; occupant = occupant->next_in_room )
+                if ( IS_NPC(occupant) && occupant->owner )
+                {
+                    bug("Fread_vendor: room %d already has a vendor", room->vnum);
+                    extract_char(mob, TRUE);
+                    return nullptr;
+                }
 
-           }
-
-		char_to_room(mob, pRoomIndex);
-		SPRINTF(vnum1,"%d", mob->pIndexData->vnum);
-         do_makeshop (mob, vnum1 );
-		SPRINTF_RUNTIME (buf, mob->long_descr, mob->owner);
-         mob->long_descr =  STRALLOC( buf );
+            mob->home = room;
+            prepare_vendor(mob);
+            char_to_room(mob, room);
 		 mob->hit = 10000;
 		 mob->max_hit = 10000;
 		return mob;
@@ -2210,8 +1814,8 @@ char vnum1 [MAX_INPUT_LENGTH];
 	}
 	if ( !fMatch )
 	{
-	   bug ( "Fread_mobile: no match.", 0 );
-	   bug ( word, 0 );
+	   bug ( "Fread_vendor: no match." );
+	   bug ( "%s", word );
 	}
   }
   return NULL;
@@ -2225,13 +1829,14 @@ void save_vendor( CHAR_DATA *ch )
     std::string strsave;
     FILE *fp;
 
-    if ( !ch )
+    if ( !ch || !ch->owner || !*ch->owner )
     {
-	bug( "Save_char_obj: null ch!", 0 );
+	bug("Save_vendor: missing vendor or owner");
 	return;
     }
 
-    de_equip_char( ch );
+    EquipmentSlots equipment;
+    de_equip_char(ch, equipment);
 
 
     strsave = str_printf("%s%s",VENDOR_DIR, capitalize( ch->owner ).c_str() );
@@ -2239,7 +1844,7 @@ void save_vendor( CHAR_DATA *ch )
     if ( ( fp = fopen( strsave.c_str(), "w" ) ) == NULL )
     {
 	perror( strsave.c_str() );
-	bug( "Save_vendor: fopen", 0 );
+	bug( "Save_vendor: fopen" );
     }
     else
     {
@@ -2250,7 +1855,7 @@ void save_vendor( CHAR_DATA *ch )
 	fwrite_vendor( fp, ch );
 
 	if ( ch->first_carrying )
-	fwrite_obj( ch, ch->last_carrying, fp, 0, OS_CARRY );
+	fwrite_obj(ch, ch->last_carrying, fp, 0, OS_CARRY, &equipment);
 
 	fprintf(fp, "#END\n" );
 	ferr = ferror(fp);
@@ -2262,7 +1867,7 @@ void save_vendor( CHAR_DATA *ch )
 	}
     }
 
-    re_equip_char( ch );
+    re_equip_char(ch, equipment);
     return;
 }
 

@@ -1245,11 +1245,11 @@ D0
 D8
 ~
 ~
-1 20504 6482
+1 -1 6482
 D9
 ~
 ~
-1 20504 6481
+1 -1 6481
 S
 #6481
 Holding Cell #1~
@@ -1262,7 +1262,7 @@ occupant struggle.
 D6
 ~
 ~
-1 20504 6480
+1 -1 6480
 S
 #6482
 Holding Cell #2~
@@ -1275,7 +1275,7 @@ occupant struggle.
 D7
 ~
 ~
-1 20504 6480
+1 -1 6480
 S
 #6483
 Captain's Quarters~
@@ -1806,9 +1806,9 @@ G 1 53 1
 D 0 6480 8 2
 D 0 6480 9 2
 M 1 5190 17 6411
-M 1 204 92 6407
-M 1 204 92 6407
-M 1 204 92 6407
+* Unavailable prototype: M 1 204 92 6407
+* Unavailable prototype: M 1 204 92 6407
+* Unavailable prototype: M 1 204 92 6407
 S
 
 

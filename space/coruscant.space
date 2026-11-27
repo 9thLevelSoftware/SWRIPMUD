@@ -1,0 +1,16 @@
+#SPACE
+Name         Coruscant~
+Filename     coruscant.space~
+Type         1
+Locationa    Public Landing Pad~
+Doca         10252
+Locationb    ~
+Docb         0
+Locationc    ~
+Docc         0
+Xpos         -345
+Ypos         -987
+Zpos         1562
+End
+
+#END

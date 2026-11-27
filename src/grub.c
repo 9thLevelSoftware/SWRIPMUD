@@ -215,7 +215,7 @@ void go_init (void)
   SPRINTF(go_fd[23].nam, "name" );
 }
 
-char *go_otype_to_disp (int arg)
+const char *go_otype_to_disp (int arg)
 {
   if ( arg==ITEM_LIGHT     ) return "lt";
   if ( arg==ITEM_SCROLL    ) return "sc";
@@ -229,7 +229,6 @@ char *go_otype_to_disp (int arg)
   if ( arg==ITEM_POTION    ) return "po";
   if ( arg==ITEM_CONTAINER ) return "cn";
   if ( arg==ITEM_DRINK_CON ) return "dc";
-  if ( arg==ITEM_POTION    ) return "po";
   if ( arg==ITEM_NOTE      ) return "no";
   if ( arg==ITEM_KEY       ) return "ky";
   if ( arg==ITEM_FOOD      ) return "fo";
@@ -244,40 +243,54 @@ char *go_otype_to_disp (int arg)
   if ( arg==ITEM_FABRIC    ) return "fb";
   if ( arg==ITEM_SPICE     ) return "sp";
   if ( arg==ITEM_GRENADE   ) return "gr";
-  return NULL;
+  if ( arg==ITEM_SWITCH    ) return "sw";
+  if ( arg==ITEM_LEVER     ) return "lv";
+  if ( arg==ITEM_BUTTON    ) return "bt";
+  if ( arg==ITEM_TRAP      ) return "tp";
+  if ( arg==ITEM_SALVE     ) return "sa";
+  if ( arg==ITEM_SPACECRAFT) return "ss";
+  if ( arg==ITEM_MEDPAC    ) return "md";
+  if ( arg==ITEM_COMLINK   ) return "cm";
+  if ( arg==ITEM_DEVICE    ) return "dv";
+  if ( arg==ITEM_DROID_CORPSE ) return "dr";
+  return "??";
 }
 
 char *owear_to_disp (short arg)
 {
-  static char owear_disp[20][3] =
+  static char owear_disp[23][3] =
      { "??", "ta", "fi", "ne", "bo", "he", "le", "fe", "ha", "ar",
-       "sh", "ab", "wa", "wr", "wi", "ho", "du", "ea", "ey", "mi" };
+       "sh", "ab", "wa", "wr", "wi", "ho", "du", "ea", "ey", "mi",
+       "fl", "ov", "di" };
 
-  arg = ( arg<0 || arg>20 ) ? 0 : arg;
+  arg = ( arg<0 || arg>=23 ) ? 0 : arg;
   return owear_disp[ arg ];
 }
 
 int owear_to_num (char *arg)
 {
-  if ( !strcmp( arg, "take"    ) ) return  1;
-  if ( !strcmp( arg, "finger"  ) ) return  2;
-  if ( !strcmp( arg, "neck"    ) ) return  3;
-  if ( !strcmp( arg, "body"    ) ) return  4;
-  if ( !strcmp( arg, "head"    ) ) return  5;
-  if ( !strcmp( arg, "legs"    ) ) return  6;
-  if ( !strcmp( arg, "feet"    ) ) return  7;
-  if ( !strcmp( arg, "hands"   ) ) return  8;
-  if ( !strcmp( arg, "arms"    ) ) return  9;
-  if ( !strcmp( arg, "shield"  ) ) return 10;
-  if ( !strcmp( arg, "about"   ) ) return 11;
-  if ( !strcmp( arg, "waist"   ) ) return 12;
-  if ( !strcmp( arg, "wrist"   ) ) return 13;
-  if ( !strcmp( arg, "wield"   ) ) return 14;
-  if ( !strcmp( arg, "hold"    ) ) return 15;
-  if ( !strcmp( arg, "dual"    ) ) return 16;
-  if ( !strcmp( arg, "ears"    ) ) return 17;
-  if ( !strcmp( arg, "eyes"    ) ) return 18;
-  if ( !strcmp( arg, "missile" ) ) return 19;
+  if ( !strcmp( arg, "take"     ) ) return  1;
+  if ( !strcmp( arg, "finger"   ) ) return  2;
+  if ( !strcmp( arg, "neck"     ) ) return  3;
+  if ( !strcmp( arg, "body"     ) ) return  4;
+  if ( !strcmp( arg, "head"     ) ) return  5;
+  if ( !strcmp( arg, "legs"     ) ) return  6;
+  if ( !strcmp( arg, "feet"     ) ) return  7;
+  if ( !strcmp( arg, "hands"    ) ) return  8;
+  if ( !strcmp( arg, "arms"     ) ) return  9;
+  if ( !strcmp( arg, "shield"   ) ) return 10;
+  if ( !strcmp( arg, "about"    ) ) return 11;
+  if ( !strcmp( arg, "waist"    ) ) return 12;
+  if ( !strcmp( arg, "wrist"    ) ) return 13;
+  if ( !strcmp( arg, "wield"    ) ) return 14;
+  if ( !strcmp( arg, "hold"     ) ) return 15;
+  if ( !strcmp( arg, "dual"     ) ) return 16;
+  if ( !strcmp( arg, "ears"     ) ) return 17;
+  if ( !strcmp( arg, "eyes"     ) ) return 18;
+  if ( !strcmp( arg, "missile"  ) ) return 19;
+  if ( !strcmp( arg, "floating" ) ) return 20;
+  if ( !strcmp( arg, "over"     ) ) return 21;
+  if ( !strcmp( arg, "disguise" ) ) return 22;
   return 0;
 }
 	
@@ -383,16 +396,26 @@ void display_operand_table (CHAR_DATA *ch, int op_num)
   int cou;
   char opn[7][3] = {"eq", "ne", "su", "ge", "gt", "le", "lt"};
 
+  if ( op_num < 0 )
+     op_num = 0;
+  op_num = UMIN(op_num, MAX_NUM_OPS);
+
   pager_printf (ch, "OPERAND TABLE\n");
   for(cou=0; cou < op_num; cou++)
+  {
+     const char *fname = ( go_op[cou].field >= 0 && go_op[cou].field < GO_NUM_FIELDS )
+                         ? go_fd[go_op[cou].field].nam : "??";
+     const char *opname = ( go_op[cou].op >= 0 && go_op[cou].op < 7 )
+                          ? opn[go_op[cou].op] : "??";
      if ( go_op[cou].num)
         pager_printf (ch,
-        "%2d %-7s %2s %10ld\n", cou+1, go_fd[go_op[cou].field].nam,
-           opn[go_op[cou].op], go_op[cou].nval);
+        "%2d %-7s %2s %10d\n", cou+1, fname,
+           opname, go_op[cou].nval);
      else
         pager_printf (ch, "%2d %-7s %2s %s\n",
-        cou+1, go_fd[go_op[cou].field].nam,
-           opn[go_op[cou].op], go_op[cou].sval);
+        cou+1, fname,
+           opname, go_op[cou].sval);
+  }
 }
 
 /*
@@ -406,6 +429,12 @@ bool go_parse_operator (CHAR_DATA *ch, char *pch, int *op_num)
         OSAV0, OSAV1, OSAV2, OSAV3, OSAV4};  
   int  cou;
   char opstr [7][3] = { "=", "!=", "<>", ">=", ">", "<=", "<" };
+
+  if ( !op_num || *op_num < 0 || *op_num >= MAX_NUM_OPS )
+  {
+     pager_printf(ch, "Sorry. You have entered more than %d operands.\n", MAX_NUM_OPS);
+     return FALSE;
+  }
 
   go_op[*op_num].op = -1;
   for (cou=0; cou<7; cou++)
@@ -426,7 +455,8 @@ bool go_parse_operator (CHAR_DATA *ch, char *pch, int *op_num)
   if ( go_fd[ go_op[ *op_num ].field ].num )
   {
      go_op[*op_num].num  = TRUE;
-     if ( isdigit(*pch) )                        /* user entered number */
+     if ( isdigit(static_cast<unsigned char>(*pch))
+     ||   ( (*pch == '-' || *pch == '+') && isdigit(static_cast<unsigned char>(pch[1])) ) )
         go_op[*op_num].nval = atoi ( pch );
      else
      if ( go_op[*op_num].field == OTYPE )
@@ -434,12 +464,18 @@ bool go_parse_operator (CHAR_DATA *ch, char *pch, int *op_num)
      else
      if ( go_op[*op_num].field == OWEAR )
           go_op[*op_num].nval = owear_to_num( pch ); /* user entered token */
+     else
+     {
+          go_op[*op_num].nval = 0;
+          pager_printf(ch, "Invalid numeric value: %s\n", pch);
+          return FALSE;
+     }
   }
   else
   {
      go_op[*op_num].num  = FALSE;
 
-     if ( strlen(pch) > MAX_FIELD_LENGTH )
+     if ( strlen(pch) >= MAX_FIELD_LENGTH )
      {
         pager_printf(ch, "Char string is too long:%s\n", pch);
         return FALSE;
@@ -491,6 +527,11 @@ bool go_parse_operand( CHAR_DATA *ch, const std::string &arg_in, int *op_num, in
     {
         if ( !str_prefix( go_fd[cou].nam, arg.c_str() ) )
         {
+            if ( !op_num || *op_num < 0 || *op_num >= MAX_NUM_OPS )
+            {
+                pager_printf(ch, "Sorry. You have entered more than %d operands.\n", MAX_NUM_OPS);
+                return FALSE;
+            }
             std::string rest = arg.substr( strlen(go_fd[cou].nam) );
 
             go_op[*op_num].field = cou;
@@ -687,8 +728,8 @@ bool go_read_names( CHAR_DATA *ch, OBJ_DATA *po, GO_STRUCT *r, bool np_sw,
 {
   enum {CNAME, ONAME};
   OBJ_DATA *pt;
-  char *ground = "(none)";
-  char *ack    = "(error in data structure)";
+  static char ground[] = "(none)";
+  static char ack[] = "(error in data structure)";
 
 
   r->s[ONAME] = ( po->name ) ? po->name : ack;  /* set object name */
@@ -737,22 +778,15 @@ bool go_read( CHAR_DATA *ch, int dis_num, int op_num, int sor_ind,
   OBJ_DATA        *po;
   AFFECT_DATA     *pa;
   GO_STRUCT         r;                 /* input (physical record)         */
-  GO_STRUCT     a[MAX_DISPLAY_LINES];  /* array of records                */
-  GO_STRUCT    *p[MAX_DISPLAY_LINES];  /* array of pointers to records    */
-  bool ok_otype [255];                 /* we want to process these otypes */
+  std::vector<GO_STRUCT> records(MAX_DISPLAY_LINES);
+  std::vector<GO_STRUCT *> pointers(MAX_DISPLAY_LINES);
   int  tot_match = 0;                  /* total records matched           */
   bool res;                            /* result of a boolean exp         */
   int ind;			       /* indicates the sort field        */
 
-  memset(ok_otype, 0, sizeof ok_otype);
-  ok_otype[ITEM_LIGHT] = ok_otype[ITEM_WAND] = ok_otype[ITEM_KEY] = 
-  ok_otype[ITEM_STAFF] = ok_otype[ITEM_WEAPON] = ok_otype[ITEM_ARMOR] =
-  ok_otype[ITEM_CONTAINER] = TRUE; 
 
   for (po=first_object; po; po=po->next)   /* Loop through all objects   */
   {
-//    if ( !ok_otype[po->item_type] )      /* don't process useless stuff*/ // Commented this out so I can actually use this to find rare item types.
-//         continue;
       memset(&r, 0, sizeof r);
       if ( !go_read_names( ch, po, &r, np_sw, nm_sw, ng_sw ) )
          continue;
@@ -774,8 +808,8 @@ bool go_read( CHAR_DATA *ch, int dis_num, int op_num, int sor_ind,
      {
         if ( dis_num > 0 && tot_match < MAX_DISPLAY_LINES )
         {
-           a[ tot_match ] = r;
-           p[ tot_match ] = &a[ tot_match ];
+           records[tot_match] = r;
+           pointers[tot_match] = &records[tot_match];
         }
         tot_match++;
      }
@@ -783,39 +817,12 @@ bool go_read( CHAR_DATA *ch, int dis_num, int op_num, int sor_ind,
   ind = ( sor_ind<=OSAV4 ) ? sor_ind : sor_ind - OSAV4 - 1;
 
   if ( tot_match > 1 && dis_num > 0 )
-     go_sort( ch, p, ind, 0, UMIN((tot_match - 1), MAX_DISPLAY_LINES - 1),
+     go_sort( ch, pointers.data(), ind, 0, UMIN((tot_match - 1), MAX_DISPLAY_LINES - 1),
               ( sor_ind <= OSAV4 ), sor_dir );
 
-  go_display( ch, dis_num, tot_match, d2_sw, p );
+  go_display( ch, dis_num, tot_match, d2_sw, pointers.data() );
   return TRUE;
 }
-
-/*
-  The following code is intended to replace the static arrays "a" and "p"
-  with dynamically allocated ones. But I'm confused as to why. If the
-  user asks to display 10 lines, but selects 10,000 ... then the arrays
-  must be allocated to hold 10,000 so that they may be sorted. Once they
-  are sorted, we display only 10 - but - that don't change the fact that
-  we have to sort all 10,000 - sigh - arg! - Gorog
-
-  GO_STRUCT        *a;
-  GO_STRUCT       **p;
-  a = (GO_STRUCT  *) calloc( UMIN(dis_num, MAX_DISPLAY_LINES), sizeof *a);
-  if (!a)
-  {
-     pager_printf(ch, "Sorry. There is currently insufficient memory avail"
-     " to service your request. Try later or speak to a coder.\n");
-     return FALSE;
-  }
-  p = (GO_STRUCT **) calloc( UMIN(dis_num, MAX_DISPLAY_LINES), sizeof *p);
-  if (!p)
-  {
-     pager_printf(ch, "Sorry. There is currently insufficient memory avail"
-     " to service your request. Try later or speak to a coder.\n");
-     return FALSE;
-  }
-  free(p); free(a);
-*/
 
 void do_ogrub (CHAR_DATA *ch, char *argument)
 {
@@ -835,6 +842,7 @@ void do_ogrub (CHAR_DATA *ch, char *argument)
   bool do_sw    = FALSE;                   /* display operand table       */
   bool d2_sw    = FALSE;                   /* alternate display format    */
 
+  memset(go_op, 0, sizeof(go_op));
   go_init();                              /* initialize data structures  */
   argstr = one_argument (argstr, arg1);
   if ( arg1.empty() )
@@ -842,7 +850,7 @@ void do_ogrub (CHAR_DATA *ch, char *argument)
      pager_printf(ch, "Syntax: ogrub <num of lines> <sort order> [keywords] [operands].\n");
      return;
   }
-  if ( isdigit(*arg1.c_str()) )        /* first arg is number of display lines   */
+  if ( isdigit(static_cast<unsigned char>(*arg1.c_str())) )        /* first arg is number of display lines   */
      dis_num = strtoi(arg1);
   else
   {
@@ -862,7 +870,7 @@ void do_ogrub (CHAR_DATA *ch, char *argument)
      if ( op_num >= MAX_NUM_OPS )
      {
         pager_printf(ch, "Sorry. You have entered more than %d operands.\n",
-           MAX_NUM_OPS, MAX_NUM_OPS );
+           MAX_NUM_OPS );
         return;
      }
      if ( !go_parse_operand (ch, arg1, &op_num, &sor_ind, &sor_dir,
@@ -1042,6 +1050,12 @@ bool gr_parse_operator( CHAR_DATA *ch, const std::string &pch_in, int *op_num )
     std::string pch = pch_in;
     const char *opstr[7] = { "=", "!=", "<>", ">=", ">", "<=", "<" };
 
+    if ( !op_num || *op_num < 0 || *op_num >= MAX_NUM_OPS )
+    {
+        ch_printf( ch, "Sorry. You have entered more than %d operands.\n", MAX_NUM_OPS );
+        return FALSE;
+    }
+
     gr_op[*op_num].op = -1;
     for ( cou = 0; cou < 7; cou++ )
         if ( !str_prefix( opstr[cou], pch.c_str() ) )
@@ -1075,7 +1089,7 @@ bool gr_parse_operator( CHAR_DATA *ch, const std::string &pch_in, int *op_num )
     }
     else
     {
-        if ( pch.size() > MAX_FIELD_LENGTH )
+        if ( pch.size() >= MAX_FIELD_LENGTH )
         {
             ch_printf( ch, "Char string is too long:%s\n", pch.c_str() );
             return FALSE;
@@ -1102,6 +1116,11 @@ bool gr_parse_operand( CHAR_DATA *ch, const std::string &arg_in, bool *or_sw, in
     {
         if ( !str_prefix( gr_fd[cou - 1].nam, arg.c_str() ) )
         {
+            if ( !op_num || *op_num < 0 || *op_num >= MAX_NUM_OPS )
+            {
+                ch_printf( ch, "Sorry. You have entered more than %d operands.\n", MAX_NUM_OPS );
+                return FALSE;
+            }
             std::string rest = arg.substr( strlen( gr_fd[cou - 1].nam ) );
             gr_op[*op_num].field = cou - 1;            /* store field name */
 
@@ -1139,15 +1158,15 @@ void gr_read (
   {"   ", "CoE", "MC ", "NC ", "Pro", "PK ", "QC ", "Neo", "Cod", "AC ",
    "Sym", "VC "};
 
-#ifdef WIN32
-  if ( ( fp = fopen( "\\smaug\\grub.dat", "rb") ) == NULL )
-#else
-  if ( ( fp = fopen( "~/swr/grub.new", "r" ) ) == NULL )
-#endif
-     return;
-  fread( &r, sizeof(r), 1, fp);
-  while ( !feof(fp) )                       /* read each input record    */
+  if ( ( fp = fopen( SYSTEM_DIR "grub.dat", "rb" ) ) == NULL )
   {
+     ch_printf( ch, "Grub data file is not available.\n" );
+     return;
+  }
+  while ( fread( &r, sizeof(r), 1, fp ) == 1 ) /* read each input record    */
+  {
+     r.name[MAX_NAME_LENGTH - 1] = '\0';
+     r.site[MAX_SITE_LENGTH - 1] = '\0';
      if ( or_sw )                           /* is this an "or" search?   */
         res = gr_eval_or( r, op_num );
      else res = gr_eval_and( r, op_num );
@@ -1163,15 +1182,27 @@ void gr_read (
            title_sw = TRUE;
         }
         if ( tot_match <= dis_num )         /* print record if applicable */
+        {
+           size_t sex_idx  = static_cast<unsigned char>( r.sex );
+           size_t race_idx = static_cast<unsigned char>( r.race );
+           size_t cls_idx  = static_cast<unsigned char>( r.plrclass );
+           size_t clan_idx = static_cast<unsigned char>( r.clan );
+           size_t coun_idx = static_cast<unsigned char>( r.council );
+
+           char sex_ch = ( sex_idx < sizeof(sex) - 1 ) ? sex[sex_idx] : '?';
+           char cls_ch = ( cls_idx < sizeof(plrclass) - 1 ) ? plrclass[cls_idx] : '?';
+           const char *race_str = ( race_idx < sizeof(race) / sizeof(race[0]) ) ? race[race_idx] : "??";
+           const char *clan_str = ( clan_idx < sizeof(clan) / sizeof(clan[0]) ) ? clan[clan_idx] : "???";
+           const char *coun_str = ( coun_idx < sizeof(council) / sizeof(council[0]) ) ? council[coun_idx] : "???";
+           char pkill_ch = isprint( static_cast<unsigned char>( r.pkill ) ) ? r.pkill : '?';
+
            ch_printf(ch,
-  "%-12s %2hd %c %2s %c %3s %3s %5hd %11ld %-15s %6lu %c\n", 
-              r.name, r.level, sex[(unsigned char) r.sex],
-              race[(unsigned char) r.race], plrclass[(unsigned char) r.plrclass],
-              clan[(unsigned char) r.clan],
-              council[(unsigned char) r.council],
-              r.room, r.gold, r.site, r.last, r.pkill);
+  "%-12s %2d %c %2s %c %3s %3s %5hd %11ld %-15s %6ld %c\n",
+              r.name, static_cast<int>( r.level ), sex_ch,
+              race_str, cls_ch, clan_str, coun_str,
+              r.room, r.gold, r.site, r.last, pkill_ch);
+        }
      }
-     fread( &r, sizeof(r), 1, fp);
   }
   FCLOSE (fp);
   if (tot_match == 0 )
@@ -1203,6 +1234,7 @@ void do_grub (CHAR_DATA *ch, char *argument)
   int  dis_num;                             /* display lines requested      */
   int  op_num = 0;                          /* num of operands on cmd line  */
 
+  memset(gr_op, 0, sizeof(gr_op));
   gr_init();				    /* initialize data structures   */
   argstr = one_argument (argstr, arg1);
   if ( arg1.empty() )
@@ -1210,7 +1242,7 @@ void do_grub (CHAR_DATA *ch, char *argument)
      ch_printf(ch, "Syntax <max results> [keywords] [operands].\n");
      return;
   }
-  if ( isdigit(*arg1.c_str()) )        /* first argument is number of display lines */
+  if ( isdigit(static_cast<unsigned char>(*arg1.c_str())) )        /* first argument is number of display lines */
      dis_num = strtoi( arg1 );
   else
   {
@@ -1221,6 +1253,12 @@ void do_grub (CHAR_DATA *ch, char *argument)
   argstr = one_argument (argstr, arg1);
   while ( !arg1.empty() )
   {					        /* build the operand table */
+     if ( op_num >= MAX_NUM_OPS )
+     {
+        ch_printf(ch, "Sorry. You have entered more than %d operands.\n",
+           MAX_NUM_OPS);
+        return;
+     }
      if ( !gr_parse_operand (ch, arg1, &or_sw, &op_num) )
         return;
      argstr = one_argument (argstr, arg1);
@@ -1266,7 +1304,7 @@ for (hash = 0; hash < MAX_KEY_HASH; hash++) /* loop thru obj_index_hash */
          {
             if (++cou <= display_limit)
             pager_printf(ch, "%4d&R&w %5d&R&w %5d&R&w %s&R&w   %s&R&w\n",
-              cou, pObj->vnum, pObj->layers, pObj->wear_flags.bitset_to_string().c_str(), 
+              cou, pObj->vnum, pObj->layers, bitset_to_string(pObj->wear_flags, w_flags).c_str(), 
               pObj->short_descr);
           }
 }
@@ -1277,6 +1315,7 @@ for (hash = 0; hash < MAX_KEY_HASH; hash++) /* loop thru obj_index_hash */
 void zero_sort( int *vnums, int *count, int left, int right )
 {
 int i=left, j=right, swap, test;
+if ( left < 0 || left >= right ) return;
 test = count[(left + right) / 2];
 do {
    while (count[i] > test) i++;
@@ -1294,7 +1333,9 @@ if (i < right) zero_sort (vnums, count, i, right);
 
 void diag_visit_obj( CHAR_DATA *ch, OBJ_DATA *obj )
 {
-   pager_printf(ch, "***obj=%s\n", obj->name );
+   if ( !obj )
+      return;
+   pager_printf(ch, "***obj=%s\n", obj->name ? obj->name : "(null)" );
    if ( obj->first_content )
    {
       diag_visit_obj( ch, obj->first_content );
@@ -1401,6 +1442,9 @@ if ( !str_cmp(arg1, "time") )
 {
 struct tm *t = localtime(&current_time);
 
+if ( !t )
+   return;
+
 pager_printf( ch, "mon=%d day=%d hh=%d mm=%d\n", 
    t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min);
 return;
@@ -1450,7 +1494,7 @@ if (!str_cmp(arg1, "of")) {
       diagnose_help(ch);
       return;
       }
-   CREATE(freq, OBJ_INDEX_DATA *, num);           /* dynamic freq array */
+   CREATE_ARRAY(freq, OBJ_INDEX_DATA *, num);           /* dynamic freq array */
    for (cou = 0; cou < num; cou++)                /* initialize freq array */
        freq[cou] = NULL;                          /* to NULL pointers */
    for (cou = 0; cou < MAX_KEY_HASH; cou++) {     /* loop thru obj_index_hash */
@@ -1462,7 +1506,7 @@ if (!str_cmp(arg1, "of")) {
    ch_printf (ch, "\nObject Frequencies\n");  /* send results to char */
    for (cou = 0; cou < num && freq[cou]; cou++)
        ch_printf(ch, "%3d%8d%8d\n", cou+1,freq[cou]->vnum,freq[cou]->count);
-   DISPOSE(freq);
+   DISPOSE_ARRAY(freq);
    return;
    }
 
@@ -1536,10 +1580,10 @@ if (!str_cmp(arg1, "zero"))
                     count[zero_obj_ind - 1] = pObj->count;
                     }
                  }
-   if (zero_num > 0) {
-      zero_sort (vnums, count, 0, zero_obj_ind - 1);
-      zero_num = UMIN (zero_num, ZERO_MAX);
-      zero_num = UMIN (zero_num, zero_obj_ind);
+   int sort_cou = UMIN (zero_obj_ind, ZERO_MAX);
+   if (zero_num > 0 && sort_cou > 0) {
+      zero_sort (vnums, count, 0, sort_cou - 1);
+      zero_num = UMIN (zero_num, sort_cou);
       for (cou=0; cou<zero_num; cou++)
           ch_printf (ch, "%6d %6d %6d\n",
                      cou+1, vnums[cou], count[cou]);
@@ -1646,8 +1690,8 @@ if (!str_cmp(arg1, "mrc"))
    sh_int race, dis_num, vnum1, vnum2, dis_cou = 0;
 
    if ( arg2.empty() || arg3.empty() || arg4.empty() || arg5.empty()
-   ||  !isdigit(*arg2.c_str()) || !isdigit(*arg3.c_str()) || !isdigit(*arg4.c_str())
-   ||  !isdigit(*arg5.c_str()))
+   ||  !isdigit(static_cast<unsigned char>(*arg2.c_str())) || !isdigit(static_cast<unsigned char>(*arg3.c_str())) || !isdigit(static_cast<unsigned char>(*arg4.c_str()))
+   ||  !isdigit(static_cast<unsigned char>(*arg5.c_str())))
    {
       send_to_char( "Sorry. Invalid format.\n\n", ch);
       diagnose_help(ch);

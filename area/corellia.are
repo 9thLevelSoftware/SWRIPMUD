@@ -501,8 +501,7 @@ Niku, the weapons check girl will check in your weapons while your here
 0 0 0 0 1 1 0
 3 3 0 0 0 0 0 0
 0 0 0 0 0 0 0 0
-> hitprcnt_prog prog 20~
-time_prg 16
+> hitprcnt_prog 20~
 mpecho Niku leaves in a rush
 mpgoto 10556
 drop all
@@ -1783,10 +1782,10 @@ D3
 ~
 ~
 0 -1 10557
-> rand_prog ~
+> rand_prog 0~
 mpechoat $n Faro looks around nervously.
 ~
-> greet_prog ~
+> greet_prog 0~
 Faro looks up from his book.
 Faro says, "Hello got something for me to
 fix?"

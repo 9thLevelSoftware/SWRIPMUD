@@ -34,6 +34,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <vector>
 #include "mud.h"
 
 /* Defines by Narn for new mudprog parsing, used as 
@@ -105,37 +106,85 @@ void rprog_wordlist_check( const std::string& arg, CHAR_DATA *mob, CHAR_DATA *ac
 
 /* if you dont have these functions, you damn well should... */
 
+static bool mp_is_valid_char( const void *ptr )
+{
+   if ( !ptr )
+      return false;
+   for ( CHAR_DATA *wch = first_char; wch; wch = wch->next )
+      if ( wch == ptr )
+         return !char_died( wch );
+   return false;
+}
+
+static OBJ_DATA *mp_find_obj( const void *ptr )
+{
+   if ( !ptr )
+      return NULL;
+   for ( OBJ_DATA *wobj = first_object; wobj; wobj = wobj->next )
+      if ( wobj == ptr )
+         return wobj;
+   return NULL;
+}
+
+static bool mp_is_valid_obj( const void *ptr )
+{
+   OBJ_DATA *wobj = mp_find_obj( ptr );
+   return wobj != NULL && !obj_extracted( wobj );
+}
+
+static void set_supermob_name( const char *name )
+{
+   const char *prototype_name = supermob->pIndexData ? supermob->pIndexData->player_name : nullptr;
+   char *next_name = STRALLOC(name ? name : (prototype_name ? prototype_name : "supermob"));
+   if ( supermob->name )
+      STRFREE(supermob->name);
+   supermob->name = next_name;
+}
+
 void uphold_supermob( int *curr_serial, int serial, ROOM_INDEX_DATA **supermob_room, OBJ_DATA *true_supermob_obj ) // From Valcados/Samson/FUSS - DV added 3-13-26
 {
+   if ( !supermob || char_died(supermob) || (true_supermob_obj && obj_extracted(true_supermob_obj)) )
+      return;
+
    if( *curr_serial != serial )
    {
       char buf[128];
 
-      if( supermob->in_room != *supermob_room )
+      if( *supermob_room && supermob->in_room != *supermob_room )
       {
-         char_from_room( supermob );
+         if ( supermob->in_room )
+            char_from_room( supermob );
          char_to_room( supermob, *supermob_room );
       }
 
-      if( true_supermob_obj && true_supermob_obj != supermob_obj )
+      supermob_obj = true_supermob_obj;
+      set_supermob_name(!true_supermob_obj && *supermob_room ? (*supermob_room)->name : nullptr);
+      if( true_supermob_obj )
       {
-          supermob_obj = true_supermob_obj;
-          STRFREE( supermob->short_descr );
-          STRFREE( supermob->description );
-          supermob->short_descr = QUICKLINK( supermob_obj->short_descr );
-          snprintf( buf, 128, "Object #%d", supermob_obj->pIndexData->vnum );
+          if( supermob->short_descr )
+             STRFREE( supermob->short_descr );
+          if( supermob->description )
+             STRFREE( supermob->description );
+          supermob->short_descr = supermob_obj->short_descr ? QUICKLINK( supermob_obj->short_descr ) : STRALLOC( "" );
+          snprintf( buf, 128, "Object #%d", supermob_obj->pIndexData ? supermob_obj->pIndexData->vnum : 0 );
           supermob->description = STRALLOC( buf );
       }
       else
       {
-         if( !true_supermob_obj )
-            supermob_obj = NULL;
          if( supermob->short_descr )
             STRFREE( supermob->short_descr );
          if( supermob->description )
             STRFREE( supermob->description );
-         supermob->short_descr = QUICKLINK( (*supermob_room)->name );
-         snprintf( buf, 128, "Room #%d", (*supermob_room)->vnum );
+         if( *supermob_room )
+         {
+            supermob->short_descr = (*supermob_room)->name ? QUICKLINK( (*supermob_room)->name ) : STRALLOC( "" );
+            snprintf( buf, 128, "Room #%d", (*supermob_room)->vnum );
+         }
+         else
+         {
+            supermob->short_descr = STRALLOC( "" );
+            snprintf( buf, 128, "Room #0" );
+         }
          supermob->description = STRALLOC( buf );
       }
       *curr_serial = serial;
@@ -171,7 +220,7 @@ void init_supermob(GameContext *game)
    supermob->game = game;
    clear_char( supermob );
 
-   SET_BIT(supermob->act,ACT_IS_NPC);
+   BV_SET_BIT(supermob->act,ACT_IS_NPC);
    supermob->name 		= STRALLOC("supermob");
    supermob->short_descr 	= STRALLOC(".");
    supermob->long_descr 	= STRALLOC(".");
@@ -387,14 +436,14 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         }      
         switch ( cvar[1] )
         {
-            case 'i': chkchar = mob;               break;
-            case 'n': chkchar = actor;             break;
-            case 't': chkchar = (CHAR_DATA *)vo;   break;
-            case 'r': chkchar = rndm;              break;
-            case 'o': chkobj  = obj;               break;
-            case 'p': chkobj  = (OBJ_DATA *)vo;    break;
+            case 'i': chkchar = mp_is_valid_char( mob ) ? mob : NULL;             break;
+            case 'n': chkchar = mp_is_valid_char( actor ) ? actor : NULL;         break;
+            case 't': chkchar = mp_is_valid_char( vo ) ? (CHAR_DATA *)vo : NULL;  break;
+            case 'r': chkchar = mp_is_valid_char( rndm ) ? rndm : NULL;           break;
+            case 'o': chkobj  = mp_is_valid_obj( obj ) ? obj : NULL;              break;
+            case 'p': chkobj  = mp_is_valid_obj( vo ) ? (OBJ_DATA *)vo : NULL;    break;
             default:
-                progbugf( mob, "Bad argument '%c' to '%.800s'", cvar[0], chck.c_str() );
+                progbugf( mob, "Bad argument '%c' to '%.800s'", cvar[1], chck.c_str() );
                 return BERR;
         }
         if ( !chkchar && !chkobj )
@@ -412,7 +461,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
 
         if ( !idx )
         {
-            if ( !mob->in_room )
+            if ( !mob || !mob->in_room )
             {
                 progbug( "'economy' ifcheck: mob in NULL room with no room vnum "
                     "argument", mob );
@@ -423,7 +472,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         else
             room = get_room_index( idx );
 
-        if ( !room )
+        if ( !room || !room->area )
         {
             progbug( "Bad room vnum passed to 'economy'", mob );
             return BERR;
@@ -437,6 +486,12 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         int vnum = strtoi( cvar );
         CHAR_DATA *oMob;
 
+        if ( !mob || !mob->in_room )
+        {
+            progbug( "'mobinroom' ifcheck: mob in NULL room", mob );
+            return BERR;
+        }
+
         if ( vnum < 1 || vnum > 32767 )
         {
             progbug( "Bad vnum to 'mobinroom'", mob );
@@ -445,7 +500,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
 
         lhsvl = 0;
         for ( oMob = mob->in_room->first_person; oMob; oMob = oMob->next_in_room )
-            if ( IS_NPC( oMob ) && oMob->pIndexData->vnum == vnum )
+            if ( IS_NPC( oMob ) && oMob->pIndexData && oMob->pIndexData->vnum == vnum )
                 lhsvl++;
 
         rhsvl = strtoi( rval );
@@ -461,7 +516,11 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         MOB_INDEX_DATA *pMob;
 
         if ( chkchar )
+        {
+            if ( !IS_NPC( chkchar ) || !chkchar->pIndexData )
+                return FALSE;
             pMob = chkchar->pIndexData;
+        }
         else if ( !( pMob = get_mob_index( strtoi( cvar ) ) ) )
         {
             progbug( "TimesKilled ifcheck: bad vnum", mob );
@@ -474,6 +533,11 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         OBJ_DATA *pObj;
         int vnum = strtoi( cvar );
 
+        if ( !mob || !mob->in_room )
+        {
+            progbug( "OvnumHere: mob in NULL room", mob );
+            return BERR;
+        }
         if ( vnum < 1 || vnum > 32767 )
         {
             progbug( "OvnumHere: bad vnum", mob );
@@ -481,10 +545,10 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         }
         lhsvl = 0;
         for ( pObj = mob->first_carrying; pObj; pObj = pObj->next_content )
-            if ( can_see_obj( mob, pObj ) && pObj->pIndexData->vnum == vnum )
+            if ( can_see_obj( mob, pObj ) && pObj->pIndexData && pObj->pIndexData->vnum == vnum )
                 lhsvl += pObj->count;
         for ( pObj = mob->in_room->first_content; pObj; pObj = pObj->next_content )
-            if ( can_see_obj( mob, pObj ) && pObj->pIndexData->vnum == vnum )
+            if ( can_see_obj( mob, pObj ) && pObj->pIndexData && pObj->pIndexData->vnum == vnum )
                 lhsvl += pObj->count;
         rhsvl = is_number( rval.c_str() ) ? strtoi( rval ) : -1;
         if ( rhsvl < 1 )
@@ -498,6 +562,11 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         OBJ_DATA *pObj;
         int type;
 
+        if ( !mob || !mob->in_room )
+        {
+            progbug( "OtypeHere: mob in NULL room", mob );
+            return BERR;
+        }
         if ( is_number( cvar ) )
             type = strtoi( cvar );
         else
@@ -526,6 +595,11 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         OBJ_DATA *pObj;
         int vnum = strtoi( cvar );
 
+        if ( !mob || !mob->in_room )
+        {
+            progbug( "OvnumRoom: mob in NULL room", mob );
+            return BERR;
+        }
         if ( vnum < 1 || vnum > 32767 )
         {
             progbug( "OvnumRoom: bad vnum", mob );
@@ -533,7 +607,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         }
         lhsvl = 0;
         for ( pObj = mob->in_room->first_content; pObj; pObj = pObj->next_content )
-            if ( can_see_obj( mob, pObj ) && pObj->pIndexData->vnum == vnum )
+            if ( can_see_obj( mob, pObj ) && pObj->pIndexData && pObj->pIndexData->vnum == vnum )
                 lhsvl += pObj->count;
         rhsvl = is_number( rval ) ? strtoi( rval ) : -1;
         if ( rhsvl < 1 )
@@ -547,6 +621,11 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         OBJ_DATA *pObj;
         int type;
 
+        if ( !mob || !mob->in_room )
+        {
+            progbug( "OtypeRoom: mob in NULL room", mob );
+            return BERR;
+        }
         if ( is_number( cvar ) )
             type = strtoi( cvar );
         else
@@ -572,6 +651,8 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         OBJ_DATA *pObj;
         int vnum = strtoi( cvar );
 
+        if ( !mob )
+            return BERR;
         if ( vnum < 1 || vnum > 32767 )
         {
             progbug( "OvnumCarry: bad vnum", mob );
@@ -579,7 +660,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         }
         lhsvl = 0;
         for ( pObj = mob->first_carrying; pObj; pObj = pObj->next_content )
-            if ( can_see_obj( mob, pObj ) && pObj->pIndexData->vnum == vnum )
+            if ( can_see_obj( mob, pObj ) && pObj->pIndexData && pObj->pIndexData->vnum == vnum )
                 lhsvl += pObj->count;
         rhsvl = is_number( rval ) ? strtoi( rval ) : -1;
         if ( rhsvl < 1 )
@@ -593,6 +674,8 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         OBJ_DATA *pObj;
         int type;
 
+        if ( !mob )
+            return BERR;
         if ( is_number( cvar ) )
             type = strtoi( cvar );
         else
@@ -618,6 +701,8 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         OBJ_DATA *pObj;
         int vnum = strtoi( cvar );
 
+        if ( !mob )
+            return BERR;
         if ( vnum < 1 || vnum > 32767 )
         {
             progbug( "OvnumWear: bad vnum", mob );
@@ -626,7 +711,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         lhsvl = 0;
         for ( pObj = mob->first_carrying; pObj; pObj = pObj->next_content )
             if ( pObj->wear_loc != WEAR_NONE && can_see_obj( mob, pObj )
-            &&   pObj->pIndexData->vnum == vnum )
+            &&   pObj->pIndexData && pObj->pIndexData->vnum == vnum )
                 lhsvl += pObj->count;
         rhsvl = is_number( rval ) ? strtoi( rval ) : -1;
         if ( rhsvl < 1 )
@@ -640,6 +725,8 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         OBJ_DATA *pObj;
         int type;
 
+        if ( !mob )
+            return BERR;
         if ( is_number( cvar ) )
             type = strtoi( cvar );
         else
@@ -666,6 +753,8 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         OBJ_DATA *pObj;
         int vnum = strtoi( cvar );
 
+        if ( !mob )
+            return BERR;
         if ( vnum < 1 || vnum > 32767 )
         {
             progbug( "OvnumInv: bad vnum", mob );
@@ -674,7 +763,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         lhsvl = 0;
         for ( pObj = mob->first_carrying; pObj; pObj = pObj->next_content )
             if ( pObj->wear_loc == WEAR_NONE && can_see_obj( mob, pObj )
-            &&   pObj->pIndexData->vnum == vnum )
+            &&   pObj->pIndexData && pObj->pIndexData->vnum == vnum )
                 lhsvl += pObj->count;
         rhsvl = is_number( rval ) ? strtoi( rval ) : -1;
         if ( rhsvl < 1 )
@@ -688,6 +777,8 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         OBJ_DATA *pObj;
         int type;
 
+        if ( !mob )
+            return BERR;
         if ( is_number( cvar ) )
             type = strtoi( cvar );
         else
@@ -755,7 +846,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
             return IS_AFFECTED(chkchar, AFF_CHARM) ? TRUE : FALSE;
 
         if ( !str_cmp( chck, "isfollow" ) )
-            return ( chkchar->master != NULL && chkchar->master->in_room == chkchar->in_room );
+            return ( chkchar->master != NULL && chkchar->in_room != NULL && chkchar->master->in_room == chkchar->in_room );
 
         if ( !str_cmp( chck, "isaffected" ) )
         {
@@ -770,13 +861,18 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         }
 
         if ( !str_cmp( chck, "hitprcnt" ) )
-            return mprog_veval( chkchar->hit / chkchar->max_hit, opr, strtoi( rval ), mob );
+        {
+            if ( chkchar->max_hit <= 0 )
+                return FALSE;
+            return mprog_veval( static_cast<int>( ( 100LL * chkchar->hit ) / chkchar->max_hit ),
+                                opr, strtoi( rval ), mob );
+        }
 
         if ( !str_cmp( chck, "inroom" ) )
-            return mprog_veval( chkchar->in_room->vnum, opr, strtoi( rval ), mob );
+            return chkchar->in_room ? mprog_veval( chkchar->in_room->vnum, opr, strtoi( rval ), mob ) : FALSE;
 
         if ( !str_cmp( chck, "wasinroom" ) )
-            return mprog_veval( chkchar->was_in_room->vnum, opr, strtoi( rval ), mob );
+            return chkchar->was_in_room ? mprog_veval( chkchar->was_in_room->vnum, opr, strtoi( rval ), mob ) : FALSE;
 
         if ( !str_cmp( chck, "norecall" ) )
             return FALSE;
@@ -788,11 +884,11 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
             return mprog_veval( chkchar->position, opr, strtoi( rval ), mob );
 
         if ( !str_cmp( chck, "doingquest" ) )
-            return IS_NPC(actor) ? FALSE :
+            return ( IS_NPC(chkchar) || !chkchar->pcdata ) ? FALSE :
                 mprog_veval( chkchar->pcdata->quest_number, opr, strtoi( rval ), mob );
 
         if ( !str_cmp( chck, "ishelled" ) )
-            return IS_NPC(actor) ? FALSE :
+            return ( IS_NPC(chkchar) || !chkchar->pcdata ) ? FALSE :
                 mprog_veval( chkchar->pcdata->release_date, opr, strtoi( rval ), mob );
 
         if ( !str_cmp( chck, "level" ) )
@@ -805,6 +901,8 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         {
             if ( IS_NPC(chkchar) )
                 return mprog_seval( get_flag_name( npc_race, chkchar->race, MAX_NPC_RACE ), opr, rval, mob );
+            if ( chkchar->race < 0 || chkchar->race >= MAX_RACE )
+                return FALSE;
             return mprog_seval( race_table[chkchar->race].race_name, opr, rval, mob );
         }
 
@@ -819,16 +917,16 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
 
         if ( !str_cmp( chck, "clan" ) )
         {
-            if ( IS_NPC(chkchar) || !chkchar->pcdata->clan )
+            if ( IS_NPC(chkchar) || !chkchar->pcdata || !chkchar->pcdata->clan )
                 return FALSE;
             return mprog_seval( chkchar->pcdata->clan->name, opr, rval, mob );
         }
 
         if ( !str_cmp( chck, "class" ) )
         {
-            if ( IS_NPC(chkchar) )
+            if ( IS_NPC(chkchar) || chkchar->race < 0 || chkchar->race >= MAX_RACE )
                 return FALSE;
-            return mprog_seval( get_flag_name( npc_race, chkchar->race, MAX_NPC_RACE ), opr, rval, mob );
+            return mprog_seval( race_table[chkchar->race].race_name, opr, rval, mob );
         }
 
         if ( !str_cmp( chck, "council" ) || !str_cmp( chck, "senator" ) )
@@ -847,7 +945,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
 
         if ( !str_cmp( chck, "clantype" ) )
         {
-            if ( IS_NPC(chkchar) || !chkchar->pcdata->clan )
+            if ( IS_NPC(chkchar) || !chkchar->pcdata || !chkchar->pcdata->clan )
                 return FALSE;
             return mprog_veval( chkchar->pcdata->clan->clan_type, opr, strtoi( rval ), mob );
         }
@@ -885,7 +983,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
             }
 
             for ( pObj = chkchar->first_carrying; pObj; pObj = pObj->next_content )
-                if ( pObj->pIndexData->vnum == vnum )
+                if ( pObj->pIndexData && pObj->pIndexData->vnum == vnum )
                     return TRUE;
 
             return FALSE;
@@ -915,7 +1013,7 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
                 {
                     if ( pObj->wear_loc == iWear )
                     {
-                        if ( pObj->pIndexData->vnum == vnum )
+                        if ( pObj->pIndexData && pObj->pIndexData->vnum == vnum )
                             return TRUE;
                     }
                 }
@@ -951,17 +1049,17 @@ int mprog_do_ifcheck( const std::string &ifcheck, CHAR_DATA *mob, CHAR_DATA *act
         {
             if ( !IS_NPC(chkchar) )
                 return FALSE;
-            lhsvl = ( chkchar == mob ) ? chkchar->gold : chkchar->pIndexData->vnum;
+            lhsvl = ( chkchar == mob ) ? chkchar->gold : ( chkchar->pIndexData ? chkchar->pIndexData->vnum : 0 );
             return mprog_veval( lhsvl, opr, strtoi( rval ), mob );
         }
-        return mprog_veval( chkobj->pIndexData->vnum, opr, strtoi( rval ), mob );
+        return ( chkobj && chkobj->pIndexData ) ? mprog_veval( chkobj->pIndexData->vnum, opr, strtoi( rval ), mob ) : FALSE;
     }
 
     if ( !str_cmp( chck, "name" ) )
     {
         if ( chkchar )
-            return mprog_seval( chkchar->name, opr, rval, mob );
-        return mprog_seval( chkobj->name, opr, rval, mob );
+            return mprog_seval( chkchar->name ? chkchar->name : "", opr, rval, mob );
+        return chkobj ? mprog_seval( chkobj->name ? chkobj->name : "", opr, rval, mob ) : FALSE;
     }
 
     progbug( "Unknown ifcheck", mob );
@@ -998,8 +1096,22 @@ std::string mprog_translate( char ch, CHAR_DATA *mob, CHAR_DATA *actor,
     static const char *him_her[] = { "it", "him", "her" };
     static const char *his_her[] = { "its", "his", "her" };
 
-    CHAR_DATA *vict  = (CHAR_DATA *) vo;
-    OBJ_DATA  *v_obj = (OBJ_DATA  *) vo;
+    CHAR_DATA *vict  = mp_is_valid_char( vo ) ? (CHAR_DATA *) vo : NULL;
+    OBJ_DATA  *v_obj = mp_is_valid_obj( vo ) ? (OBJ_DATA *) vo : NULL;
+
+    if ( mob && !mp_is_valid_char( mob ) )
+        mob = NULL;
+    if ( actor && !mp_is_valid_char( actor ) )
+        actor = NULL;
+    if ( rndm && !mp_is_valid_char( rndm ) )
+        rndm = NULL;
+    if ( obj && !mp_is_valid_obj( obj ) )
+        obj = NULL;
+
+    auto safe_sex = []( const CHAR_DATA *c ) -> int
+    {
+        return ( c->sex >= 0 && c->sex <= 2 ) ? c->sex : 0;
+    };
 
     std::string t;
 
@@ -1032,7 +1144,7 @@ std::string mprog_translate( char ch, CHAR_DATA *mob, CHAR_DATA *actor,
         case 'n':
             if ( actor && !char_died( actor ) )
             {
-                one_argument( actor->name, t );
+                one_argument( actor->name ? actor->name : "", t );
                 if ( !IS_NPC( actor ) && !t.empty() )
                     t[0] = UPPER( t[0] );
             }
@@ -1063,7 +1175,7 @@ std::string mprog_translate( char ch, CHAR_DATA *mob, CHAR_DATA *actor,
         case 't':
             if ( vict && !char_died( vict ) )
             {
-                one_argument( vict->name, t );
+                one_argument( vict->name ? vict->name : "", t );
                 if ( !IS_NPC( vict ) && !t.empty() )
                     t[0] = UPPER( t[0] );
             }
@@ -1095,7 +1207,7 @@ std::string mprog_translate( char ch, CHAR_DATA *mob, CHAR_DATA *actor,
         case 'r':
             if ( rndm && !char_died( rndm ) )
             {
-                one_argument( rndm->name, t );
+                one_argument( rndm->name ? rndm->name : "", t );
                 if ( !IS_NPC( rndm ) && !t.empty() )
                     t[0] = UPPER( t[0] );
             }
@@ -1126,84 +1238,84 @@ std::string mprog_translate( char ch, CHAR_DATA *mob, CHAR_DATA *actor,
 
         case 'e':
             if ( actor && !char_died( actor ) )
-                t = can_see( mob, actor ) ? he_she[actor->sex] : "someone";
+                t = can_see( mob, actor ) ? he_she[safe_sex( actor )] : "someone";
             else
                 t = "it";
             break;
 
         case 'm':
             if ( actor && !char_died( actor ) )
-                t = can_see( mob, actor ) ? him_her[actor->sex] : "someone";
+                t = can_see( mob, actor ) ? him_her[safe_sex( actor )] : "someone";
             else
                 t = "it";
             break;
 
         case 's':
             if ( actor && !char_died( actor ) )
-                t = can_see( mob, actor ) ? his_her[actor->sex] : "someone's";
+                t = can_see( mob, actor ) ? his_her[safe_sex( actor )] : "someone's";
             else
                 t = "its'";
             break;
 
         case 'E':
             if ( vict && !char_died( vict ) )
-                t = can_see( mob, vict ) ? he_she[vict->sex] : "someone";
+                t = can_see( mob, vict ) ? he_she[safe_sex( vict )] : "someone";
             else
                 t = "it";
             break;
 
         case 'M':
             if ( vict && !char_died( vict ) )
-                t = can_see( mob, vict ) ? him_her[vict->sex] : "someone";
+                t = can_see( mob, vict ) ? him_her[safe_sex( vict )] : "someone";
             else
                 t = "it";
             break;
 
         case 'S':
             if ( vict && !char_died( vict ) )
-                t = can_see( mob, vict ) ? his_her[vict->sex] : "someone's";
+                t = can_see( mob, vict ) ? his_her[safe_sex( vict )] : "someone's";
             else
                 t = "its'";
             break;
 
         case 'j':
             if ( mob && !char_died( mob ) )
-                t = he_she[mob->sex];
+                t = he_she[safe_sex( mob )];
             else
                 t = "it";
             break;
 
         case 'k':
             if ( mob && !char_died( mob ) )
-                t = him_her[mob->sex];
+                t = him_her[safe_sex( mob )];
             else
                 t = "it";
             break;
 
         case 'l':
             if ( mob && !char_died( mob ) )
-                t = his_her[mob->sex];
+                t = his_her[safe_sex( mob )];
             else
                 t = "it";
             break;
 
         case 'J':
             if ( rndm && !char_died( rndm ) )
-                t = can_see( mob, rndm ) ? he_she[rndm->sex] : "someone";
+                t = can_see( mob, rndm ) ? he_she[safe_sex( rndm )] : "someone";
             else
                 t = "it";
             break;
 
         case 'K':
             if ( rndm && !char_died( rndm ) )
-                t = can_see( mob, rndm ) ? him_her[rndm->sex] : "someone's";
+                t = can_see( mob, rndm ) ? him_her[safe_sex( rndm )] : "someone";
             else
-                t = "its'";
+                t = "it";
             break;
 
         case 'L':
             if ( rndm && !char_died( rndm ) )
-                t = can_see( mob, rndm ) ? his_her[rndm->sex] : "someone";
+                t = can_see( mob, rndm ) ? his_her[safe_sex( rndm )] : "someone's";
             else
                 t = "its";
             break;
@@ -1211,10 +1323,10 @@ std::string mprog_translate( char ch, CHAR_DATA *mob, CHAR_DATA *actor,
         case 'o':
             if ( obj && !obj_extracted( obj ) )
             {
-                if ( !can_see_obj( mob, obj ) )
+                if ( !mob || !can_see_obj( mob, obj ) )
                     t = "something";
                 else
-                    one_argument( obj->name, t );
+                    one_argument( obj->name ? obj->name : "", t );
             }
             else
                 t = "something";
@@ -1222,7 +1334,7 @@ std::string mprog_translate( char ch, CHAR_DATA *mob, CHAR_DATA *actor,
 
         case 'O':
             if ( obj && !obj_extracted( obj ) )
-                t = can_see_obj( mob, obj ) ? ( obj->short_descr ? obj->short_descr : "something" ) : "something";
+                t = ( mob && can_see_obj( mob, obj ) ) ? ( obj->short_descr ? obj->short_descr : "something" ) : "something";
             else
                 t = "something";
             break;
@@ -1230,37 +1342,30 @@ std::string mprog_translate( char ch, CHAR_DATA *mob, CHAR_DATA *actor,
         case 'p':
             if ( v_obj && !obj_extracted( v_obj ) )
             {
-                if ( !can_see_obj( mob, v_obj ) )
+                if ( !mob || !can_see_obj( mob, v_obj ) )
                     t = "something";
                 else
-                    one_argument( v_obj->name, t );
+                    one_argument( v_obj->name ? v_obj->name : "", t );
             }
             else
                 t = "something";
             break;
 
         case 'P':
-            if ( v_obj && !obj_extracted( v_obj ) )
-            {
-                if ( !can_see_obj( mob, v_obj ) )
-                    t = "something";
-                else
-                    one_argument( v_obj->name, t );
-            }
-            else
-                t = "something";
+            t = v_obj && !obj_extracted(v_obj) && mob && can_see_obj(mob, v_obj) && v_obj->short_descr
+                ? v_obj->short_descr : "something";
             break;
 
         case 'a':
             if ( obj && !obj_extracted( obj ) )
-                t = aoran( obj->name );
+                t = aoran( obj->name ? obj->name : "" );
             else
                 t = "a";
             break;
 
         case 'A':
             if ( v_obj && !obj_extracted( v_obj ) )
-                t = aoran( v_obj->name );
+                t = aoran( v_obj->name ? v_obj->name : "" );
             else
                 t = "a";
             break;
@@ -1304,6 +1409,9 @@ void mprog_driver( const std::string &com_list, CHAR_DATA *mob, CHAR_DATA *actor
     OBJ_DATA *true_supermob_obj;
     bool rprog_oprog = ( mob == supermob );
 
+    if ( !mob || !mob->in_room )
+        return;
+
     if ( rprog_oprog )
     {
         serial++;
@@ -1334,7 +1442,7 @@ void mprog_driver( const std::string &com_list, CHAR_DATA *mob, CHAR_DATA *actor
     /* Make sure all ifstate bools are set to FALSE */
     for ( iflevel = 0; iflevel < MAX_IFS; iflevel++ )
     {
-        for ( count = 0; count < DO_ELSE; count++ )
+        for ( count = 0; count <= DO_ELSE; count++ )
             ifstate[iflevel][count] = FALSE;
     }
 
@@ -1371,7 +1479,7 @@ void mprog_driver( const std::string &com_list, CHAR_DATA *mob, CHAR_DATA *actor
 
     if ( single_step )
     {
-        if ( mob->mpscriptpos > (int) tmpcmndlst.size() )
+        if ( mob->mpscriptpos < 0 || mob->mpscriptpos > (int) tmpcmndlst.size() )
             mob->mpscriptpos = 0;
         else
             command_list = tmpcmndlst.substr( mob->mpscriptpos );
@@ -1412,8 +1520,19 @@ void mprog_driver( const std::string &com_list, CHAR_DATA *mob, CHAR_DATA *actor
             || ( ifstate[iflevel][IN_ELSE] && !ifstate[iflevel][DO_ELSE] ),
             ( ignorelevel > 0 ) );
 
+        if ( char_died(mob) || (true_supermob_obj && obj_extracted(true_supermob_obj)) )
+        {
+            --prog_nest;
+            return;
+        }
         if ( rprog_oprog )
             uphold_supermob( &curr_serial, serial, &supermob_room, true_supermob_obj );
+
+        if ( !mob->in_room )
+        {
+            --prog_nest;
+            return;
+        }
 
         /* Script prog support  -Thoric */
         if ( single_step )
@@ -1745,6 +1864,8 @@ bool mprog_keyword_check( const std::string &argu, const std::string &argl )
     if ( arglist.size() >= 2 && arglist[0] == 'p' && arglist[1] == ' ' )
     {
         arglist.erase( 0, 2 );
+        if ( arglist.empty() )
+            return FALSE;
 
         size_t search_pos = 0;
         while ( ( search_pos = arg.find( arglist, search_pos ) ) != std::string::npos )
@@ -1782,68 +1903,19 @@ bool mprog_keyword_check( const std::string &argu, const std::string &argl )
 void mprog_wordlist_check( const std::string &arg, CHAR_DATA *mob, CHAR_DATA *actor,
                            OBJ_DATA *obj, void *vo, int type )
 {
-    std::string temp1;
-    std::string temp2;
-    std::string word;
-    MPROG_DATA *mprg;
-    std::string list;
-    size_t start;
-    std::string dupl;
+    if ( !mob || !mob->pIndexData || !mob->in_room )
+        return;
 
-    auto is_word_boundary = []( const std::string &s, size_t pos, size_t len ) -> bool
+    ROOM_INDEX_DATA *room = mob->in_room;
+    for ( MPROG_DATA *mprg = mob->pIndexData->mudprogs; mprg; mprg = mprg->next )
     {
-        bool left_ok = ( pos == 0 || s[pos - 1] == ' ' );
-        size_t right = pos + len;
-        bool right_ok = ( right >= s.size()
-                       || s[right] == ' '
-                       || s[right] == '\n'
-                       || s[right] == '\r' );
-        return left_ok && right_ok;
-    };
-
-    for ( mprg = mob->pIndexData->mudprogs; mprg; mprg = mprg->next )
-    {
-        if ( !( mprg->type & type ) )
+        if ( !(mprg->type & type) || !mprog_keyword_check(arg, mprg->arglist ? mprg->arglist : "") )
             continue;
 
-        temp1 = strlower( mprg->arglist ? mprg->arglist : "" );
-        list = temp1;
-
-        temp2 = strlower( arg );
-        dupl = temp2;
-
-        if ( list.size() >= 2 && list[0] == 'p' && list[1] == ' ' )
-        {
-            list.erase( 0, 2 );
-
-            size_t search_pos = 0;
-            while ( ( start = dupl.find( list, search_pos ) ) != std::string::npos )
-            {
-                if ( is_word_boundary( dupl, start, list.size() ) )
-                {
-                    mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
-                    break;
-                }
-                search_pos = start + 1;
-            }
-        }
-        else
-        {
-            list = one_argument( list, word );
-            for ( ; !word.empty(); list = one_argument( list, word ) )
-            {
-                size_t search_pos = 0;
-                while ( ( start = dupl.find( word, search_pos ) ) != std::string::npos )
-                {
-                    if ( is_word_boundary( dupl, start, word.size() ) )
-                    {
-                        mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
-                        break;
-                    }
-                    search_pos = start + 1;
-                }
-            }
-        }
+        mprog_driver(mprg->comlist ? mprg->comlist : "", mob, actor, obj, vo, FALSE);
+        if ( char_died(mob) || mob->in_room != room
+        ||   (actor && char_died(actor)) || (obj && obj_extracted(obj)) )
+            return;
     }
 }
 
@@ -1852,11 +1924,16 @@ void mprog_percent_check( CHAR_DATA *mob, CHAR_DATA *actor, OBJ_DATA *obj,
 {
  MPROG_DATA * mprg;
 
+ if ( !mob || !mob->pIndexData )
+   return;
+
  for ( mprg = mob->pIndexData->mudprogs; mprg; mprg = mprg->next )
    if ( ( mprg->type & type )
-       && ( number_percent( ) <= atoi( mprg->arglist ) ) )
+       && ( number_percent( ) <= atoi( mprg->arglist ? mprg->arglist : "0" ) ) )
      {
-       mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
+       mprog_driver( mprg->comlist ? mprg->comlist : "", mob, actor, obj, vo, FALSE );
+       if ( char_died( mob ) )
+         return;
        if ( type != GREET_PROG && type != ALL_GREET_PROG )
 	 break;
      }
@@ -1871,9 +1948,12 @@ void mprog_time_check( CHAR_DATA *mob, CHAR_DATA *actor, OBJ_DATA *obj,
  MPROG_DATA * mprg;
  bool       trigger_time;
 
+ if ( !mob || !mob->pIndexData )
+   return;
+
  for ( mprg = mob->pIndexData->mudprogs; mprg; mprg = mprg->next )
    {
-     trigger_time = ( time_info.hour == atoi( mprg->arglist ) );     
+     trigger_time = ( mprg->arglist && time_info.hour == atoi( mprg->arglist ) );     
 
      if ( !trigger_time )
      {
@@ -1883,10 +1963,12 @@ void mprog_time_check( CHAR_DATA *mob, CHAR_DATA *actor, OBJ_DATA *obj,
      }
 
      if ( ( mprg->type & type )
-       && ( ( !mprg->triggered ) || ( mprg->type == HOUR_PROG ) ) )
+       && ( ( !mprg->triggered ) || ( mprg->type & HOUR_PROG ) ) )
      {
        mprg->triggered = TRUE;
-       mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
+       mprog_driver( mprg->comlist ? mprg->comlist : "", mob, actor, obj, vo, FALSE );
+       if ( char_died( mob ) )
+         return;
      }
    }
  return;
@@ -1922,18 +2004,21 @@ void mprog_act_trigger( const std::string &buf, CHAR_DATA *mob, CHAR_DATA *ch,
     MPROG_DATA *mprg;
     bool found = FALSE;
 
+    if ( !mob || !mob->pIndexData )
+        return;
+
     if ( IS_NPC( mob )
     &&   IS_SET( mob->pIndexData->progtypes, ACT_PROG ) )
     {
         /* Don't let a mob trigger itself, nor one instance of a mob
            trigger another instance. */
-        if ( IS_NPC( ch ) && ch->pIndexData == mob->pIndexData )
+        if ( ch && IS_NPC( ch ) && ch->pIndexData == mob->pIndexData )
             return;
 
         /* make sure this is a matching trigger */
         for ( mprg = mob->pIndexData->mudprogs; mprg; mprg = mprg->next )
             if ( mprg->type & ACT_PROG
-            &&   mprog_keyword_check( buf, mprg->arglist ) )
+            &&   mprog_keyword_check( buf, mprg->arglist ? mprg->arglist : "" ) )
             {
                 found = TRUE;
                 break;
@@ -1943,11 +2028,7 @@ void mprog_act_trigger( const std::string &buf, CHAR_DATA *mob, CHAR_DATA *ch,
             return;
 
         CREATE( tmp_act, MPROG_ACT_LIST, 1 );
-        if ( mob->mpactnum > 0 )
-            tmp_act->next = mob->mpact;
-        else
-            tmp_act->next = NULL;
-
+        tmp_act->next   = mob->mpact;
         mob->mpact      = tmp_act;
         mob->mpact->buf = str_dup( buf );
         mob->mpact->ch  = ch;
@@ -1961,32 +2042,37 @@ void mprog_act_trigger( const std::string &buf, CHAR_DATA *mob, CHAR_DATA *ch,
 
 void mprog_bribe_trigger( CHAR_DATA *mob, CHAR_DATA *ch, int amount )
 {
-
-  char        buf[ MAX_STRING_LENGTH ];
   MPROG_DATA *mprg;
   OBJ_DATA   *obj;
+
+  if ( !mob || !mob->pIndexData )
+      return;
 
   if ( IS_NPC( mob )
       && ( mob->pIndexData->progtypes & BRIBE_PROG ) )
     {
       /* Don't let a mob trigger itself, nor one instance of a mob
          trigger another instance. */
-      if ( IS_NPC( ch ) && ch->pIndexData == mob->pIndexData )
+      if ( ch && IS_NPC( ch ) && ch->pIndexData == mob->pIndexData )
         return;
 
-      obj = create_object( get_obj_index( OBJ_VNUM_MONEY_SOME ), 0 );
-      SPRINTF_RUNTIME( buf, obj->short_descr, amount );
-      STRFREE( obj->short_descr );
-      obj->short_descr = STRALLOC( buf );
+      OBJ_INDEX_DATA *money_idx = get_obj_index( OBJ_VNUM_MONEY_SOME );
+      if ( !money_idx )
+        return;
+
+      obj = create_object( money_idx, 0 );
+      if ( !obj->short_descr )
+        obj->short_descr = STRALLOC("%d credits");
+      format_object_description(obj->short_descr, 'd', std::to_string(amount));
       obj->value[0]    = amount;
       obj = obj_to_char( obj, mob );
       mob->gold -= amount;
 
       for ( mprg = mob->pIndexData->mudprogs; mprg; mprg = mprg->next )
 	if ( ( mprg->type & BRIBE_PROG )
-	&& ( amount >= atoi( mprg->arglist ) ) )
+	&& ( amount >= atoi( mprg->arglist ? mprg->arglist : "0" ) ) )
 	{
-	    mprog_driver( mprg->comlist, mob, ch, obj, NULL, FALSE );
+	    mprog_driver( mprg->comlist ? mprg->comlist : "", mob, ch, obj, NULL, FALSE );
 	    break;
 	}
     }
@@ -1997,6 +2083,9 @@ void mprog_bribe_trigger( CHAR_DATA *mob, CHAR_DATA *ch, int amount )
 
 void mprog_death_trigger( CHAR_DATA *killer, CHAR_DATA *mob )
 {
+ if ( !mob || !mob->pIndexData )
+   return;
+
  if ( IS_NPC( mob ) && killer != mob
      && ( mob->pIndexData->progtypes & DEATH_PROG ) )
    {
@@ -2008,6 +2097,8 @@ void mprog_death_trigger( CHAR_DATA *killer, CHAR_DATA *mob )
 
 void mprog_entry_trigger( CHAR_DATA *mob )
 {
+ if ( !mob || !mob->pIndexData )
+   return;
 
  if ( IS_NPC( mob )
      && ( mob->pIndexData->progtypes & ENTRY_PROG ) )
@@ -2019,6 +2110,8 @@ void mprog_entry_trigger( CHAR_DATA *mob )
 
 void mprog_fight_trigger( CHAR_DATA *mob, CHAR_DATA *ch )
 {
+ if ( !mob || !mob->pIndexData )
+   return;
 
  if ( IS_NPC( mob )
      && ( mob->pIndexData->progtypes & FIGHT_PROG ) )
@@ -2034,24 +2127,28 @@ void mprog_give_trigger( CHAR_DATA *mob, CHAR_DATA *ch, OBJ_DATA *obj )
  std::string        buf;
  MPROG_DATA *mprg;
 
+ if ( !mob || !mob->pIndexData || !obj )
+   return;
+
  if ( IS_NPC( mob )
      && ( mob->pIndexData->progtypes & GIVE_PROG ) )
  {
   /* Don't let a mob trigger itself, nor one instance of a mob
      trigger another instance. */
-  if ( IS_NPC( ch ) && ch->pIndexData == mob->pIndexData )
+  if ( ch && IS_NPC( ch ) && ch->pIndexData == mob->pIndexData )
     return; 
 
    for ( mprg = mob->pIndexData->mudprogs; mprg; mprg = mprg->next )
      {
-       one_argument( mprg->arglist, buf );
+       const char *arglist = mprg->arglist ? mprg->arglist : "";
+       one_argument( arglist, buf );
 
        if ( ( mprg->type & GIVE_PROG )
-	   && ( ( !str_cmp( obj->name, mprg->arglist ) )
+	   && ( ( !str_cmp( obj->name ? obj->name : "", arglist ) )
 	       || ( !str_cmp( "all", buf ) ) ) )
 	 {
 
-	   mprog_driver( mprg->comlist, mob, ch, obj, NULL, FALSE );
+	   mprog_driver( mprg->comlist ? mprg->comlist : "", mob, ch, obj, NULL, FALSE );
 	   break;
 	 }
      }
@@ -2061,30 +2158,42 @@ void mprog_give_trigger( CHAR_DATA *mob, CHAR_DATA *ch, OBJ_DATA *obj )
 
 void mprog_greet_trigger( CHAR_DATA *ch )
 {
- CHAR_DATA *vmob, *vmob_next;
+ CHAR_DATA *vmob;
+ ROOM_INDEX_DATA *start_room;
+ std::vector<CHAR_DATA *> mobs;
+
+ if ( !ch || !ch->in_room )
+   return;
 
 #ifdef DEBUG
- char buf[MAX_STRING_LENGTH];
- log_printf( "mprog_greet_trigger -> %s", ch->name );
+ log_printf( "mprog_greet_trigger -> %s", ch->name ? ch->name : "(null)" );
 #endif
 
- for ( vmob = ch->in_room->first_person; vmob; vmob = vmob_next )
+ start_room = ch->in_room;
+ for ( vmob = start_room->first_person; vmob; vmob = vmob->next_in_room )
+   mobs.push_back( vmob );
+
+ for ( CHAR_DATA *cand : mobs )
  {
-   vmob_next = vmob->next_in_room;
-   if ( !IS_NPC( vmob )
-        || vmob->fighting
-        || !IS_AWAKE( vmob ) )
+   if ( char_died( ch ) || ch->in_room != start_room )
+     break;
+   if ( !mp_is_valid_char( cand ) || cand->in_room != start_room )
+     continue;
+   if ( !IS_NPC( cand )
+        || !cand->pIndexData
+        || cand->fighting
+        || !IS_AWAKE( cand ) )
      continue;
 
   /* Don't let a mob trigger itself, nor one instance of a mob
      trigger another instance. */
-  if ( IS_NPC( ch ) && ch->pIndexData == vmob->pIndexData )
+  if ( IS_NPC( ch ) && ch->pIndexData == cand->pIndexData )
     continue;
 
-   if ( vmob->pIndexData->progtypes & GREET_PROG )
-     mprog_percent_check( vmob, ch, NULL, NULL, GREET_PROG );
-   else if ( vmob->pIndexData->progtypes & ALL_GREET_PROG )
-     mprog_percent_check(vmob,ch,NULL,NULL,ALL_GREET_PROG);
+   if ( cand->pIndexData->progtypes & GREET_PROG )
+     mprog_percent_check( cand, ch, NULL, NULL, GREET_PROG );
+   else if ( cand->pIndexData->progtypes & ALL_GREET_PROG )
+     mprog_percent_check( cand, ch, NULL, NULL, ALL_GREET_PROG );
  }
  return;
 
@@ -2095,13 +2204,15 @@ void mprog_hitprcnt_trigger( CHAR_DATA *mob, CHAR_DATA *ch)
 
  MPROG_DATA *mprg;
 
- if ( IS_NPC( mob )
-     && ( mob->pIndexData->progtypes & HITPRCNT_PROG ) )
+ if ( !mob || !mob->pIndexData || !IS_NPC( mob ) || mob->max_hit <= 0 )
+   return;
+
+ if ( mob->pIndexData->progtypes & HITPRCNT_PROG )
    for ( mprg = mob->pIndexData->mudprogs; mprg; mprg = mprg->next )
      if ( ( mprg->type & HITPRCNT_PROG )
-	 && ( ( 100*mob->hit / mob->max_hit ) < atoi( mprg->arglist ) ) )
+	 && ( static_cast<int>( ( 100LL * mob->hit ) / mob->max_hit ) < atoi( mprg->arglist ? mprg->arglist : "0" ) ) )
        {
-	 mprog_driver( mprg->comlist, mob, ch, NULL, NULL, FALSE );
+	 mprog_driver( mprg->comlist ? mprg->comlist : "", mob, ch, NULL, NULL, FALSE );
 	 break;
        }
 
@@ -2111,6 +2222,9 @@ void mprog_hitprcnt_trigger( CHAR_DATA *mob, CHAR_DATA *ch)
 
 void mprog_random_trigger( CHAR_DATA *mob )
 {
+  if ( !mob || !mob->pIndexData )
+    return;
+
   if ( mob->pIndexData->progtypes & RAND_PROG)
     mprog_percent_check(mob,NULL,NULL,NULL,RAND_PROG);
 
@@ -2120,6 +2234,9 @@ void mprog_random_trigger( CHAR_DATA *mob )
 
 void mprog_time_trigger( CHAR_DATA *mob )
 {
+  if ( !mob || !mob->pIndexData )
+    return;
+
   if ( mob->pIndexData->progtypes & TIME_PROG)
        mprog_time_check(mob,NULL,NULL,NULL,TIME_PROG); 
   return;
@@ -2127,6 +2244,9 @@ void mprog_time_trigger( CHAR_DATA *mob )
 
 void mprog_hour_trigger( CHAR_DATA *mob )
 {
+  if ( !mob || !mob->pIndexData )
+    return;
+
   if ( mob->pIndexData->progtypes & HOUR_PROG)
        mprog_time_check(mob,NULL,NULL,NULL,HOUR_PROG); 
   return;
@@ -2135,53 +2255,87 @@ void mprog_hour_trigger( CHAR_DATA *mob )
 void mprog_speech_trigger( const std::string &txt, CHAR_DATA *actor )
 {
     CHAR_DATA *vmob;
+    ROOM_INDEX_DATA *start_room;
+    std::vector<CHAR_DATA *> mobs;
 
-    for ( vmob = actor->in_room->first_person; vmob; vmob = vmob->next_in_room )
+    if ( !actor || !actor->in_room )
+        return;
+
+    start_room = actor->in_room;
+    for ( vmob = start_room->first_person; vmob; vmob = vmob->next_in_room )
+        mobs.push_back( vmob );
+
+    for ( CHAR_DATA *cand : mobs )
     {
-        if ( IS_NPC( vmob ) && ( vmob->pIndexData->progtypes & SPEECH_PROG ) )
+        if ( char_died( actor ) || actor->in_room != start_room )
+            break;
+        if ( !mp_is_valid_char( cand ) || cand->in_room != start_room )
+            continue;
+        if ( IS_NPC( cand ) && cand->pIndexData && ( cand->pIndexData->progtypes & SPEECH_PROG ) )
         {
-            if ( IS_NPC( actor ) && actor->pIndexData == vmob->pIndexData )
+            if ( IS_NPC( actor ) && actor->pIndexData == cand->pIndexData )
                 continue;
 
-            mprog_wordlist_check( txt, vmob, actor, NULL, NULL, SPEECH_PROG );
+            mprog_wordlist_check( txt, cand, actor, NULL, NULL, SPEECH_PROG );
         }
     }
 
     return;
 }
 
-void mprog_script_trigger( CHAR_DATA *mob )
+bool mprog_script_trigger( CHAR_DATA *mob )
 {
     MPROG_DATA * mprg;
+    bool ran = false;
+
+    if ( !mob || !mob->pIndexData )
+      return false;
 
     if ( mob->pIndexData->progtypes & SCRIPT_PROG)
       for ( mprg = mob->pIndexData->mudprogs; mprg; mprg = mprg->next )
 	if ( ( mprg->type & SCRIPT_PROG ) )
 	{
-	  if ( mprg->arglist[0] == '\0'
+	  const char *arglist = mprg->arglist ? mprg->arglist : "";
+	  if ( arglist[0] == '\0'
 	  ||   mob->mpscriptpos != 0
-	  ||   atoi( mprg->arglist ) == time_info.hour )
-	    mprog_driver( mprg->comlist, mob, NULL, NULL, NULL, TRUE );
+	  ||   atoi( arglist ) == time_info.hour )
+	  {
+	    ran = true;
+	    ROOM_INDEX_DATA *room = mob->in_room;
+	    mprog_driver( mprg->comlist ? mprg->comlist : "", mob, NULL, NULL, NULL, TRUE );
+	    if ( char_died(mob) || mob->in_room != room )
+	      return true;
+	  }
 	}
-    return;
+    return ran;
 }
 
 void oprog_script_trigger( OBJ_DATA *obj )
 {
     MPROG_DATA * mprg;
 
+    if ( !obj || !obj->pIndexData )
+      return;
+
     if ( obj->pIndexData->progtypes & SCRIPT_PROG)
       for ( mprg = obj->pIndexData->mudprogs; mprg; mprg = mprg->next )
 	if ( ( mprg->type & SCRIPT_PROG ) )
 	{
-	  if ( mprg->arglist[0] == '\0'
+	  const char *arglist = mprg->arglist ? mprg->arglist : "";
+	  if ( arglist[0] == '\0'
 	  ||   obj->mpscriptpos != 0
-	  ||   atoi( mprg->arglist ) == time_info.hour )
+	  ||   atoi( arglist ) == time_info.hour )
 	  {
-	     set_supermob( obj->game, obj );
-	     mprog_driver( mprg->comlist, supermob, NULL, NULL, NULL, TRUE );
-	     obj->mpscriptpos = supermob->mpscriptpos;
-	     release_supermob( obj->game);
+	     GameContext *game = obj->game;
+	     set_supermob( game, obj );
+	     if ( !supermob )
+	       return;
+	     mprog_driver( mprg->comlist ? mprg->comlist : "", supermob, NULL, NULL, NULL, TRUE );
+	     if ( !obj_extracted( obj ) )
+	       obj->mpscriptpos = supermob->mpscriptpos;
+	     release_supermob( game );
+	     if ( obj_extracted( obj ) )
+	       return;
 	  }
 	}
     return;
@@ -2191,16 +2345,22 @@ void rprog_script_trigger( ROOM_INDEX_DATA *room )
 {
     MPROG_DATA * mprg;
 
+    if ( !room )
+      return;
+
     if ( room->progtypes & SCRIPT_PROG)
       for ( mprg = room->mudprogs; mprg; mprg = mprg->next )
 	if ( ( mprg->type & SCRIPT_PROG ) )
 	{
-	  if ( mprg->arglist[0] == '\0'
+	  const char *arglist = mprg->arglist ? mprg->arglist : "";
+	  if ( arglist[0] == '\0'
 	  ||   room->mpscriptpos != 0
-	  ||   atoi( mprg->arglist ) == time_info.hour )
+	  ||   atoi( arglist ) == time_info.hour )
 	  {
 	     rset_supermob( room );
-	     mprog_driver( mprg->comlist, supermob, NULL, NULL, NULL, TRUE );
+	     if ( !supermob )
+	       return;
+	     mprog_driver( mprg->comlist ? mprg->comlist : "", supermob, NULL, NULL, NULL, TRUE );
 	     room->mpscriptpos = supermob->mpscriptpos;
 	     release_supermob(room->game);
 	  }
@@ -2222,12 +2382,13 @@ void set_supermob( GameContext *game, OBJ_DATA *obj)
   if ( !supermob )
     supermob = create_mobile(game, get_mob_index( MOB_VNUM_SUPERMOB ));
 
+  if ( !supermob )
+    return;
+
 //  mob = supermob;   /* debugging */
 
-  if(!obj)
+  if( !obj || obj_extracted(obj) )
      return;
-
-  supermob_obj = obj;
 
   for ( in_obj = obj; in_obj->in_obj; in_obj = in_obj->in_obj )
     ;
@@ -2238,36 +2399,52 @@ void set_supermob( GameContext *game, OBJ_DATA *obj)
   }
   else
   {
-      room = obj->in_room;
+      room = in_obj->in_room;
   }
 
   if(!room)
      return;
 
+  supermob_obj = obj;
+  set_supermob_name(nullptr);
+
   if (supermob->short_descr)
      STRFREE(supermob->short_descr);
 
-  supermob->short_descr = QUICKLINK(obj->short_descr);
+  supermob->short_descr = obj->short_descr ? QUICKLINK(obj->short_descr) : STRALLOC("");
   supermob->mpscriptpos = obj->mpscriptpos;
 
   /* Added by Jenny to allow bug messages to show the vnum
      of the object, and not just supermob's vnum */
-  buf = str_printf("Object #%d", obj->pIndexData->vnum);
-  STRFREE( supermob->description );
+  buf = str_printf("Object #%d", obj->pIndexData ? obj->pIndexData->vnum : 0);
+  if (supermob->description)
+     STRFREE( supermob->description );
   supermob->description = STRALLOC( buf );
 
   if(room != NULL)
   {
-    char_from_room (supermob );
+    if ( supermob->in_room )
+      char_from_room( supermob );
     char_to_room( supermob, room); 
   }
 }
 
 void release_supermob( GameContext *game )
 {
+   ROOM_INDEX_DATA *poly;
+
    supermob_obj = NULL;
-   char_from_room( supermob );
-   char_to_room( supermob, get_room_index( ROOM_VNUM_POLY ) );
+   if ( !supermob || char_died(supermob) )
+      return;
+   set_supermob_name(nullptr);
+   poly = get_room_index( ROOM_VNUM_POLY );
+   if ( poly )
+   {
+      if ( supermob->in_room && supermob->in_room != poly )
+         char_from_room( supermob );
+      if ( !supermob->in_room )
+         char_to_room( supermob, poly );
+   }
 }
 
 
@@ -2277,13 +2454,16 @@ bool oprog_percent_check( CHAR_DATA *mob, CHAR_DATA *actor, OBJ_DATA *obj,
  MPROG_DATA * mprg;
  bool executed = FALSE;
 
+ if ( !obj || !obj->pIndexData )
+   return FALSE;
+
  for ( mprg = obj->pIndexData->mudprogs; mprg; mprg = mprg->next )
    if ( ( mprg->type & type )
-       && ( number_percent( ) <= atoi( mprg->arglist ) ) )
+       && ( number_percent( ) <= atoi( mprg->arglist ? mprg->arglist : "0" ) ) )
      {
        executed = TRUE;
-       mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
-       if ( type != GREET_PROG )
+       mprog_driver( mprg->comlist ? mprg->comlist : "", mob, actor, obj, vo, FALSE );
+       if ( obj_extracted( obj ) || type != GREET_PROG )
 	 break;
      }
 
@@ -2315,32 +2495,65 @@ void oprog_act_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 void oprog_greet_trigger( CHAR_DATA *ch )
 {
   OBJ_DATA *vobj;
+  ROOM_INDEX_DATA *start_room;
+  std::vector<OBJ_DATA *> objs;
+
+  if ( !ch || !ch->in_room )
+    return;
+
   if (!ch->game)
   {
       bug( "oprog_greet_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
       return;
   }
-  for ( vobj=ch->in_room->first_content; vobj; vobj = vobj->next_content )
-    if  ( vobj->pIndexData->progtypes & GREET_PROG ) 
+
+  start_room = ch->in_room;
+  for ( vobj = start_room->first_content; vobj; vobj = vobj->next_content )
+    objs.push_back( vobj );
+
+  for ( OBJ_DATA *cand : objs )
+  {
+    if ( char_died( ch ) || ch->in_room != start_room )
+      break;
+    if ( !mp_is_valid_obj( cand ) || cand->in_room != start_room || !cand->pIndexData )
+      continue;
+    if ( cand->pIndexData->progtypes & GREET_PROG ) 
     {
-     set_supermob( ch->game,vobj );  /* not very efficient to do here */
-     oprog_percent_check( supermob, ch, vobj, NULL, GREET_PROG );
+     set_supermob( ch->game, cand );  /* not very efficient to do here */
+     if ( supermob )
+       oprog_percent_check( supermob, ch, cand, NULL, GREET_PROG );
      release_supermob(ch->game);
     }
+  }
 
   return;
 }
 
 void oprog_speech_trigger( const std::string& txt, CHAR_DATA *ch )
 {
-OBJ_DATA *vobj;
+  OBJ_DATA *vobj;
+  ROOM_INDEX_DATA *start_room;
+  std::vector<OBJ_DATA *> objs;
+
+  if ( !ch || !ch->in_room || !supermob )
+    return;
+
+  start_room = ch->in_room;
+  for ( vobj = start_room->first_content; vobj; vobj = vobj->next_content )
+    objs.push_back( vobj );
 
   /* supermob is set and released in oprog_wordlist_check */
-  for ( vobj=ch->in_room->first_content; vobj; vobj = vobj->next_content )
-    if  ( vobj->pIndexData->progtypes & SPEECH_PROG ) 
+  for ( OBJ_DATA *cand : objs )
+  {
+    if ( char_died( ch ) || ch->in_room != start_room )
+      break;
+    if ( !mp_is_valid_obj( cand ) || cand->in_room != start_room || !cand->pIndexData )
+      continue;
+    if ( cand->pIndexData->progtypes & SPEECH_PROG ) 
     {
-      oprog_wordlist_check( txt, supermob, ch, vobj, NULL, SPEECH_PROG, vobj );
+      oprog_wordlist_check( txt, supermob, ch, cand, NULL, SPEECH_PROG, cand );
     }
+  }
 
  return;
 }
@@ -2376,6 +2589,8 @@ void oprog_random_trigger( OBJ_DATA *obj )
  */
 void oprog_wear_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
   if (!ch->game)
   {
       bug( "oprog_wear_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2394,6 +2609,8 @@ bool oprog_use_trigger( CHAR_DATA *ch, OBJ_DATA *obj, CHAR_DATA *vict,
                         OBJ_DATA *targ, void *vo )
 {
    bool executed = FALSE;
+  if (!ch || !obj || !obj->pIndexData)
+      return false;
   if (!ch->game)
   {
       bug( "oprog_use_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2425,6 +2642,8 @@ bool oprog_use_trigger( CHAR_DATA *ch, OBJ_DATA *obj, CHAR_DATA *vict,
  */
 void oprog_remove_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
   if (!ch->game)
   {
       bug( "oprog_remove_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2445,6 +2664,8 @@ void oprog_remove_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
  */
 void oprog_sac_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
   if (!ch->game)
   {
       bug( "oprog_sac_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2465,6 +2686,8 @@ void oprog_sac_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
  */
 void oprog_get_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
   if (!ch->game)
   {
       bug( "oprog_get_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2484,6 +2707,8 @@ void oprog_get_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
  */
 void oprog_damage_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
   if (!ch->game)
   {
       bug( "oprog_damage_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2503,6 +2728,8 @@ void oprog_damage_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
  */
 void oprog_repair_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
   if (!ch->game)
   {
       bug( "oprog_repair_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2523,6 +2750,8 @@ void oprog_repair_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
  */
 void oprog_drop_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
     if (!ch->game)
   {
       bug( "oprog_drop_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2542,6 +2771,8 @@ void oprog_drop_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
  */
 void oprog_examine_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
   if (!ch->game)
   {
       bug( "oprog_examine_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2562,6 +2793,8 @@ void oprog_examine_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
  */
 void oprog_zap_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
   if (!ch->game)
   {
       bug( "oprog_zap_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2583,6 +2816,8 @@ void oprog_zap_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
  */
 void oprog_pull_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
   if (!ch->game)
   {
       bug( "oprog_pull_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2603,6 +2838,8 @@ void oprog_pull_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
  */
 void oprog_push_trigger( CHAR_DATA *ch, OBJ_DATA *obj )
 {
+  if (!ch || !obj || !obj->pIndexData)
+      return;
   if (!ch->game)
   {
       bug( "oprog_push_trigger: ch with no game pointer! vnum %s", ch->name ? ch->name : "unknown" );
@@ -2622,16 +2859,15 @@ void obj_act_add( OBJ_DATA *obj );
 void oprog_act_trigger( const std::string& buf, OBJ_DATA *mobj, CHAR_DATA *ch,
 			OBJ_DATA *obj, void *vo )
 {
+   if ( !mobj || !mobj->pIndexData )
+      return;
+
    if ( mobj->pIndexData->progtypes & ACT_PROG ) 
    {
       MPROG_ACT_LIST *tmp_act;
       
       CREATE(tmp_act, MPROG_ACT_LIST, 1);
-      if ( mobj->mpactnum > 0 )
-        tmp_act->next = mobj->mpact;
-      else
-        tmp_act->next = NULL;
-      
+      tmp_act->next = mobj->mpact;
       mobj->mpact = tmp_act;
       mobj->mpact->buf = str_dup(buf);
       mobj->mpact->ch = ch;
@@ -2646,82 +2882,32 @@ void oprog_act_trigger( const std::string& buf, OBJ_DATA *mobj, CHAR_DATA *ch,
 void oprog_wordlist_check( const std::string &arg, CHAR_DATA *mob, CHAR_DATA *actor,
                            OBJ_DATA *obj, void *vo, int type, OBJ_DATA *iobj )
 {
-    std::string temp1;
-    std::string temp2;
-    std::string word;
-    MPROG_DATA *mprg;
-    std::string list;
-    std::string dupl;
-    size_t start;
+    if ( !mob || !iobj || !iobj->pIndexData || obj_extracted(iobj) )
+        return;
 
-    auto is_word_boundary = []( const std::string &s, size_t pos, size_t len ) -> bool
+    GameContext *game = mob->game;
+    if ( !game )
     {
-        bool left_ok = ( pos == 0 || s[pos - 1] == ' ' );
-        size_t right = pos + len;
-        bool right_ok = ( right >= s.size()
-                       || s[right] == ' '
-                       || s[right] == '\n'
-                       || s[right] == '\r' );
-        return left_ok && right_ok;
-    };
-
-    if ( !mob->game )
-    {
-        bug( "oprog_wordlist_check: mob with no game pointer! vnum %s",
-             mob->name ? mob->name : "unknown" );
+        bug("oprog_wordlist_check: mob with no game pointer! vnum %s",
+            mob->name ? mob->name : "unknown");
         return;
     }
 
-    for ( mprg = iobj->pIndexData->mudprogs; mprg; mprg = mprg->next )
-        if ( mprg->type & type )
-        {
-            temp1 = strlower( mprg->arglist ? mprg->arglist : "" );
-            list = temp1;
+    for ( MPROG_DATA *mprg = iobj->pIndexData->mudprogs; mprg; mprg = mprg->next )
+    {
+        if ( !(mprg->type & type) || !mprog_keyword_check(arg, mprg->arglist ? mprg->arglist : "") )
+            continue;
 
-            temp2 = strlower( arg );
-            dupl = temp2;
-
-            if ( list.size() >= 2 && list[0] == 'p' && list[1] == ' ' )
-            {
-                list.erase( 0, 2 );
-
-                size_t search_pos = 0;
-                while ( ( start = dupl.find( list, search_pos ) ) != std::string::npos )
-                {
-                    if ( is_word_boundary( dupl, start, list.size() ) )
-                    {
-                        set_supermob( mob->game, iobj );
-                        mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
-                        release_supermob( mob->game );
-                        break;
-                    }
-                    search_pos = start + 1;
-                }
-            }
-            else
-            {
-                list = one_argument( list, word );
-                for ( ; !word.empty(); list = one_argument( list, word ) )
-                {
-                    size_t search_pos = 0;
-                    while ( ( start = dupl.find( word, search_pos ) ) != std::string::npos )
-                    {
-                        if ( is_word_boundary( dupl, start, word.size() ) )
-                        {
-                            set_supermob( mob->game, iobj );
-                            mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
-                            release_supermob( mob->game );
-                            break;
-                        }
-                        search_pos = start + 1;
-                    }
-                }
-            }
-        }
-
-    return;
+        set_supermob(game, iobj);
+        if ( supermob_obj != iobj )
+            return;
+        mprog_driver(mprg->comlist ? mprg->comlist : "", mob, actor, obj, vo, FALSE);
+        release_supermob(game);
+        if ( char_died(mob) || obj_extracted(iobj)
+        ||   (actor && char_died(actor)) || (obj && obj_extracted(obj)) )
+            return;
+    }
 }
-
 
 
 /*
@@ -2734,22 +2920,25 @@ void rset_supermob( ROOM_INDEX_DATA *room)
 {
   std::string buf;
 
-  if (room)
+  if (supermob && !char_died(supermob) && room)
   {
-    STRFREE(supermob->short_descr);
-    supermob->short_descr = STRALLOC(room->name);
-    STRFREE(supermob->name);
-    supermob->name        = STRALLOC(room->name);
+    if (supermob->short_descr)
+      STRFREE(supermob->short_descr);
+    supermob->short_descr = STRALLOC(room->name ? room->name : "");
+    supermob_obj = nullptr;
+    set_supermob_name(room->name);
 
     supermob->mpscriptpos = room->mpscriptpos;
 
     /* Added by Jenny to allow bug messages to show the vnum
        of the room, and not just supermob's vnum */
     buf = str_printf("Room #%d", room->vnum);
-    STRFREE( supermob->description );
+    if (supermob->description)
+      STRFREE( supermob->description );
     supermob->description = STRALLOC( buf );
 
-    char_from_room (supermob );
+    if ( supermob->in_room )
+      char_from_room( supermob );
     char_to_room( supermob, room); 
 
   }
@@ -2761,14 +2950,14 @@ void rprog_percent_check( CHAR_DATA *mob, CHAR_DATA *actor, OBJ_DATA *obj,
 {
  MPROG_DATA * mprg;
 
- if(!mob->in_room)
+ if(!mob || !mob->in_room)
    return;
 
  for ( mprg = mob->in_room->mudprogs; mprg; mprg = mprg->next )
    if ( ( mprg->type & type )
-       && ( number_percent( ) <= atoi( mprg->arglist ) ) )
+       && ( number_percent( ) <= atoi( mprg->arglist ? mprg->arglist : "0" ) ) )
      {
-       mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
+       mprog_driver( mprg->comlist ? mprg->comlist : "", mob, actor, obj, vo, FALSE );
        if(type!=ENTER_PROG)
           break;
      }
@@ -2789,16 +2978,15 @@ void room_act_add( ROOM_INDEX_DATA *room );
 void rprog_act_trigger( const std::string& buf, ROOM_INDEX_DATA *room, CHAR_DATA *ch,
 			OBJ_DATA *obj, void *vo )
 {
+   if ( !room )
+      return;
+
    if ( room->progtypes & ACT_PROG ) 
    {
       MPROG_ACT_LIST *tmp_act;
       
       CREATE(tmp_act, MPROG_ACT_LIST, 1);
-      if ( room->mpactnum > 0 )
-        tmp_act->next = room->mpact;
-      else
-        tmp_act->next = NULL;
-      
+      tmp_act->next = room->mpact;
       room->mpact = tmp_act;
       room->mpact->buf = str_dup(buf);
       room->mpact->ch = ch;
@@ -2816,6 +3004,8 @@ void rprog_act_trigger( const std::string& buf, ROOM_INDEX_DATA *room, CHAR_DATA
 
 void rprog_leave_trigger( CHAR_DATA *ch )
 {
+  if( !ch || !ch->in_room )
+    return;
   if( ch->in_room->progtypes & LEAVE_PROG ) 
   {
     rset_supermob( ch->in_room );
@@ -2827,6 +3017,8 @@ void rprog_leave_trigger( CHAR_DATA *ch )
 
 void rprog_enter_trigger( CHAR_DATA *ch )
 {
+  if( !ch || !ch->in_room )
+    return;
   if( ch->in_room->progtypes & ENTER_PROG ) 
   {
     rset_supermob( ch->in_room );
@@ -2838,6 +3030,8 @@ void rprog_enter_trigger( CHAR_DATA *ch )
 
 void rprog_sleep_trigger( CHAR_DATA *ch )
 {
+  if( !ch || !ch->in_room )
+    return;
   if( ch->in_room->progtypes & SLEEP_PROG ) 
   {
     rset_supermob( ch->in_room );
@@ -2849,6 +3043,8 @@ void rprog_sleep_trigger( CHAR_DATA *ch )
 
 void rprog_rest_trigger( CHAR_DATA *ch )
 {
+  if( !ch || !ch->in_room )
+    return;
   if( ch->in_room->progtypes & REST_PROG ) 
   {
     rset_supermob( ch->in_room );
@@ -2860,6 +3056,8 @@ void rprog_rest_trigger( CHAR_DATA *ch )
 
 void rprog_rfight_trigger( CHAR_DATA *ch )
 {
+  if( !ch || !ch->in_room )
+    return;
   if( ch->in_room->progtypes & RFIGHT_PROG ) 
   {
     rset_supermob( ch->in_room );
@@ -2871,6 +3069,8 @@ void rprog_rfight_trigger( CHAR_DATA *ch )
 
 void rprog_death_trigger( CHAR_DATA *killer, CHAR_DATA *ch )
 {
+  if( !ch || !ch->in_room )
+    return;
   if( ch->in_room->progtypes & RDEATH_PROG ) 
   {
     rset_supermob( ch->in_room );
@@ -2882,6 +3082,8 @@ void rprog_death_trigger( CHAR_DATA *killer, CHAR_DATA *ch )
 
 void rprog_speech_trigger( const std::string& txt, CHAR_DATA *ch )
 {
+  if( !ch || !ch->in_room || !supermob )
+    return;
   if( ch->in_room->progtypes & SPEECH_PROG ) 
   {
     /* supermob is set and released in rprog_wordlist_check */
@@ -2892,6 +3094,8 @@ void rprog_speech_trigger( const std::string& txt, CHAR_DATA *ch )
 
 void rprog_random_trigger( CHAR_DATA *ch )
 {
+  if ( !ch || !ch->in_room )
+    return;
 
   if ( ch->in_room->progtypes & RAND_PROG)
   {
@@ -2905,79 +3109,23 @@ void rprog_random_trigger( CHAR_DATA *ch )
 void rprog_wordlist_check( const std::string &arg, CHAR_DATA *mob, CHAR_DATA *actor,
                            OBJ_DATA *obj, void *vo, int type, ROOM_INDEX_DATA *room )
 {
-    std::string temp1;
-    std::string temp2;
-    std::string word;
-    MPROG_DATA *mprg;
-    std::string list;
-    std::string dupl;
-    size_t start;
-
-    auto is_word_boundary = []( const std::string &s, size_t pos, size_t len ) -> bool
-    {
-        bool left_ok = ( pos == 0 || s[pos - 1] == ' ' );
-        size_t right = pos + len;
-        bool right_ok = ( right >= s.size()
-                       || s[right] == ' '
-                       || s[right] == '\n'
-                       || s[right] == '\r' );
-        return left_ok && right_ok;
-    };
-
-    if ( actor && !char_died( actor ) && actor->in_room )
+    if ( actor && !char_died(actor) && actor->in_room )
         room = actor->in_room;
-
-    if ( !room )
+    if ( !room || !mob )
         return;
 
-    for ( mprg = room->mudprogs; mprg; mprg = mprg->next )
-        if ( mprg->type & type )
-        {
-            temp1 = strlower( mprg->arglist ? mprg->arglist : "" );
-            list = temp1;
+    GameContext *game = mob->game ? mob->game : room->game;
+    for ( MPROG_DATA *mprg = room->mudprogs; mprg; mprg = mprg->next )
+    {
+        if ( !(mprg->type & type) || !mprog_keyword_check(arg, mprg->arglist ? mprg->arglist : "") )
+            continue;
 
-            temp2 = strlower( arg );
-            dupl = temp2;
-
-            if ( list.size() >= 2 && list[0] == 'p' && list[1] == ' ' )
-            {
-                list.erase( 0, 2 );
-
-                size_t search_pos = 0;
-                while ( ( start = dupl.find( list, search_pos ) ) != std::string::npos )
-                {
-                    if ( is_word_boundary( dupl, start, list.size() ) )
-                    {
-                        rset_supermob( room );
-                        mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
-                        release_supermob( mob->game );
-                        break;
-                    }
-                    search_pos = start + 1;
-                }
-            }
-            else
-            {
-                list = one_argument( list, word );
-                for ( ; !word.empty(); list = one_argument( list, word ) )
-                {
-                    size_t search_pos = 0;
-                    while ( ( start = dupl.find( word, search_pos ) ) != std::string::npos )
-                    {
-                        if ( is_word_boundary( dupl, start, word.size() ) )
-                        {
-                            rset_supermob( room );
-                            mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
-                            release_supermob( mob->game );
-                            break;
-                        }
-                        search_pos = start + 1;
-                    }
-                }
-            }
-        }
-
-    return;
+        rset_supermob(room);
+        mprog_driver(mprg->comlist ? mprg->comlist : "", mob, actor, obj, vo, FALSE);
+        release_supermob(game);
+        if ( char_died(mob) || (actor && char_died(actor)) || (obj && obj_extracted(obj)) )
+            return;
+    }
 }
 
 void rprog_time_check( CHAR_DATA *mob, CHAR_DATA *actor, OBJ_DATA *obj,
@@ -2987,9 +3135,12 @@ void rprog_time_check( CHAR_DATA *mob, CHAR_DATA *actor, OBJ_DATA *obj,
   MPROG_DATA * mprg;
   bool 	       trigger_time;
 
+  if ( !room )
+    return;
+
   for ( mprg = room->mudprogs; mprg; mprg = mprg->next )
   {
-    trigger_time = ( time_info.hour == atoi( mprg->arglist ) );
+    trigger_time = ( mprg->arglist && time_info.hour == atoi( mprg->arglist ) );
 
     if ( !trigger_time )
     {
@@ -3002,7 +3153,7 @@ void rprog_time_check( CHAR_DATA *mob, CHAR_DATA *actor, OBJ_DATA *obj,
 	&& ( ( !mprg->triggered ) || ( mprg->type & HOUR_PROG ) ) )
     {
       mprg->triggered = TRUE;
-      mprog_driver( mprg->comlist, mob, actor, obj, vo, FALSE );
+      mprog_driver( mprg->comlist ? mprg->comlist : "", mob, actor, obj, NULL, FALSE );
     }
   }
   return;
@@ -3010,6 +3161,8 @@ void rprog_time_check( CHAR_DATA *mob, CHAR_DATA *actor, OBJ_DATA *obj,
 
 void rprog_time_trigger( CHAR_DATA *ch )
 {
+  if ( !ch || !ch->in_room )
+    return;
   if ( ch->in_room->progtypes & TIME_PROG )
   {
     rset_supermob( ch->in_room );
@@ -3021,6 +3174,8 @@ void rprog_time_trigger( CHAR_DATA *ch )
 
 void rprog_hour_trigger( CHAR_DATA *ch )
 {
+  if ( !ch || !ch->in_room )
+    return;
   if ( ch->in_room->progtypes & HOUR_PROG )
   {
     rset_supermob( ch->in_room );
@@ -3034,6 +3189,12 @@ void rprog_hour_trigger( CHAR_DATA *ch )
 void progbug( const std::string& str, CHAR_DATA *mob )
 {
 //char buf[MAX_STRING_LENGTH];
+
+  if ( !mob || !mob->pIndexData )
+  {
+    bug( "%s, (null mob).", str.c_str() );
+    return;
+  }
 
   /* Check if we're dealing with supermob, which means the bug occurred
      in a room or obj prog. */
@@ -3086,24 +3247,52 @@ void room_act_update( GameContext *game )
 {
   struct act_prog_data *runner;
   MPROG_ACT_LIST *mpact;
+  int max_iters = 1024;
   
-  while ( (runner = room_act_list) != NULL )
+  while ( max_iters > 0 && (runner = room_act_list) != NULL )
   {
     ROOM_INDEX_DATA *room = (ROOM_INDEX_DATA *) runner->vo;
-    
-    while ( (mpact = room->mpact) != NULL )
-    {
-      if ( mpact->ch->in_room == room )
-        rprog_wordlist_check(mpact->buf, supermob, mpact->ch, mpact->obj,
-                             mpact->vo, ACT_PROG, room);
-      room->mpact = mpact->next;
-      STR_DISPOSE(mpact->buf);
-      DISPOSE(mpact);
-    }
-    room->mpact = NULL;
-    room->mpactnum = 0;
     room_act_list = runner->next;
     DISPOSE(runner);
+
+    if ( !room )
+    {
+      --max_iters;
+      continue;
+    }
+
+    bool ran_act = false;
+    while ( max_iters > 0 && (mpact = room->mpact) != NULL )
+    {
+      --max_iters;
+      ran_act = true;
+      room->mpact = mpact->next;
+      if ( room->mpactnum > 0 )
+        room->mpactnum--;
+      if ( mpact->ch && mp_is_valid_char(mpact->ch) && mpact->ch->in_room == room )
+      {
+        OBJ_DATA *safe_obj = mp_is_valid_obj(mpact->obj) ? mpact->obj : NULL;
+        rprog_wordlist_check(mpact->buf ? mpact->buf : "", supermob, mpact->ch,
+                             safe_obj, mpact->vo, ACT_PROG, room);
+      }
+      if ( mpact->buf )
+        STR_DISPOSE(mpact->buf);
+      DISPOSE(mpact);
+    }
+    if ( max_iters <= 0 && room->mpact )
+    {
+      while ( (mpact = room->mpact) != NULL )
+      {
+        room->mpact = mpact->next;
+        if ( mpact->buf )
+          STR_DISPOSE(mpact->buf);
+        DISPOSE(mpact);
+      }
+    }
+    if ( !room->mpact )
+      room->mpactnum = 0;
+    if ( !ran_act )
+      --max_iters;
   }
   return;
 }
@@ -3124,23 +3313,66 @@ void obj_act_update( GameContext *game )
 {
   struct act_prog_data *runner;
   MPROG_ACT_LIST *mpact;
+  int max_iters = 1024;
   
-  while ( (runner = obj_act_list) != NULL )
+  while ( max_iters > 0 && (runner = obj_act_list) != NULL )
   {
     OBJ_DATA *obj = (OBJ_DATA *) runner->vo;
-    
-    while ( (mpact = obj->mpact) != NULL )
-    {
-      oprog_wordlist_check(mpact->buf, supermob, mpact->ch, mpact->obj,
-                           mpact->vo, ACT_PROG, obj);
-      obj->mpact = mpact->next;
-      STR_DISPOSE(mpact->buf);
-      DISPOSE(mpact);
-    }
-    obj->mpact = NULL;
-    obj->mpactnum = 0;
     obj_act_list = runner->next;
     DISPOSE(runner);
+
+    if ( !mp_find_obj(obj) )
+    {
+      --max_iters;
+      continue;
+    }
+
+    if ( obj_extracted(obj) )
+    {
+      while ( (mpact = obj->mpact) != NULL )
+      {
+        obj->mpact = mpact->next;
+        if ( mpact->buf )
+          STR_DISPOSE(mpact->buf);
+        DISPOSE(mpact);
+      }
+      obj->mpactnum = 0;
+      --max_iters;
+      continue;
+    }
+
+    bool ran_act = false;
+    while ( max_iters > 0 && mp_find_obj(obj) && (mpact = obj->mpact) != NULL )
+    {
+      --max_iters;
+      ran_act = true;
+      obj->mpact = mpact->next;
+      if ( obj->mpactnum > 0 )
+        obj->mpactnum--;
+      if ( !obj_extracted(obj) && mpact->ch && mp_is_valid_char(mpact->ch) )
+      {
+        OBJ_DATA *safe_obj = mp_is_valid_obj(mpact->obj) ? mpact->obj : NULL;
+        oprog_wordlist_check(mpact->buf ? mpact->buf : "", supermob, mpact->ch,
+                             safe_obj, mpact->vo, ACT_PROG, obj);
+      }
+      if ( mpact->buf )
+        STR_DISPOSE(mpact->buf);
+      DISPOSE(mpact);
+    }
+    if ( max_iters <= 0 && mp_find_obj(obj) && obj->mpact )
+    {
+      while ( (mpact = obj->mpact) != NULL )
+      {
+        obj->mpact = mpact->next;
+        if ( mpact->buf )
+          STR_DISPOSE(mpact->buf);
+        DISPOSE(mpact);
+      }
+    }
+    if ( mp_find_obj(obj) && !obj->mpact )
+      obj->mpactnum = 0;
+    if ( !ran_act )
+      --max_iters;
   }
   return;
 }

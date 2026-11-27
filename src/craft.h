@@ -58,6 +58,7 @@ struct CraftSlotDef
     int max_count = 0;             // 0 means unlimited
     CraftConsumeMode consume_mode = CraftConsumeMode::Consume;
     bool may_be_base_material = false;
+    int item_vnum = 0;             // 0 accepts any prototype of item_type
 };
 
 struct CraftDerivedVarDef

@@ -19,6 +19,7 @@
 ****************************************************************************/
 
 #include <time.h>
+#include <cstdlib>
 #include <stdio.h>
 #include <string.h>
 #include "mud.h"
@@ -63,7 +64,6 @@ SPELL_FUN *spell_function( const std::string& name )
     if ( !str_cmp( name, "spell_smaug" ))	     return spell_smaug;
     if ( !str_cmp( name, "spell_acid_blast" ))	     return spell_acid_blast;
     if ( !str_cmp( name, "spell_animate_dead" ))     return spell_animate_dead;
-    if ( !str_cmp( name, "spell_astral_walk" ))	     return spell_astral_walk;
     if ( !str_cmp( name, "spell_blindness" ))	     return spell_blindness;
     if ( !str_cmp( name, "spell_burning_hands" ))    return spell_burning_hands;
     if ( !str_cmp( name, "spell_call_lightning" ))   return spell_call_lightning;
@@ -78,7 +78,6 @@ SPELL_FUN *spell_function( const std::string& name )
     if ( !str_cmp( name, "spell_control_weather" ))  return spell_control_weather;
     if ( !str_cmp( name, "spell_create_food" ))	     return spell_create_food;
     if ( !str_cmp( name, "spell_create_water" ))     return spell_create_water;
-    if ( !str_cmp( name, "spell_cure_addiction" ))   return spell_cure_addiction;
     if ( !str_cmp( name, "spell_cure_blindness" ))   return spell_cure_blindness;
     if ( !str_cmp( name, "spell_cure_poison" ))	     return spell_cure_poison;
     if ( !str_cmp( name, "spell_curse" ))	     return spell_curse;
@@ -94,7 +93,6 @@ SPELL_FUN *spell_function( const std::string& name )
     if ( !str_cmp( name, "spell_farsight" ))	     return spell_farsight;
     if ( !str_cmp( name, "spell_fireball" ))	     return spell_fireball;
     if ( !str_cmp( name, "spell_flamestrike" ))	     return spell_flamestrike;
-    if ( !str_cmp( name, "spell_gate" ))	     return spell_gate;
     if ( !str_cmp( name, "spell_knock" ))	     return spell_knock;
     if ( !str_cmp( name, "spell_harm" ))	     return spell_harm;
     if ( !str_cmp( name, "spell_identify" ))	     return spell_identify;
@@ -103,22 +101,15 @@ SPELL_FUN *spell_function( const std::string& name )
     if ( !str_cmp( name, "spell_lightning_bolt" ))   return spell_lightning_bolt;
     if ( !str_cmp( name, "spell_locate_object" ))    return spell_locate_object;
     if ( !str_cmp( name, "spell_magic_missile" ))    return spell_magic_missile;
-    if ( !str_cmp( name, "spell_mist_walk" ))	     return spell_mist_walk;
     if ( !str_cmp( name, "spell_pass_door" ))	     return spell_pass_door;
-    if ( !str_cmp( name, "spell_plant_pass" ))	     return spell_plant_pass;
     if ( !str_cmp( name, "spell_poison" ))	     return spell_poison;
     if ( !str_cmp( name, "spell_polymorph" ))	     return spell_polymorph;
     if ( !str_cmp( name, "spell_possess" ))	     return spell_possess;
     if ( !str_cmp( name, "spell_recharge" ))	     return spell_recharge;
-    if ( !str_cmp( name, "spell_remove_curse" ))     return spell_remove_curse;
     if ( !str_cmp( name, "spell_remove_invis" ))     return spell_remove_invis;
     if ( !str_cmp( name, "spell_remove_trap" ))	     return spell_remove_trap;
     if ( !str_cmp( name, "spell_shocking_grasp" ))   return spell_shocking_grasp;
     if ( !str_cmp( name, "spell_sleep" ))	     return spell_sleep;
-    if ( !str_cmp( name, "spell_solar_flight" ))     return spell_solar_flight;
-    if ( !str_cmp( name, "spell_suggest" ))	     return spell_suggest;
-    if ( !str_cmp( name, "spell_summon" ))           return spell_summon;
-    if ( !str_cmp( name, "spell_teleport" ))	     return spell_teleport;
     if ( !str_cmp( name, "spell_ventriloquate" ))    return spell_ventriloquate;
     if ( !str_cmp( name, "spell_weaken" ))	     return spell_weaken;
     if ( !str_cmp( name, "spell_word_of_recall" ))   return spell_word_of_recall;
@@ -129,9 +120,6 @@ SPELL_FUN *spell_function( const std::string& name )
     if ( !str_cmp( name, "spell_lightning_breath" )) return spell_lightning_breath;
     if ( !str_cmp( name, "spell_spiral_blast" ))     return spell_spiral_blast;
     if ( !str_cmp( name, "spell_scorching_surge" ))  return spell_scorching_surge;
-    if ( !str_cmp( name, "spell_helical_flow" ))     return spell_helical_flow;
-    if ( !str_cmp( name, "spell_transport" ))	     return spell_transport;
-    if ( !str_cmp( name, "spell_portal" ))	     return spell_portal;
 
     if ( !str_cmp( name, "spell_ethereal_fist" ))    return spell_ethereal_fist;
     if ( !str_cmp( name, "spell_spectral_furor" ))   return spell_spectral_furor;
@@ -159,14 +147,16 @@ SPELL_FUN *spell_function( const std::string& name )
 
 DO_FUN *skill_function( const std::string& name )
 {
-    switch( name[3] )
+    if ( name.size() <= 3 || strncasecmp( name.c_str(), "do_", 3 ) != 0 )
+        return skill_notfound;
+
+    switch( LOWER( static_cast<unsigned char>( name[3] ) ) )
     {
     case 'a':
 	if ( !str_cmp( name, "do_aassign" ))		return do_aassign;
 	if ( !str_cmp( name, "do_addbounty" ))          return do_addbounty;
         if ( !str_cmp( name, "do_addresident" ))	return do_addresident;
 	if ( !str_cmp( name, "do_addsalary" ))		return do_addsalary;
-	if ( !str_cmp( name, "do_addsenator" ))         return do_addsenator;
 	if ( !str_cmp( name, "do_addpilot" ))  		return do_addpilot;
 	if ( !str_cmp( name, "do_add_patrol" ))  	return do_add_patrol;
 	if ( !str_cmp( name, "do_adjusttractorbeam" )) 	return do_adjusttractorbeam;
@@ -176,7 +166,6 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_affected" ))		return do_affected;
 	if ( !str_cmp( name, "do_afk" ))		return do_afk;
         if ( !str_cmp( name, "do_ahall" ))              return do_ahall;
-        if ( !str_cmp( name, "do_ahelp" ))              return do_ahelp;
 	if ( !str_cmp( name, "do_aid" ))		return do_aid;
 	if ( !str_cmp( name, "do_alias" ))		return do_alias;
 	if ( !str_cmp( name, "do_alinks" ))		return do_alinks;
@@ -227,10 +216,8 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_board" ))              return do_board;
 	if ( !str_cmp( name, "do_boards" ))		return do_boards;
 	if ( !str_cmp( name, "do_bodybag" ))		return do_bodybag;
-	if ( !str_cmp( name, "do_bomb" ))		return do_bomb;
 	if ( !str_cmp( name, "do_bounties" ))             return do_bounties;
 	if ( !str_cmp( name, "do_brandish" ))		return do_brandish;
-	if ( !str_cmp( name, "do_brew" ))		return do_brew;
 	if ( !str_cmp( name, "do_bribe" ))		return do_bribe;
 	if ( !str_cmp( name, "do_bset" ))		return do_bset;
 	if ( !str_cmp( name, "do_bstat" ))		return do_bstat;
@@ -290,7 +277,6 @@ DO_FUN *skill_function( const std::string& name )
 	break;
     case 'd':
         if ( !str_cmp( name, "do_decline" ))            return do_decline;
-	if ( !str_cmp( name, "do_degradeship" ))	return do_degradeship;
 	if ( !str_cmp( name, "do_delay" ))		return do_delay;
 	if ( !str_cmp( name, "do_demote" ))		return do_demote;
 	if ( !str_cmp( name, "do_deny" ))		return do_deny;
@@ -308,6 +294,7 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_dmesg" ))		return do_dmesg;
 	if ( !str_cmp( name, "do_dock" ))		return do_dock;
  	if ( !str_cmp( name, "do_dontresolve" ))	return do_dontresolve;
+	if ( !str_cmp( name, "do_dnd" ))		return do_dnd;
 	if ( !str_cmp( name, "do_down" ))		return do_down;
 	if ( !str_cmp( name, "do_drag" ))		return do_drag;
 	if ( !str_cmp( name, "do_draw" ))		return do_draw;
@@ -331,13 +318,11 @@ DO_FUN *skill_function( const std::string& name )
 	break;
     case 'f':
 	if ( !str_cmp( name, "do_fire" ))               return do_fire;
-	if ( !str_cmp( name, "do_feed" ))		return do_feed;
 	if ( !str_cmp( name, "do_fill" ))		return do_fill;
 	if ( !str_cmp( name, "do_findserin" ))		return do_findserin;
 	if ( !str_cmp( name, "do_first_aid" ))          return do_first_aid; 
 	if ( !str_cmp( name, "do_fixchar" ))		return do_fixchar;
 	if ( !str_cmp( name, "do_flee" ))		return do_flee;
-	if ( !str_cmp( name, "do_fly" ))		return do_fly;
 	if ( !str_cmp( name, "do_focusalias" ))		return do_focusalias;
 	if ( !str_cmp( name, "do_foldarea" ))		return do_foldarea;
 	if ( !str_cmp( name, "do_follow" ))		return do_follow;
@@ -352,7 +337,6 @@ DO_FUN *skill_function( const std::string& name )
     case 'g':
 	if ( !str_cmp( name, "do_gather_intelligence" )) return do_gather_intelligence;
 	if ( !str_cmp( name, "do_get" ))		return do_get;
-	if ( !str_cmp( name, "do_gemcutting" ))		return do_gemcutting;
 	if ( !str_cmp( name, "do_give" ))		return do_give;
 	if ( !str_cmp( name, "do_glance" ))		return do_glance;
         if (!str_cmp(name, "do_gravityprojector"))	return do_gravityprojector;
@@ -363,8 +347,6 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_grub" ))		return do_grub;
 	if ( !str_cmp( name, "do_gtell" ))		return do_gtell;
 	if ( !str_cmp( name, "do_guard" ))		return do_guard;
-	if ( !str_cmp( name, "do_guilds" ))		return do_guilds;
-	if ( !str_cmp( name, "do_guildtalk" ))		return do_guildtalk;
 	break;
     case 'h':
 	if ( !str_cmp( name, "do_hail" ))		return do_hail;
@@ -418,39 +400,21 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_light" ))		return do_light;
 	if ( !str_cmp( name, "do_list" ))		return do_list;
 	if ( !str_cmp( name, "do_litterbug" ))		return do_litterbug;
-	if ( !str_cmp( name, "do_load" ))		return do_load;
 	if ( !str_cmp( name, "do_loadarea" ))		return do_loadarea;
 	if ( !str_cmp( name, "do_loadcargo" ))		return do_loadcargo;
 	if ( !str_cmp( name, "do_loadup" ))		return do_loadup;
 	if ( !str_cmp( name, "do_lock" ))		return do_lock;
 	if ( !str_cmp( name, "do_log" ))		return do_log;
 	if ( !str_cmp( name, "do_look" ))		return do_look;
+	if ( !str_cmp( name, "do_lookmap" ))		return do_lookmap;
 	if ( !str_cmp( name, "do_low_purge" ))		return do_low_purge;
 	break;
     case 'm':
 	if ( !str_cmp( name, "do_mailroom" ))		return do_mailroom;
 	if ( !str_cmp( name, "do_make" ))		return do_make;
-	if ( !str_cmp( name, "do_makearmor" ))		return do_makearmor;
-	if ( !str_cmp( name, "do_makeblade" ))          return do_makeblade;
-	if ( !str_cmp( name, "do_makeblaster" ))        return do_makeblaster;
-	if ( !str_cmp( name, "do_makebowcaster" ))      return do_makebowcaster;
-	if ( !str_cmp( name, "do_makedisguise" ))           return do_makedisguise;
-	if ( !str_cmp( name, "do_makelightsaber" ))     return do_makelightsaber;
-	if ( !str_cmp( name, "do_makespice" ))          return do_makespice;
-	if ( !str_cmp( name, "do_makegrenade" ))	return do_makegrenade;
-	if ( !str_cmp( name, "do_makelight" ))		return do_makelight;
-	if ( !str_cmp( name, "do_makelandmine" ))	return do_makelandmine;
-	if ( !str_cmp( name, "do_makecomlink" ))	return do_makecomlink;
-	if ( !str_cmp( name, "do_makeshield" ))		return do_makeshield;
-	if ( !str_cmp( name, "do_makecontainer" ))	return do_makecontainer;
-	if ( !str_cmp( name, "do_makemedpac" ))		return do_makemedpac;
-	if ( !str_cmp( name, "do_makejewelry" ))	return do_makejewelry;
 	if ( !str_cmp( name, "do_makeboard" ))		return do_makeboard;
-	if ( !str_cmp( name, "do_makefurniture" ))	return do_makefurniture;
 	if ( !str_cmp( name, "do_makeclan" ))		return do_makeclan;
-	if ( !str_cmp( name, "do_makemissile" ))	return do_makemissile;
 	if ( !str_cmp( name, "do_makeship" ))           return do_makeship;
-	if ( !str_cmp( name, "do_makerepair" ))		return do_makerepair;
 	if ( !str_cmp( name, "do_makeshop" ))		return do_makeshop;
 	if ( !str_cmp( name, "do_makespaceobject" ))     return do_makespaceobject;
 	if ( !str_cmp( name, "do_makewizlist" ))	return do_makewizlist;
@@ -462,7 +426,6 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_mccpstat"))			return do_mccpstat;
         if ( !str_cmp( name, "do_mchallenge" ))		return do_mchallenge;
 	if ( !str_cmp( name, "do_mcreate" ))		return do_mcreate;
-	if ( !str_cmp( name, "do_mdelete" ))		return do_mdelete;
 	if ( !str_cmp( name, "do_medit" ))			return do_medit;	
 	if ( !str_cmp( name, "do_memory" ))		return do_memory;
 	if ( !str_cmp( name, "do_members" ))		return do_members;
@@ -470,17 +433,14 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_minvoke" ))		return do_minvoke;
 	if ( !str_cmp( name, "do_mine" ))		return do_mine;
 	if ( !str_cmp( name, "do_mlist" ))		return do_mlist;
-	if ( !str_cmp( name, "do_mortalize" ))		return do_mortalize;
 	if ( !str_cmp( name, "do_mount" ))		return do_mount;
 	if ( !str_cmp( name, "do_mp_close_passage" ))	return do_mp_close_passage;
 	if ( !str_cmp( name, "do_mp_damage" ))		return do_mp_damage;
 	if ( !str_cmp( name, "do_mp_deposit" ))		return do_mp_deposit;
 	if ( !str_cmp( name, "do_mp_open_passage" ))	return do_mp_open_passage;
-	if ( !str_cmp( name, "do_mp_practice" ))	return do_mp_practice;
 	if ( !str_cmp( name, "do_mp_restore" ))		return do_mp_restore;
 	if ( !str_cmp( name, "do_mp_slay" ))		return do_mp_slay;
 	if ( !str_cmp( name, "do_mp_withdraw" ))	return do_mp_withdraw;
-	if ( !str_cmp( name, "do_mpadvance" ))		return do_mpadvance;
 	if ( !str_cmp( name, "do_mpapply" ))		return do_mpapply;
 	if ( !str_cmp( name, "do_mpapplyb" ))		return do_mpapplyb;
 	if ( !str_cmp( name, "do_mpasound" ))		return do_mpasound;
@@ -500,11 +460,9 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_mpmload" ))		return do_mpmload;
 	if ( !str_cmp( name, "do_mpnothing" ))		return do_mpnothing;
 	if ( !str_cmp( name, "do_mpoload" ))		return do_mpoload;
-	if ( !str_cmp( name, "do_mppkset" ))		return do_mppkset;
 	if ( !str_cmp( name, "do_mppurge" ))		return do_mppurge;
 	if ( !str_cmp( name, "do_mpstat" ))		return do_mpstat;
 	if ( !str_cmp( name, "do_mptransfer" ))		return do_mptransfer;
-	if ( !str_cmp( name, "do_mrange" ))		return do_mrange;
 	if ( !str_cmp( name, "do_mset" ))		return do_mset;
 	if ( !str_cmp( name, "do_mstat" ))		return do_mstat;
 	if ( !str_cmp( name, "do_murde" ))		return do_murde;
@@ -519,7 +477,6 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_newbiechat" ))		return do_newbiechat;
 	if ( !str_cmp( name, "do_newbieasst" ))		return do_newbieasst;
 	if ( !str_cmp( name, "do_newbieset" ))		return do_newbieset;
-	if ( !str_cmp( name, "do_newclan" ))		return do_newclan;
 	if ( !str_cmp( name, "do_newzones" ))		return do_newzones;
 	if ( !str_cmp( name, "do_noemote" ))		return do_noemote;
 	if ( !str_cmp( name, "do_nohelps" ))		return do_nohelps;
@@ -534,7 +491,6 @@ DO_FUN *skill_function( const std::string& name )
     case 'o':
 	if ( !str_cmp( name, "do_oassign" ))		return do_oassign;
 	if ( !str_cmp( name, "do_ocreate" ))		return do_ocreate;
-	if ( !str_cmp( name, "do_odelete" ))		return do_odelete;
 	if ( !str_cmp( name, "do_oedit" ))		return do_oedit;
 	if ( !str_cmp( name, "do_ofind" ))		return do_ofind;
 	if ( !str_cmp( name, "do_ogrub" ))		return do_ogrub;
@@ -550,13 +506,9 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_open" ))		return do_open;
 	if ( !str_cmp( name, "do_openbay" ))  		return do_openbay;
 	if ( !str_cmp( name, "do_openhatch" ))          return do_openhatch; 
-/*	if ( !str_cmp( name, "do_opentourney" ))	return do_opentourney; */
 	if ( !str_cmp( name, "do_opstat" ))		return do_opstat;
-	if ( !str_cmp( name, "do_orange" ))		return do_orange;
 	if ( !str_cmp( name, "do_order" ))		return do_order;
-	if ( !str_cmp( name, "do_orders" ))		return do_orders;
 	if ( !str_cmp( name, "do_ordership" ))		return do_ordership;
-	if ( !str_cmp( name, "do_ordertalk" ))		return do_ordertalk;
 	if ( !str_cmp( name, "do_oset" ))		return do_oset;
 	if ( !str_cmp( name, "do_ostat" ))		return do_ostat;
 	if ( !str_cmp( name, "do_outcast" ))		return do_outcast;
@@ -565,7 +517,6 @@ DO_FUN *skill_function( const std::string& name )
 	break;
     case 'p':
 	if ( !str_cmp( name, "do_pager" ))		return do_pager;
-	if ( !str_cmp( name, "do_pardon" ))		return do_pardon;
 	if ( !str_cmp( name, "do_password" ))		return do_password;
 	if ( !str_cmp( name, "do_peace" ))		return do_peace;
 	if ( !str_cmp( name, "do_pick" ))		return do_pick;
@@ -603,10 +554,8 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_recho" ))		return do_recho;
 	if ( !str_cmp( name, "do_recall" ))              return do_recall;
 	if ( !str_cmp( name, "do_recite" ))		return do_recite;
-	if ( !str_cmp( name, "do_recite" ))             return do_recite;
     if ( !str_cmp( name, "do_redit" ))              return do_redit;
     if ( !str_cmp( name, "do_redit2" ))              return do_redit2;
-	if ( !str_cmp( name, "do_refuel" ))             return do_refuel; 
 	if ( !str_cmp( name, "do_reinforcements" ))	return do_reinforcements;
 	if ( !str_cmp( name, "do_regoto" ))		return do_regoto;
 	if ( !str_cmp( name, "do_reload" ))  		return do_reload;
@@ -615,15 +564,11 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_remove_module" ))	return do_remove_module;
 	if ( !str_cmp( name, "do_rempilot" ))           return do_rempilot; 
         if ( !str_cmp( name, "do_remresident" ))	return do_remresident;
-	if ( !str_cmp( name, "do_remsenator" ))         return do_remsenator; 
 	if ( !str_cmp( name, "do_renameship" ))		return do_renameship;
 	if ( !str_cmp( name, "do_rent" ))		return do_rent;
 	if ( !str_cmp( name, "do_repair" ))		return do_repair;
 	if ( !str_cmp( name, "do_repair_module" ))	return do_repair_module;
-	if ( !str_cmp( name, "do_repairset" ))		return do_repairset;
 	if ( !str_cmp( name, "do_repairship" ))         return do_repairship; 
-	if ( !str_cmp( name, "do_repairshops" ))	return do_repairshops;
-	if ( !str_cmp( name, "do_repairstat" ))		return do_repairstat;
 	if ( !str_cmp( name, "do_reply" ))		return do_reply;
 	if ( !str_cmp( name, "do_retell" )) 	        return do_retell;
 	if ( !str_cmp( name, "do_report" ))		return do_report;
@@ -667,7 +612,6 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_seduce" ))		return do_seduce;
 	if ( !str_cmp( name, "do_sell" ))		return do_sell;
 	if ( !str_cmp( name, "do_sellship" ))           return do_sellship;
-	if ( !str_cmp( name, "do_senate" ))             return do_senate;
 	if ( !str_cmp( name, "do_setblaster" ))	        return do_setblaster;
 	if ( !str_cmp( name, "do_sellhome" ))		return do_sellhome;
 	if ( !str_cmp( name, "do_set_boot_time" ))	return do_set_boot_time;
@@ -698,10 +642,10 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_sla" ))		return do_sla;
 	if ( !str_cmp( name, "do_slay" ))		return do_slay;
 	if ( !str_cmp( name, "do_sleep" ))		return do_sleep;
-	if ( !str_cmp( name, "do_slice" ))		return do_slice;
 	if ( !str_cmp( name, "do_slist" ))		return do_slist;
 	if ( !str_cmp( name, "do_slookup" ))		return do_slookup;
 	if ( !str_cmp( name, "do_smalltalk" ))		return do_smalltalk;
+	if ( !str_cmp( name, "do_sneak" ))		return do_sneak;
 	if ( !str_cmp( name, "do_smoke" ))		return do_smoke;
 	if ( !str_cmp( name, "do_snipe" ))		return do_snipe;
 	if ( !str_cmp( name, "do_snoop" ))		return do_snoop;
@@ -766,12 +710,10 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_unhell" ))		return do_unhell;
 	if ( !str_cmp( name, "do_undock" ))		return do_undock;
 	if ( !str_cmp( name, "do_unjail" ))		return do_unjail;
-	if ( !str_cmp( name, "do_unload" ))		return do_unload;
 	if ( !str_cmp( name, "do_unloadcargo" ))	return do_unloadcargo;
 	if ( !str_cmp( name, "do_unlock" ))		return do_unlock;
    if ( !str_cmp( name, "do_unsilence" ))          return do_unsilence;
 	if ( !str_cmp( name, "do_up" ))			return do_up;
-	if ( !str_cmp( name, "do_upgradeship" ))	return do_upgradeship;
 	if ( !str_cmp( name, "do_use" ))		return do_use;
 	if ( !str_cmp( name, "do_users" ))		return do_users;
         if ( !str_cmp( name, "do_undead" ))             return do_undead;
@@ -813,7 +755,6 @@ char *spell_name( SPELL_FUN *spell )
     if ( spell == spell_smaug )		    return "spell_smaug";
     if ( spell == spell_acid_blast )	    return "spell_acid_blast";
     if ( spell == spell_animate_dead )	    return "spell_animate_dead";
-    if ( spell == spell_astral_walk )	    return "spell_astral_walk";
     if ( spell == spell_blindness )	    return "spell_blindness";
     if ( spell == spell_burning_hands )	    return "spell_burning_hands";
     if ( spell == spell_call_lightning )    return "spell_call_lightning";
@@ -843,7 +784,6 @@ char *spell_name( SPELL_FUN *spell )
     if ( spell == spell_farsight )	    return "spell_farsight";
     if ( spell == spell_fireball )	    return "spell_fireball";
     if ( spell == spell_flamestrike )	    return "spell_flamestrike";
-    if ( spell == spell_gate )		    return "spell_gate";
     if ( spell == spell_knock )		    return "spell_knock";
     if ( spell == spell_harm )		    return "spell_harm";
     if ( spell == spell_identify )	    return "spell_identify";
@@ -852,21 +792,15 @@ char *spell_name( SPELL_FUN *spell )
     if ( spell == spell_lightning_bolt )    return "spell_lightning_bolt";
     if ( spell == spell_locate_object )	    return "spell_locate_object";
     if ( spell == spell_magic_missile )	    return "spell_magic_missile";
-    if ( spell == spell_mist_walk )	    return "spell_mist_walk";
     if ( spell == spell_pass_door )	    return "spell_pass_door";
-    if ( spell == spell_plant_pass )	    return "spell_plant_pass";
     if ( spell == spell_poison )	    return "spell_poison";
     if ( spell == spell_polymorph )	    return "spell_polymorph";
     if ( spell == spell_possess )	    return "spell_possess";
     if ( spell == spell_recharge )	    return "spell_recharge";
-    if ( spell == spell_remove_curse )	    return "spell_remove_curse";
     if ( spell == spell_remove_invis )	    return "spell_remove_invis";
     if ( spell == spell_remove_trap )	    return "spell_remove_trap";
     if ( spell == spell_shocking_grasp )    return "spell_shocking_grasp";
     if ( spell == spell_sleep )		    return "spell_sleep";
-    if ( spell == spell_solar_flight )	    return "spell_solar_flight";
-    if ( spell == spell_summon )	    return "spell_summon";
-    if ( spell == spell_teleport )	    return "spell_teleport";
     if ( spell == spell_ventriloquate )	    return "spell_ventriloquate";
     if ( spell == spell_weaken )	    return "spell_weaken";
     if ( spell == spell_word_of_recall )    return "spell_word_of_recall";
@@ -877,11 +811,6 @@ char *spell_name( SPELL_FUN *spell )
     if ( spell == spell_lightning_breath )  return "spell_lightning_breath";
     if ( spell == spell_spiral_blast )	    return "spell_spiral_blast";
     if ( spell == spell_scorching_surge )   return "spell_scorching_surge";
-    if ( spell == spell_helical_flow )	    return "spell_helical_flow";
-    if ( spell == spell_transport )	    return "spell_transport";
-    if ( spell == spell_portal )	    return "spell_portal";
-    if ( spell == spell_suggest )           return "spell_suggest";
-    if ( spell == spell_cure_addiction )    return "spell_cure_addiction";
 
     if ( spell == spell_ethereal_fist )	    return "spell_ethereal_fist";
     if ( spell == spell_spectral_furor )    return "spell_spectral_furor";
@@ -909,7 +838,7 @@ char *spell_name( SPELL_FUN *spell )
 char *skill_name( DO_FUN *skill )
 {   
     if ( skill == do_maketemplateship) return "do_maketemplateship";
-    if ( skill == do_ahelp) return "do_ahelp";
+    if ( skill == do_lookmap ) return "do_lookmap";
     if ( skill == do_improve_module) return "do_improve_module";
     if ( skill == do_gravityprojector) return "do_gravityprojector";
     if ( skill == do_remove_module)    return "do_remove_module";
@@ -926,7 +855,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_adjusttractorbeam ) return "do_adjusttractorbeam";
     if ( skill == do_scatter )     return "do_scatter";
     if ( skill == do_delay )     return "do_delay";
-    if ( skill == do_mortalize )     return "do_mortalize";
     if ( skill == do_i103 )     return "do_i103";
     if ( skill == do_i104 )     return "do_i104";
     if ( skill == do_i105 )     return "do_i105";
@@ -947,7 +875,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_seduce )     return "do_seduce";
     if ( skill == do_mass_propeganda )     return "do_mass_propeganda";
     if ( skill == do_mccpstat )     return "do_mccpstat";	
-    if ( skill == do_senate )     return "do_senate";
     if ( skill == do_autopilot )     return "do_autopilot";
     if ( skill == do_allspeeders )     return "do_allspeeders";
     if ( skill == do_speeders )     return "do_speeders";
@@ -957,7 +884,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_copyship )     return "do_copyship";
     if ( skill == do_hijack )     return "do_hijack";
     if ( skill == do_pickshiplock )     return "do_pickshiplock";
-    if ( skill == do_makejewelry )     return "do_makejewelry";
     if ( skill == do_marena)         return "do_marena";
     if ( skill == do_mchallenge)    return "do_mchallenge";
     if ( skill == do_spacetalk )     return "do_spacetalk";
@@ -972,12 +898,9 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_demote )     return "do_demote";
     if ( skill == do_empower )     return "do_empower";
     if ( skill == do_capture )     return "do_capture";
-    if ( skill == do_newclan )     return "do_newclan";
     if ( skill == do_arm )     return "do_arm";
     if ( skill == do_chaff )     return "do_chaff";
     if ( skill == do_allships )     return "do_allships";
-    if ( skill == do_fly )     return "do_fly";
-    if ( skill == do_bomb )     return "do_bomb";
     if ( skill == do_bank )     return "do_bank";
     if ( skill == do_drive )     return "do_drive";
     if ( skill == do_setblaster )     return "do_setblaster";
@@ -988,9 +911,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_resign )     return "do_resign";
     if ( skill == do_pluogus )     return "do_pluogus";
     if ( skill == do_tractorbeam )     return "do_tractorbeam";
-    if ( skill == do_makearmor )     return "do_makearmor";
-    if ( skill == do_makemissile )     return "do_makemissile";
-    if ( skill == do_gemcutting )     return "do_gemcutting";
     if ( skill == do_reinforcements )     return "do_reinforcements";
     if ( skill == do_postguard )     return "do_postguard";
     if ( skill == do_torture )     return "do_torture";
@@ -998,7 +918,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_throw )     return "do_throw";
     if ( skill == do_snipe )     return "do_snipe";
     if ( skill == do_disguise )     return "do_disguise";
-    if ( skill == do_makedisguise )     return "do_makedisguise";
     if ( skill == do_mine )     return "do_mine";
     if ( skill == do_first_aid )     return "do_first_aid";
     if ( skill == do_jumpvector )     return "do_jumpvector";
@@ -1025,10 +944,8 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_calculate_diff )         return "do_calculate_diff";
     if ( skill == do_recharge )         return "do_recharge";
     if ( skill == do_repairship )         return "do_repairship";
-    if ( skill == do_refuel )         return "do_refuel";
     if ( skill == do_addpilot )         return "do_addpilot";
     if ( skill == do_addresident )	return "do_addresident";
-    if ( skill == do_addsenator )         return "do_addsenator";
     if ( skill == do_rempilot )         return "do_rempilot";
     if ( skill == do_remresident )	return "do_remresident";
     if ( skill == do_aassign )		return "do_aassign";
@@ -1082,7 +999,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_bodybag )		return "do_bodybag";
     if ( skill == do_bounties )         return "do_bounties";
     if ( skill == do_brandish )		return "do_brandish";
-    if ( skill == do_brew )		return "do_brew";
     if ( skill == do_bset )		return "do_bset";
     if ( skill == do_bstat )		return "do_bstat";
     if ( skill == do_bug )		return "do_bug";
@@ -1122,7 +1038,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_credits )		return "do_credits";
     if ( skill == do_cset )		return "do_cset";
     if ( skill == do_cutdoor )		return "do_cutdoor";
-    if ( skill == do_degradeship )	return "do_degradeship";
     if ( skill == do_deny )		return "do_deny";
     if ( skill == do_description )	return "do_description";
     if ( skill == do_destro )		return "do_destro";
@@ -1135,6 +1050,7 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_dismiss )		return "do_dismiss";
     if ( skill == do_dmesg )		return "do_dmesg";
     if ( skill == do_dock )		return "do_dock";
+    if ( skill == do_dnd )		return "do_dnd";
     if ( skill == do_down )		return "do_down";
     if ( skill == do_dontresolve )	return "do_dontresolve";
     if ( skill == do_drag )		return "do_drag";
@@ -1150,7 +1066,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_equipment )	return "do_equipment";
     if ( skill == do_examine )		return "do_examine";
     if ( skill == do_exits )		return "do_exits";
-    if ( skill == do_feed )		return "do_feed";
     if ( skill == do_fill )		return "do_fill";
     if ( skill == do_fixchar )		return "do_fixchar";
     if ( skill == do_flee )		return "do_flee";
@@ -1172,8 +1087,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_grub )		return "do_grub";
     if ( skill == do_gtell )		return "do_gtell";
     if ( skill == do_guard )		return "do_guard";
-    if ( skill == do_guilds )		return "do_guilds";
-    if ( skill == do_guildtalk )	return "do_guildtalk";
     if ( skill == do_hedit )		return "do_hedit";
     if ( skill == do_hell )		return "do_hell";
     if ( skill == do_help )		return "do_help";
@@ -1206,7 +1119,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_light )		return "do_light";
     if ( skill == do_list )		return "do_list";
     if ( skill == do_litterbug )	return "do_litterbug";
-    if ( skill == do_load )		return "do_load";
     if ( skill == do_loadarea )		return "do_loadarea";
     if ( skill == do_loadcargo )	return "do_loadcargo";
     if ( skill == do_loadup )		return "do_loadup";
@@ -1216,29 +1128,14 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_low_purge )	return "do_low_purge";
     if ( skill == do_mailroom )		return "do_mailroom";
     if ( skill == do_make )		return "do_make";
-    if ( skill == do_makelight )	return "do_makelight";
-    if ( skill == do_makecomlink )	return "do_makecomlink";
-    if ( skill == do_makegrenade )	return "do_makegrenade";
-    if ( skill == do_makelandmine )	return "do_makelandmine";
-    if ( skill == do_makecontainer )	return "do_makecontainer";
-    if ( skill == do_makemedpac )	return "do_makemedpac";
-    if ( skill == do_makeshield )	return "do_makeshield";
-    if ( skill == do_makeblade )	return "do_makeblade";
-    if ( skill == do_makefurniture )	return "do_makefurniture";
-    if ( skill == do_makeblaster )	return "do_makeblaster";
-    if ( skill == do_makebowcaster )	return "do_makebowcaster";
-    if ( skill == do_makelightsaber )	return "do_makelightsaber";
-    if ( skill == do_makespice )	return "do_makespice";
     if ( skill == do_makeboard )	return "do_makeboard";
     if ( skill == do_makeclan )		return "do_makeclan";
-    if ( skill == do_makerepair )	return "do_makerepair";
     if ( skill == do_makeshop )		return "do_makeshop";
     if ( skill == do_makeship )         return "do_makeship";
     if ( skill == do_makespaceobject )   return "do_makespaceobject";
     if ( skill == do_makewizlist )	return "do_makewizlist";
     if ( skill == do_massign )		return "do_massign";
     if ( skill == do_mcreate )		return "do_mcreate";
-    if ( skill == do_mdelete )		return "do_mdelete";
     if ( skill == do_medit )		return "do_medit";	
     if ( skill == do_memory )		return "do_memory";
     if ( skill == do_members )          return "do_members";
@@ -1250,11 +1147,9 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_mp_damage )	return "do_mp_damage";
     if ( skill == do_mp_deposit )	return "do_mp_deposit";
     if ( skill == do_mp_open_passage )	return "do_mp_open_passage";
-    if ( skill == do_mp_practice )	return "do_mp_practice";
     if ( skill == do_mp_restore )	return "do_mp_restore";
     if ( skill == do_mp_slay )		return "do_mp_slay";
     if ( skill == do_mp_withdraw )	return "do_mp_withdraw";
-    if ( skill == do_mpadvance )	return "do_mpadvance";
     if ( skill == do_mpapply )		return "do_mpapply";
     if ( skill == do_mpapplyb )		return "do_mpapplyb";
     if ( skill == do_mpasound )		return "do_mpasound";
@@ -1274,11 +1169,9 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_mpmload )		return "do_mpmload";
     if ( skill == do_mpnothing )	return "do_mpnothing";
     if ( skill == do_mpoload )		return "do_mpoload";
-    if ( skill == do_mppkset )		return "do_mppkset";
     if ( skill == do_mppurge )		return "do_mppurge";
     if ( skill == do_mpstat )		return "do_mpstat";
     if ( skill == do_mptransfer )	return "do_mptransfer";
-    if ( skill == do_mrange )		return "do_mrange";
     if ( skill == do_mset )		return "do_mset";
     if ( skill == do_mstat )		return "do_mstat";
     if ( skill == do_murde )		return "do_murde";
@@ -1301,7 +1194,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_noteroom )		return "do_noteroom";
     if ( skill == do_oassign )		return "do_oassign";
     if ( skill == do_ocreate )		return "do_ocreate";
-    if ( skill == do_odelete )		return "do_odelete";
     if ( skill == do_oedit )		return "do_oedit";
     if ( skill == do_ofind )		return "do_ofind";
     if ( skill == do_ogrub )		return "do_ogrub";
@@ -1314,20 +1206,15 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_opedit )		return "do_opedit";
     if ( skill == do_opfind )		return "do_opfind";
     if ( skill == do_open )		return "do_open";
-/*  if ( skill == do_opentourney )	return "do_opentourney"; */
     if ( skill == do_opstat )		return "do_opstat";
-    if ( skill == do_orange )		return "do_orange";
     if ( skill == do_order )		return "do_order";
-    if ( skill == do_orders )		return "do_orders";
     if ( skill == do_ordership )	return "do_ordership";
-    if ( skill == do_ordertalk )	return "do_ordertalk";
     if ( skill == do_oset )		return "do_oset";
     if ( skill == do_ostat )		return "do_ostat";
     if ( skill == do_outcast )		return "do_outcast";
     if ( skill == do_override )		return "do_override";
     if ( skill == do_owhere )		return "do_owhere";
     if ( skill == do_pager )		return "do_pager";
-    if ( skill == do_pardon )		return "do_pardon";
     if ( skill == do_password )		return "do_password";
     if ( skill == do_peace )		return "do_peace";
     if ( skill == do_pick )		return "do_pick";
@@ -1361,9 +1248,6 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_rent )		return "do_rent";
     if ( skill == do_repair )		return "do_repair";
     if ( skill == do_repair_module )    return "do_repair_module";
-    if ( skill == do_repairset )	return "do_repairset";
-    if ( skill == do_repairshops )	return "do_repairshops";
-    if ( skill == do_repairstat )	return "do_repairstat";
     if ( skill == do_reply )		return "do_reply";
     if ( skill == do_retell )           return "do_retell";
     if ( skill == do_report )		return "do_report";
@@ -1425,9 +1309,9 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_sla )		return "do_sla";
     if ( skill == do_slay )		return "do_slay";
     if ( skill == do_sleep )		return "do_sleep";
-    if ( skill == do_slice )		return "do_slice";
     if ( skill == do_slist )		return "do_slist";
     if ( skill == do_slookup )		return "do_slookup";
+    if ( skill == do_sneak )		return "do_sneak";
     if ( skill == do_smoke )		return "do_smoke";
     if ( skill == do_snoop )		return "do_snoop";
     if ( skill == do_sober )		return "do_sober";
@@ -1457,25 +1341,23 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_transfercargo)     return "do_transfercargo";
     if ( skill == do_transferownership) return "do_transferownership";
     if ( skill == do_transship )	return "do_transship";
-/*    if ( skill == do_trivia)            return "do_trivia";
+    if ( skill == do_trivia)            return "do_trivia";
     if ( skill == do_trivia_answer)     return "do_trivia_answer";
     if ( skill == do_trivia_chat)     return "do_trivia_chat";
     if ( skill == do_trivia_join )      return "do_trivia_join";
     if ( skill == do_trivia_question)   return "do_trivia_question";
     if ( skill == do_trivia_winner)     return "do_trivia_winner";
-    if ( skill == do_trivia_score)      return "do_trivia_score";*/
+    if ( skill == do_trivia_score)      return "do_trivia_score";
     if ( skill == do_trust )		return "do_trust";
     if ( skill == do_typo )		return "do_typo";
     if ( skill == do_unfoldarea )	return "do_unfoldarea";
     if ( skill == do_unhell )		return "do_unhell";
-    if ( skill == do_unload )		return "do_unload";
     if ( skill == do_unloadcargo )	return "do_unloadcargo";
     if ( skill == do_unlock )		return "do_unlock";
     if ( skill == do_undock )           return "do_undock";
     if ( skill == do_unjail )           return "do_unjail";
     if ( skill == do_unsilence )        return "do_unsilence";
     if ( skill == do_up )		return "do_up";
-    if ( skill == do_upgradeship )	return "do_upgradeship";
     if ( skill == do_users )		return "do_users";
     if ( skill == do_undead )           return "do_undead";
     if ( skill == do_value )		return "do_value";
@@ -1529,7 +1411,8 @@ int skill_comp( SKILLTYPE **sk1, SKILLTYPE **sk2 )
 void sort_skill_table( GameContext *game )
 {
     log_string( "Sorting skill table..." );
-    qsort( &skill_table[1], top_sn-1, sizeof( SKILLTYPE * ),
+    if ( top_sn > 1 )
+        qsort( &skill_table[1], top_sn-1, sizeof( SKILLTYPE * ),
 		(int(*)(const void *, const void *)) skill_comp );
 }
 
@@ -1630,7 +1513,7 @@ void save_skill_table(GameContext *game)
 
     if ( (fpout=fopen( SKILL_FILE, "w" )) == NULL )
     {
-	bug( "Cannot open skills.dat for writting", 0 );
+	bug( "Cannot open skills.dat for writting" );
 	perror( SKILL_FILE );
 	return;
     }
@@ -1656,7 +1539,7 @@ void save_herb_table(GameContext *game)
 
     if ( (fpout=fopen( HERB_FILE, "w" )) == NULL )
     {
-	bug( "Cannot open herbs.dat for writting", 0 );
+	bug( "Cannot open herbs.dat for writting" );
 	perror( HERB_FILE );
 	return;
     }
@@ -1683,7 +1566,7 @@ void save_socials(GameContext *game)
 
     if ( (fpout=fopen( SOCIAL_FILE, "w" )) == NULL )
     {
-	bug( "Cannot open socials.dat for writting", 0 );
+	bug( "Cannot open socials.dat for writting" );
 	perror( SOCIAL_FILE );
 	return;
     }
@@ -1724,7 +1607,13 @@ void save_socials(GameContext *game)
 
 int get_skill( const std::string& skilltype )
 {
-	return find_flag(skill_tname,skilltype)->bit;
+    const flag_name *f = find_flag( skill_tname, skilltype );
+    if ( !f )
+    {
+        bug( "get_skill: unknown skill type '%s'", skilltype.c_str() );
+        return SKILL_UNKNOWN;
+    }
+    return static_cast<int>( f->bit );
 }
 
 /*
@@ -1738,7 +1627,7 @@ void save_commands(GameContext *game)
 
     if ( (fpout=fopen( COMMAND_FILE, "w" )) == NULL )
     {
-	bug( "Cannot open commands.dat for writing", 0 );
+	bug( "Cannot open commands.dat for writing" );
 	perror( COMMAND_FILE );
 	return;
     }
@@ -1778,7 +1667,9 @@ SKILLTYPE *fread_skill( FILE *fp )
 
     for ( ; ; )
     {
-	word   = feof( fp ) ? "End" : fread_word( fp );
+	word   = ( feof( fp ) || ferror( fp ) ) ? "End" : fread_word( fp );
+	if ( word[0] == '\0' )
+	    word = "End";
 	fMatch = FALSE;
 
 	switch ( UPPER(word[0]) )
@@ -1803,8 +1694,6 @@ SKILLTYPE *fread_skill( FILE *fp )
 			skill->affects = aff;
 			fMatch = TRUE;
 			break;
-
-			aff->bitvector = fread_number( fp );
 	    }
 	    if ( !str_cmp( word, "AffectEx" ) )
 	    {
@@ -1842,7 +1731,6 @@ SKILLTYPE *fread_skill( FILE *fp )
 		}
 		break;
 	    }
-	    KEY( "Code",	skill->spell_fun, spell_function(fread_word(fp)) );
 	    KEY( "Components",	skill->components,	fread_string_nohash( fp ) );
 	    break;
  
@@ -1949,7 +1837,7 @@ void load_skill_table( GameContext *game )
 
 	    if ( letter != '#' )
 	    {
-                bug( "Load_skill_table: # not found.", 0 );
+                bug( "Load_skill_table: # not found." );
 		break;
 	    }
 
@@ -1970,7 +1858,7 @@ void load_skill_table( GameContext *game )
 	        break;
 	    else
 	    {
-                bug( "Load_skill_table: bad section.", 0 );
+                bug( "Load_skill_table: bad section." );
 		continue;
 	    }
 	}
@@ -1978,8 +1866,8 @@ void load_skill_table( GameContext *game )
     }
     else
     {
-	bug( "Cannot open skills.dat", 0 );
- 	exit(0);
+	bug( "Cannot open skills.dat" );
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -2004,7 +1892,7 @@ void load_herb_table( GameContext *game)
 
 	    if ( letter != '#' )
 	    {
-		bug( "Load_herb_table: # not found.", 0 );
+		bug( "Load_herb_table: # not found." );
 		break;
 	    }
 
@@ -2027,7 +1915,7 @@ void load_herb_table( GameContext *game)
 	        break;
 	    else
 	    {
-                bug( "Load_herb_table: bad section.", 0 );
+                bug( "Load_herb_table: bad section." );
 		continue;
 	    }
 	}
@@ -2035,8 +1923,8 @@ void load_herb_table( GameContext *game)
     }
     else
     {
-	bug( "Cannot open herbs.dat", 0 );
- 	exit(0);
+	bug( "Cannot open herbs.dat" );
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -2051,7 +1939,9 @@ void fread_social( FILE *fp )
 
     for ( ;; )
     {
-	word   = feof( fp ) ? "End" : fread_word( fp );
+	word   = ( feof( fp ) || ferror( fp ) ) ? "End" : fread_word( fp );
+	if ( word[0] == '\0' )
+	    word = "End";
 	fMatch = FALSE;
 
 	switch ( UPPER(word[0]) )
@@ -2072,13 +1962,13 @@ void fread_social( FILE *fp )
 	    {
 		if ( !social->name )
 		{
-		    bug( "Fread_social: Name not found", 0 );
+		    bug( "Fread_social: Name not found" );
 		    free_social( social );
 		    return;
 		}
 		if ( !social->char_no_arg )
 		{
-		    bug( "Fread_social: CharNoArg not found", 0 );
+		    bug( "Fread_social: CharNoArg not found" );
 		    free_social( social );
 		    return;
 		}
@@ -2130,7 +2020,7 @@ void load_socials( GameContext *game)
 
 	    if ( letter != '#' )
 	    {
-                bug( "Load_socials: # not found.", 0 );
+                bug( "Load_socials: # not found." );
 		break;
 	    }
 
@@ -2145,7 +2035,7 @@ void load_socials( GameContext *game)
 	        break;
 	    else
 	    {
-                bug( "Load_socials: bad section.", 0 );
+                bug( "Load_socials: bad section." );
 		continue;
 	    }
 	}
@@ -2153,8 +2043,8 @@ void load_socials( GameContext *game)
     }
     else
     {
-	bug( "Cannot open socials.dat", 0 );
- 	exit(0);
+	bug( "Cannot open socials.dat" );
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -2169,7 +2059,9 @@ void fread_command( FILE *fp )
 
     for ( ;; )
     {
-	word   = feof( fp ) ? "End" : fread_word( fp );
+	word   = ( feof( fp ) || ferror( fp ) ) ? "End" : fread_word( fp );
+	if ( word[0] == '\0' )
+	    word = "End";
 	fMatch = FALSE;
 
 	switch ( UPPER(word[0]) )
@@ -2202,15 +2094,15 @@ void fread_command( FILE *fp )
 	case 'E':
 	    if ( !str_cmp( word, "End" ) )
 	    {
-		if ( !command->name )
+		if ( !command->name || command->name[0] == '\0' )
 		{
-		    bug( "Fread_command: Name not found", 0 );
+		    bug( "Fread_command: Name not found" );
 		    free_command( command );
 		    return;
 		}
-		if ( !command->do_fun )
+		if ( !command->do_fun || command->do_fun == skill_notfound )
 		{
-		    bug( "Fread_command: Function not found", 0 );
+		    bug( "Fread_command: Function not found for %s", command->name );
 		    free_command( command );
 		    return;
 		}
@@ -2261,7 +2153,7 @@ void load_commands( GameContext *game )
 
 	    if ( letter != '#' )
 	    {
-                bug( "Load_commands: # not found.", 0 );
+                bug( "Load_commands: # not found." );
 		break;
 	    }
 
@@ -2276,7 +2168,7 @@ void load_commands( GameContext *game )
 	        break;
 	    else
 	    {
-                bug( "Load_commands: bad section.", 0 );
+                bug( "Load_commands: bad section." );
 		continue;
 	    }
 	}
@@ -2284,8 +2176,8 @@ void load_commands( GameContext *game )
     }
     else
     {
-	bug( "Cannot open commands.dat", 0 );
- 	exit(0);
+	bug( "Cannot open commands.dat" );
+        exit(EXIT_FAILURE);
     }
 
 }

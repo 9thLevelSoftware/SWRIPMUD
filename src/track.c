@@ -22,12 +22,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <queue>
+#include <unordered_set>
 #include "mud.h"
 
 #define BFS_ERROR	   -1
 #define BFS_ALREADY_THERE  -2
 #define BFS_NO_PATH	   -3
-#define BFS_MARK         BV01
 
 #define TRACK_THROUGH_DOORS
 
@@ -42,155 +43,59 @@ ROOM_INDEX_DATA *generate_exit( ROOM_INDEX_DATA *in_room, EXIT_DATA **pexit );
    or hidden doors.
 */
 
-struct bfs_queue_struct {
-   ROOM_INDEX_DATA *room;
-   char   dir;
-   struct bfs_queue_struct *next;
-};
-
-static struct bfs_queue_struct	*queue_head = NULL,
-				*queue_tail = NULL,
-				*room_queue = NULL;
-
-/* Utility macros */
-#define MARK(room)	(BV_SET_BIT(	(room)->room_flags, BFS_MARK) )
-#define UNMARK(room)	(BV_REMOVE_BIT(	(room)->room_flags, BFS_MARK) )
-#define IS_MARKED(room)	(BV_IS_SET(	(room)->room_flags, BFS_MARK) )
-
-ROOM_INDEX_DATA *toroom( ROOM_INDEX_DATA *room, sh_int door )
-{
-    return (get_exit( room, door )->to_room);
-}
-
-bool valid_edge( ROOM_INDEX_DATA *room, sh_int door )
-{
-    EXIT_DATA *pexit;
-    ROOM_INDEX_DATA *to_room;
-
-    pexit = get_exit( room, door );
-    if ( pexit
-    &&  (to_room = pexit->to_room) != NULL
-#ifndef TRACK_THROUGH_DOORS
-    &&  !IS_SET( pexit->exit_info, EX_CLOSED )
-#endif
-    &&  !IS_MARKED( to_room ) )
-      return TRUE;
-    else
-      return FALSE;
-}
-
-void bfs_enqueue(ROOM_INDEX_DATA *room, char dir)
-{
-   struct bfs_queue_struct *curr;
-
-   CREATE( curr, struct bfs_queue_struct, 1 );
-   curr->room = room;
-   curr->dir = dir;
-   curr->next = NULL;
-
-   if (queue_tail) {
-      queue_tail->next = curr;
-      queue_tail = curr;
-   } else
-      queue_head = queue_tail = curr;
-}
-
-
-void bfs_dequeue(void)
-{
-   struct bfs_queue_struct *curr;
-
-   curr = queue_head;
-
-   if (!(queue_head = queue_head->next))
-      queue_tail = NULL;
-   DISPOSE(curr);
-}
-
-
-void bfs_clear_queue(void) 
-{
-   while (queue_head)
-      bfs_dequeue();
-}
-
-void room_enqueue(ROOM_INDEX_DATA *room)
-{
-   struct bfs_queue_struct *curr;
-
-   CREATE( curr, struct bfs_queue_struct, 1 );
-   curr->room = room;
-   curr->next = room_queue;
-
-   room_queue = curr;
-}
-
-void clean_room_queue(void) 
-{
-   struct bfs_queue_struct *curr, *curr_next;
-
-   for (curr = room_queue; curr; curr = curr_next )
-   {
-      UNMARK( curr->room );
-      curr_next = curr->next;
-      DISPOSE( curr );
-   }
-   room_queue = NULL;
-}
-
-
 int find_first_step(ROOM_INDEX_DATA *src, ROOM_INDEX_DATA *target, int maxdist )
 {
-   int curr_dir, count;
-
    if ( !src || !target )
    {
-      bug("Illegal value passed to find_first_step (track.c)", 0 );
+      bug("Illegal value passed to find_first_step (track.c)" );
       return BFS_ERROR;
    }
 
    if (src == target)
       return BFS_ALREADY_THERE;
 
-   if ( src->area != target->area )
+   if ( maxdist < 1 || src->area != target->area )
       return BFS_NO_PATH;
 
-   room_enqueue( src );
-   MARK(src);
+   struct Step
+   {
+      ROOM_INDEX_DATA *room;
+      int first_dir;
+      int distance;
+   };
+   constexpr size_t max_visited_rooms = 100000;
+   std::unordered_set<ROOM_INDEX_DATA*> visited;
+   std::queue<Step> q;
 
-   /* first, enqueue the first steps, saving which direction we're going. */
-   for (curr_dir = 0; curr_dir < 10; curr_dir++)
-      if (valid_edge(src, curr_dir))
-      {
-         MARK(toroom(src, curr_dir));
-	 room_enqueue(toroom(src, curr_dir));
-         bfs_enqueue(toroom(src, curr_dir), curr_dir);
-      }
+   visited.insert(src);
+   q.push({src, BFS_NO_PATH, 0});
+   while (!q.empty())
+   {
+      const Step step = q.front();
+      q.pop();
+      if (step.distance >= maxdist)
+         continue;
 
-   count = 0;
-   while (queue_head) {
-      if ( ++count > maxdist )
+      for (sh_int direction = 0; direction < 10; ++direction)
       {
-	bfs_clear_queue();
-	clean_room_queue();
-	return BFS_NO_PATH;
-      }
-      if (queue_head->room == target) {
-	 curr_dir = queue_head->dir;
-	 bfs_clear_queue();
-	 clean_room_queue();
-	 return curr_dir;
-      } else {
-         for (curr_dir = 0; curr_dir < 10; curr_dir++)
-            if (valid_edge(queue_head->room, curr_dir)) {
-               MARK(toroom(queue_head->room, curr_dir));
-	       room_enqueue(toroom(queue_head->room, curr_dir));
-	       bfs_enqueue(toroom(queue_head->room, curr_dir),queue_head->dir);
-            }
-         bfs_dequeue();
+         EXIT_DATA *exit = get_exit(step.room, direction);
+         if (!exit || !exit->to_room)
+            continue;
+#ifndef TRACK_THROUGH_DOORS
+         if (IS_SET(exit->exit_info, EX_CLOSED))
+            continue;
+#endif
+         const int first_dir = step.distance == 0 ? direction : step.first_dir;
+         if (exit->to_room == target)
+            return first_dir;
+         if (step.distance + 1 < maxdist && visited.insert(exit->to_room).second)
+         {
+            if (visited.size() > max_visited_rooms)
+               return BFS_NO_PATH;
+            q.push({exit->to_room, first_dir, step.distance + 1});
+         }
       }
    }
-   clean_room_queue();
 
    return BFS_NO_PATH;
 }
@@ -257,19 +162,19 @@ void found_prey( CHAR_DATA *ch, CHAR_DATA *victim )
 
      if (victim == NULL)
      {
-	bug("Found_prey: null victim", 0);
+	bug("Found_prey: null victim");
 	return;
      }
      
      if (ch == NULL)
      {
-	bug("Found_prey: null ch", 0);
+	bug("Found_prey: null ch");
 	return;
      }
 
-     if ( victim->in_room == NULL )
+     if ( ch->in_room == NULL || victim->in_room == NULL )
      {
-        bug( "Found_prey: null victim->in_room", 0 );
+        bug( "Found_prey: null in_room" );
         return;
      }
 
@@ -341,6 +246,8 @@ void found_prey( CHAR_DATA *ch, CHAR_DATA *victim )
 	     act( AT_ACTION, "You lunge at $N catching $M off guard!", ch, NULL, victim, TO_CHAR );
 	     act( AT_ACTION, "$n lunges at you from out of nowhere!", ch, NULL, victim, TO_VICT );
      }
+     if ( char_died(ch) || char_died(victim) )
+        return;
      stop_hunting( ch );
      set_fighting( ch, victim );
      multi_hit(ch, victim, TYPE_UNDEFINED);
@@ -353,7 +260,7 @@ void hunt_victim( CHAR_DATA *ch )
    CHAR_DATA *tmp;
    sh_int ret;
 
-   if (!ch || !ch->hunting || !ch->hunting->who )
+   if (!ch || !ch->hunting || !ch->hunting->who || !ch->in_room )
       return;
 
    /* make sure the char still exists */
@@ -361,7 +268,7 @@ void hunt_victim( CHAR_DATA *ch )
       if (ch->hunting->who == tmp)
          found = TRUE;
 
-   if (!found)
+   if (!found || char_died(ch->hunting->who) || !ch->hunting->who->in_room)
    {
       do_say(ch, "Damn!  My prey is gone!!" );
       stop_hunting( ch );
@@ -389,21 +296,27 @@ void hunt_victim( CHAR_DATA *ch )
         else if ( !BV_IS_SET( ch->act, ACT_DROID ) )
            do_hide ( ch, "" );
    }
+
+   if ( char_died(ch) || !ch->in_room || !ch->hunting || !ch->hunting->who || !ch->hunting->who->in_room )
+      return;
    
    ret = find_first_step(ch->in_room, ch->hunting->who->in_room, 5000);
    if ( ret == BFS_NO_PATH )
    {
        EXIT_DATA *pexit;
        int attempt;
-       
+
+       ret = BFS_NO_PATH;
        for ( attempt = 0; attempt < 25; attempt++ )
        {
-	  ret = number_door( );
-	  if ( ( pexit = get_exit(ch->in_room, ret) ) == NULL
+	  sh_int door = number_door( );
+	  if ( ( pexit = get_exit(ch->in_room, door) ) == NULL
 	  ||   !pexit->to_room
 	  || IS_SET(pexit->exit_info, EX_CLOSED)
 	  || BV_IS_SET(pexit->to_room->room_flags, ROOM_NO_MOB) )
 	     continue;
+	  ret = door;
+	  break;
        }
    }
    if ( ret < 0)
@@ -414,23 +327,39 @@ void hunt_victim( CHAR_DATA *ch )
    }
    else
    {
-      move_char( ch, get_exit( ch->in_room, ret), FALSE );
+      EXIT_DATA *pexit = get_exit( ch->in_room, ret );
+      if ( !pexit )
+      {
+         stop_hunting( ch );
+         return;
+      }
+      move_char( ch, pexit, FALSE );
       if ( char_died(ch) )
           return;
       if ( !ch->hunting )
       {
         if ( !ch->in_room )
         {
-//        char buf[MAX_STRING_LENGTH];
+          ROOM_INDEX_DATA *limbo = get_room_index( ROOM_VNUM_LIMBO );
           bug( "Hunt_victim: no ch->in_room!  Mob #%d, name: %s.  Placing mob in limbo.",
-                   ch->pIndexData->vnum, ch->name );
-          char_to_room( ch, get_room_index( ROOM_VNUM_LIMBO ) );
+                   ch->pIndexData ? ch->pIndexData->vnum : -1,
+                   ch->name ? ch->name : "(null)" );
+          if ( limbo )
+             char_to_room( ch, limbo );
           return;
         } 
 	do_say( ch, "Damn!  Lost my prey!" );
 	return;
       }
-      if (ch->in_room == ch->hunting->who->in_room)
+      for (found = FALSE, tmp = first_char; tmp && !found; tmp = tmp->next)
+         if (ch->hunting->who == tmp)
+            found = TRUE;
+      if ( !found || char_died(ch->hunting->who) )
+      {
+         stop_hunting( ch );
+         return;
+      }
+      if (ch->in_room && ch->in_room == ch->hunting->who->in_room)
 	found_prey( ch, ch->hunting->who );
       return;
    }
@@ -446,13 +375,13 @@ bool mob_snipe( CHAR_DATA *ch, CHAR_DATA *victim )
    std::string buf;
    bool              pfound = FALSE;
 
- if ( !ch->in_room || !victim->in_room )
+ if ( !ch || !victim || !ch->in_room || !victim->in_room )
         return FALSE;
    
  if ( BV_IS_SET( ch->in_room->room_flags, ROOM_SAFE ) )
 	return FALSE;
    
- for ( dir = 0 ; dir <= 10 ; dir++ )
+ for ( dir = 0 ; dir < 10 ; dir++ )
  {  
    if ( ( pexit = get_exit( ch->in_room, dir ) ) == NULL )
      continue;
@@ -492,16 +421,16 @@ bool mob_snipe( CHAR_DATA *ch, CHAR_DATA *victim )
             
    }
    
-   char_from_room( ch );
+   if ( ch->in_room )
+      char_from_room( ch );
    char_to_room( ch, was_in_room );    
        
    if ( !pfound )
-   {
-       char_from_room( ch );
-       char_to_room( ch, was_in_room );    
        continue;
-   }
    
+    if ( !victim->in_room )
+	return FALSE;
+
     if ( BV_IS_SET( victim->in_room->room_flags, ROOM_SAFE ) )
 	return FALSE;
  
@@ -559,14 +488,16 @@ bool mob_snipe( CHAR_DATA *ch, CHAR_DATA *victim )
        
        stop_fighting( ch , TRUE );
 
-       if ( victim && !char_died(victim) && victim->hit < 0 )
+       if ( !victim || char_died(victim) || victim->hit < 0 )
        {
               stop_hunting( ch );
               stop_hating( ch );
        }
        
-    char_from_room( ch );
-    char_to_room( ch, was_in_room );    
+    if ( ch->in_room )
+       char_from_room( ch );
+    if ( was_in_room )
+       char_to_room( ch, was_in_room );    
      
     return TRUE;
  }  

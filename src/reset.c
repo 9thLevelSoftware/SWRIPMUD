@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <vector>
 #include "mud.h"
 
 /* Externals */
@@ -49,8 +50,67 @@ RESET_DATA *	parse_reset	args( ( AREA_DATA *tarea, const std::string& argument,
 int		get_wearloc	args( ( const std::string& type ) );
 int		get_trapflag	args( ( const std::string& flag ) );
 int		get_exflag	args( ( const std::string& flag ) );
-int		get_rflag	args( ( const std::string& flag ) );
+size_t		get_rflag	args( ( const std::string& flag ) );
+static int reset_get_rflag( const std::string& flag )
+{
+    size_t r = get_rflag(flag);
+    return (r == (size_t)-1) ? -1 : static_cast<int>(r);
+}
 extern	const char *	const		ex_flags[];
+
+static RESET_DATA *make_area_reset( AREA_DATA *area, char letter, int extra, int arg1, int arg2, int arg3 )
+{
+  RESET_DATA *reset = make_reset(letter, extra, arg1, arg2, arg3);
+  reset->game = area->game;
+  return reset;
+}
+
+static void free_reset( RESET_DATA *reset )
+{
+  DISPOSE(reset);
+  --top_reset;
+}
+
+static void unlink_reset( AREA_DATA *area, RESET_DATA *reset )
+{
+  if ( area->last_mob_reset == reset )
+    area->last_mob_reset = nullptr;
+  if ( area->last_obj_reset == reset )
+    area->last_obj_reset = nullptr;
+  UNLINK(reset, area->first_reset, area->last_reset, next, prev);
+  free_reset(reset);
+}
+
+static bool has_implicit_reset_dependents( const RESET_DATA *parent )
+{
+  const bool tracks_mobile = parent->command == 'M';
+  bool tracks_object = true;
+  for ( const RESET_DATA *next = parent->next; next; next = next->next )
+  {
+    const int bit_target = next->arg2 & BIT_RESET_TYPE_MASK;
+    if ( next->command == 'M' )
+      return false;
+    if ( tracks_mobile && (next->command == 'G' || next->command == 'E'
+    ||   (next->command == 'B' && bit_target == BIT_RESET_MOBILE)) )
+      return true;
+    if ( !tracks_object )
+      continue;
+    if ( next->command == 'O' || next->command == 'G' || next->command == 'E'
+    ||   (next->command == 'P' && next->arg3 > 0) )
+    {
+      if ( !tracks_mobile )
+        return false;
+      tracks_object = false;
+      continue;
+    }
+
+    if ( next->command == 'P' || (next->command == 'H' && next->arg1 <= 0)
+    ||   (next->command == 'T' && IS_SET(next->extra, TRAP_OBJ) && next->arg3 <= 0)
+    ||   (next->command == 'B' && bit_target == BIT_RESET_OBJECT && next->arg1 <= 0) )
+      return true;
+  }
+  return false;
+}
 
 bool is_room_reset  args( ( RESET_DATA *pReset, ROOM_INDEX_DATA *aRoom,
                             AREA_DATA *pArea ) );
@@ -245,12 +305,7 @@ void delete_reset( AREA_DATA *pArea, RESET_DATA *pReset )
         break;
     }
   }
-  if ( pReset == pArea->last_mob_reset )
-    pArea->last_mob_reset = NULL;
-  if ( pReset == pArea->last_obj_reset )
-    pArea->last_obj_reset = NULL;
-  UNLINK(pReset, pArea->first_reset, pArea->last_reset, next, prev);
-  DISPOSE(pReset);
+  unlink_reset(pArea, pReset);
   return;
 }
 #undef DEL_RESET
@@ -400,10 +455,10 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
     ch_printf( ch, "Syntax: %sbit <set|toggle|remove> door%s <dir> "
         "<exit flags>\n", nm, rn );
     ch_printf( ch, "Syntax: %sbit <set|toggle|remove> object <obj name> "
-        "<extra flags>\n", nm );
+        "<extra flag>\n", nm );
     ch_printf( ch, "Syntax: %sbit <set|toggle|remove> mobile <mob name> "
-        "<affect flags>\n", nm );
-    ch_printf( ch, "Syntax: %sbit <set|toggle|remove> room%s <room flags>"
+        "<affect flag>\n", nm );
+    ch_printf( ch, "Syntax: %sbit <set|toggle|remove> room%s <room flag>"
         "\n", nm, rn );
     ch_printf( ch, "Syntax: %srandom <last dir>%s\n", nm, rn );
     if ( !aRoom )
@@ -415,6 +470,7 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
   }
   if ( !str_cmp(arg, "on") )
   {
+    CHECK_SUBRESTRICTED( ch );
     ch->substate = SUB_REPEATCMD;
     ch->dest_buf = (aRoom ? (void *)aRoom : (void *)pArea);
     send_to_char( "Reset mode on.\n", ch );
@@ -471,6 +527,7 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       send_to_char( "Error in reset.  Reset not changed.\n", ch );
       return;
     }
+    reset->game = pArea->game;
     reset->prev = pReset->prev;
     reset->next = pReset->next;
     if ( !pReset->prev )
@@ -481,7 +538,11 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       pArea->last_reset  = reset;
     else
       pReset->next->prev = reset;
-    DISPOSE(pReset);
+    if ( pArea->last_mob_reset == pReset )
+      pArea->last_mob_reset = reset->command == 'M' ? reset : nullptr;
+    if ( pArea->last_obj_reset == pReset )
+      pArea->last_obj_reset = reset->command == pReset->command ? reset : nullptr;
+    free_reset(pReset);
     send_to_char( "Done.\n", ch );
     return;
   }
@@ -494,7 +555,7 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
     }
     add_reset(pArea, pReset->command, pReset->extra, pReset->arg1,
         pReset->arg2, pReset->arg3);
-    DISPOSE(pReset);
+    free_reset(pReset);
     send_to_char( "Done.\n", ch );
     return;
   }
@@ -505,9 +566,14 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       send_to_char( "Error in reset.  Reset not added.\n", ch );
       return;
     }
-    place_reset(pArea, pReset->command, pReset->extra, pReset->arg1,
+    RESET_DATA *placed = place_reset(pArea, pReset->command, pReset->extra, pReset->arg1,
         pReset->arg2, pReset->arg3);
-    DISPOSE(pReset);
+    free_reset(pReset);
+    if ( !placed )
+    {
+      send_to_char("Error in reset. Reset not placed.\n", ch);
+      return;
+    }
     send_to_char( "Done.\n", ch );
     return;
   }
@@ -530,24 +596,23 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       send_to_char( "Error in reset.  Reset not inserted.\n", ch );
       return;
     }
+    pReset->game = pArea->game;
     INSERT(pReset, reset, pArea->first_reset, next, prev);
     send_to_char( "Done.\n", ch );
     return;
   }
   if ( !str_cmp(arg, "delete") )
   {
-    int start, end;
-    bool found;
-    
-    if ( argument.empty() )
+    argument = one_argument(argument, arg);
+    const int start = is_number(arg) ? strtoi(arg) : 0;
+    argument = one_argument(argument, arg);
+    const int end = arg.empty() ? start : (is_number(arg) ? strtoi(arg) : 0);
+    if ( start <= 0 || end < start || !argument.empty() )
     {
       send_to_char( "Usage: reset delete <start> [end]\n", ch );
       return;
     }
-    argument = one_argument(argument, arg);
-    start = is_number(arg) ? strtoi(arg) : -1;
-    end   = is_number(arg) ? strtoi(arg) : -1;
-    num = 0; found = FALSE;
+    std::vector<RESET_DATA *> selected;
     for ( pReset = pArea->first_reset; pReset; pReset = reset )
     {
       reset = pReset->next;
@@ -555,16 +620,13 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
         continue;
       if ( start > ++num )
         continue;
-      if ( (end != -1 && num > end) || (end == -1 && found) )
-        return;
-      UNLINK(pReset, pArea->first_reset, pArea->last_reset, next, prev);
-      if ( pReset == pArea->last_mob_reset )
-        pArea->last_mob_reset = NULL;
-      DISPOSE(pReset);
-      top_reset--;
-      found = TRUE;
+      if ( num > end )
+        break;
+      selected.push_back(pReset);
     }
-    if ( !found )
+    for ( RESET_DATA *entry : selected )
+      unlink_reset(pArea, entry);
+    if ( selected.empty() )
       send_to_char( "Reset not found.\n", ch );
     else
       send_to_char( "Done.\n", ch );
@@ -621,7 +683,7 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       num = strtoi(arg);
     if ( !(pRoom = find_room(ch, argument, aRoom)) )
       return;
-    pReset = make_reset('M', 0, pMob->vnum, num, pRoom->vnum);
+    pReset = make_area_reset(pArea, 'M', 0, pMob->vnum, num, pRoom->vnum);
     LINK(pReset, pArea->first_reset, pArea->last_reset, next, prev);
     send_to_char( "Mobile reset added.\n", ch );
     return;
@@ -654,7 +716,7 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       argument = one_argument(argument, arg);
       if ( (vnum = strtoi(arg)) < 1 )
         vnum = 1;
-      pReset = make_reset('P', reset->extra+1, pObj->vnum, vnum, 0);
+      pReset = make_area_reset(pArea, 'P', reset->extra+1, pObj->vnum, vnum, 0);
       /* Grumble.. insert puts pReset before reset, and we need it after,
          so we make a hackup and reverse all the list params.. :P.. */
       INSERT(pReset, reset, pArea->last_reset, prev, next);
@@ -671,7 +733,7 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       argument = one_argument(argument, arg);
       if ( (vnum = strtoi(arg)) < 1 )
         vnum = 1;
-      pReset = make_reset('G', 1, pObj->vnum, vnum, 0);
+      pReset = make_area_reset(pArea, 'G', 1, pObj->vnum, vnum, 0);
       INSERT(pReset, reset, pArea->last_reset, prev, next);
       send_to_char( "Object reset to mobile created.\n", ch );
       return;
@@ -683,7 +745,8 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
         return;
       while ( reset->next && reset->next->command == 'B' )
         reset = reset->next;
-      num = get_wearloc(argument);
+      argument = one_argument(argument, arg);
+      num = get_wearloc(arg);
       if ( num < 0 )
       {
         send_to_char( "Reset object to which location?\n", ch );
@@ -702,26 +765,27 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       argument = one_argument(argument, arg);
       if ( (vnum = strtoi(arg)) < 1 )
         vnum = 1;
-      pReset = make_reset('E', 1, pObj->vnum, vnum, num);
+      pReset = make_area_reset(pArea, 'E', 1, pObj->vnum, vnum, num);
       INSERT(pReset, reset, pArea->last_reset, prev, next);
       send_to_char( "Object reset equipped by mobile created.\n", ch );
       return;
     }
-    if ( arg.empty() || !(num = (int)str_cmp(arg, "room")) ||
-         is_number(arg) )
+    int limit = 1;
+    if ( is_number(arg) )
     {
-      if ( !(bool)num )
-        argument = one_argument(argument, arg);
-      if ( !(pRoom = find_room(ch, argument, aRoom)) )
+      limit = UMAX(1, strtoi(arg));
+      argument = one_argument(argument, arg);
+    }
+    if ( arg.empty() || !str_cmp(arg, "room") || is_number(arg) )
+    {
+      if ( !(pRoom = find_room(ch, is_number(arg) ? arg : argument, aRoom)) )
         return;
       if ( pRoom->area != pArea )
       {
         send_to_char( "Cannot reset objects to other areas.\n", ch );
         return;
       }
-      if ( (vnum = strtoi(arg)) < 1 )
-        vnum = 1;
-      pReset = make_reset('O', 0, pObj->vnum, vnum, pRoom->vnum);
+      pReset = make_area_reset(pArea, 'O', 0, pObj->vnum, limit, pRoom->vnum);
       LINK(pReset, pArea->first_reset, pArea->last_reset, next, prev);
       send_to_char( "Object reset added.\n", ch );
       return;
@@ -744,12 +808,14 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       return;
     }
     pRoom = find_room(ch, argument, aRoom);
+    if ( !pRoom )
+      return;
     if ( pRoom->area != pArea )
     {
       send_to_char( "Cannot randomize doors in other areas.\n", ch );
       return;
     }
-    pReset = make_reset('R', 0, pRoom->vnum, vnum, 0);
+    pReset = make_area_reset(pArea, 'R', 0, pRoom->vnum, vnum, 0);
     LINK(pReset, pArea->first_reset, pArea->last_reset, next, prev);
     send_to_char( "Reset random doors created.\n", ch );
     return;
@@ -759,6 +825,7 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
     std::string oname;
     int chrg, value, extra = 0;
     bool isobj;
+    reset = nullptr;
     
     argument = one_argument(argument, oname);
     argument = one_argument(argument, arg);
@@ -773,6 +840,11 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
     }
     if ( !str_cmp(oname, "room") && !isobj )
     {
+      if ( !aRoom && !ch->in_room )
+      {
+        send_to_char( "You are not in a room.\n", ch );
+        return;
+      }
       vnum = (aRoom ? aRoom->vnum : ch->in_room->vnum);
       extra = TRAP_ROOM;
     }
@@ -786,7 +858,6 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
           send_to_char( "Reset: TRAP: no such room\n", ch );
           return;
         }
-        reset = NULL;
         extra = TRAP_ROOM;
       }
       else
@@ -816,9 +887,9 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
         send_to_char( "Reset: TRAP: bad flag\n", ch );
         return;
       }
-      SET_BIT(extra, 1 << value);
+      SET_BIT(extra, 1U << value);
     }
-    pReset = make_reset('T', extra, num, chrg, vnum);
+    pReset = make_area_reset(pArea, 'T', extra, num, chrg, vnum);
     if ( reset )
       INSERT(pReset, reset, pArea->last_reset, prev, next);
     else
@@ -872,6 +943,11 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       }
       else if ( !(pRoom = find_room(ch, arg, aRoom)) )
         return;
+      if ( !pRoom )
+      {
+        send_to_char( "You are not in a room.\n", ch );
+        return;
+      }
       argument = one_argument(argument, arg);
       if ( arg.empty() )
       {
@@ -879,7 +955,12 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
         return;
       }
       vnum = get_dir(arg);
-      SET_BIT(num, vnum << BIT_RESET_DOOR_THRESHOLD);
+      if ( vnum < 0 )
+      {
+        send_to_char( "Invalid direction.\n", ch );
+        return;
+      }
+      SET_BIT(num, (unsigned int)vnum << BIT_RESET_DOOR_THRESHOLD);
       vnum = pRoom->vnum;
       flfunc = &get_exflag;
       reset = NULL;
@@ -915,8 +996,13 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       }
       else if ( !(pRoom = find_room(ch, arg, aRoom)) )
         return;
+      if ( !pRoom )
+      {
+        send_to_char( "You are not in a room.\n", ch );
+        return;
+      }
       vnum = pRoom->vnum;
-      flfunc = &get_rflag;
+      flfunc = &reset_get_rflag;
       reset = NULL;
     }
     else
@@ -924,36 +1010,44 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
       send_to_char( "Must specify OBJECT, MOBILE, ROOM, or DOOR.\n", ch );
       return;
     }
+    const bool door_flag = (num & BIT_RESET_TYPE_MASK) == BIT_RESET_DOOR;
+    bool has_flag = false;
     while ( !argument.empty() )
     {
       int value;
       argument = one_argument(argument, arg);
       value = (*flfunc)(arg);
-      if ( !str_prefix(option, "door") )      
+      if ( door_flag )
       {
         if ( value < 0 || value > 31 )
         {
           send_to_char( "Reset: BIT: bad flag\n", ch );
           return;
         }
-        SET_BIT(flags, 1 << value);
+        SET_BIT(flags, 1U << value);
       }
       else
       {
-        if ( value < 0  )
+        if ( value < 0 || value >= MAX_BITS )
         {
           send_to_char( "Reset: BIT: bad flag\n", ch );
           return;
         }
-        SET_BIT(flags, value);
+        if ( has_flag )
+        {
+          send_to_char("Use one flag per object, mobile, or room bit reset.\n", ch);
+          return;
+        }
+        flags = value;
       }
+      has_flag = true;
     }
-    if ( !flags )
+    if ( !has_flag )
     {
       send_to_char( "Set which flags?\n", ch );
       return;
     }
-    pReset = make_reset('B', 1, vnum, num, flags);
+    pReset = make_area_reset(pArea, 'B', 1, vnum, num, flags);
     if ( reset )
       INSERT(pReset, reset, pArea->last_reset, prev, next);
     else
@@ -966,17 +1060,27 @@ void edit_reset( CHAR_DATA *ch, const std::string &argument_in, AREA_DATA *pArea
     argument = one_argument(argument, arg);
     if ( !(reset = find_oreset(ch, pArea, aRoom, arg)) )
       return;
-    pReset = make_reset('H', 1, 0, 0, 0);
+    pReset = make_area_reset(pArea, 'H', 1, 0, 0, 0);
     INSERT(pReset, reset, pArea->last_reset, prev, next);
     send_to_char( "Object hide reset created.\n", ch );
     return;
   }
   if ( ch->substate == SUB_REPEATCMD )
   {
+    void *saved_dest_buf = ch->dest_buf;
     ch->substate = SUB_NONE;
     interpret(ch, origarg);
-    ch->substate = SUB_REPEATCMD;
-    ch->last_cmd = (aRoom ? do_rreset : do_reset);
+    if ( char_died(ch) )
+      return;
+    if ( ch->substate == SUB_NONE
+    &&   ch->editor == nullptr
+    &&   get_timerptr(ch, TIMER_DO_FUN) == nullptr
+    &&   ch->dest_buf == saved_dest_buf
+    &&   (!ch->desc || (ch->desc->connected != CON_EDITING && ch->desc->olc == nullptr)) )
+    {
+      ch->substate = SUB_REPEATCMD;
+      ch->last_cmd = (aRoom ? do_rreset : do_reset);
+    }
   }
   else
     edit_reset(ch, "", pArea, aRoom);
@@ -990,11 +1094,30 @@ void do_reset( CHAR_DATA *ch, char *argument )
   std::string parg;
   std::string argstr = argument;
   
+  if ( !ch )
+    return;
+
   parg = one_argument(argstr, arg);
   if ( ch->substate == SUB_REPEATCMD )
   {
     pArea = (AREA_DATA *) ch->dest_buf;
-    if ( pArea && pArea != ch->pcdata->area && pArea != ch->in_room->area )
+    if ( !str_cmp(arg, "done") || !str_cmp(arg, "off") )
+    {
+      send_to_char( "Reset mode off.\n", ch );
+      ch->substate = SUB_NONE;
+      ch->dest_buf = NULL;
+      return;
+    }
+    if ( !pArea )
+    {
+      send_to_char("Your area pointer got lost.  Reset mode off.\n", ch);
+      bug("do_reset: %s's dest_buf is NULL", ch->name ? ch->name : "(unknown)");
+      ch->substate = SUB_NONE;
+      ch->dest_buf = NULL;
+      return;
+    }
+    if ( (!ch->pcdata || pArea != ch->pcdata->area)
+    &&   (!ch->in_room || pArea != ch->in_room->area) )
     {
       AREA_DATA *tmp;
       
@@ -1009,43 +1132,39 @@ void do_reset( CHAR_DATA *ch, char *argument )
       {
         send_to_char("Your area pointer got lost.  Reset mode off.\n", ch);
         bug("do_reset: %s's dest_buf points to invalid area",
-            ch->name);
+            ch->name ? ch->name : "(unknown)");
         ch->substate = SUB_NONE;
-        STR_DISPOSE(ch->dest_buf);
+        ch->dest_buf = NULL;
         return;
       }
     }
     if ( arg.empty() )
     {
-      ch_printf(ch, "Editing resets for area: %s\n", pArea->name);
-      return;
-    }
-    if ( !str_cmp(arg, "done") || !str_cmp(arg, "off") )
-    {
-      send_to_char( "Reset mode off.\n", ch );
-      ch->substate = SUB_NONE;
-      STR_DISPOSE(ch->dest_buf);
+      ch_printf(ch, "Editing resets for area: %s\n", pArea->name ? pArea->name : "(none)");
       return;
     }
   }
-  if ( !pArea && get_trust(ch) > LEVEL_GOD )
+  if ( !pArea )
   {
-    std::string fname;
-    
-    fname = str_printf("%s.are", capitalize(arg).c_str());
-    for ( pArea = first_build; pArea; pArea = pArea->next )
-      if ( !str_cmp(fname, pArea->filename) )
-      {
-        argstr = parg;
-        break;
-      }
-    if ( !pArea )
-      pArea = ch->pcdata->area;
-    if ( !pArea )
-      pArea = ch->in_room->area;
+    if ( get_trust(ch) > LEVEL_GOD )
+    {
+      std::string fname;
+      
+      fname = str_printf("%s.are", capitalize(arg).c_str());
+      for ( pArea = first_build; pArea; pArea = pArea->next )
+        if ( !str_cmp(fname, pArea->filename) )
+        {
+          argstr = parg;
+          break;
+        }
+      if ( !pArea && ch->pcdata )
+        pArea = ch->pcdata->area;
+      if ( !pArea && ch->in_room )
+        pArea = ch->in_room->area;
+    }
+    else
+      pArea = (ch->pcdata ? ch->pcdata->area : NULL);
   }
-  else
-    pArea = ch->pcdata->area;
   if ( !pArea )
   {
     send_to_char( "You do not have an assigned area.\n", ch );
@@ -1058,24 +1177,84 @@ void do_reset( CHAR_DATA *ch, char *argument )
 void do_rreset( CHAR_DATA *ch, char *argument )
 {
   ROOM_INDEX_DATA *pRoom;
-  
+  std::string arg;
+  std::string argstr = argument ? argument : "";
+
+  if ( !ch )
+    return;
+
   if ( ch->substate == SUB_REPEATCMD )
   {
+    one_argument(argstr, arg);
+    if ( !str_cmp(arg, "done") || !str_cmp(arg, "off") )
+    {
+      send_to_char( "Reset mode off.\n", ch );
+      ch->substate = SUB_NONE;
+      ch->dest_buf = NULL;
+      return;
+    }
     pRoom = (ROOM_INDEX_DATA *) ch->dest_buf;
     if ( !pRoom )
     {
-      send_to_char( "Your room pointer got lost.  Reset mode off.\n", ch);
-      bug("do_rreset: %s's dest_buf points to invalid room", ch->name);
+      send_to_char( "Your room pointer got lost.  Reset mode off.\n", ch );
+      bug("do_rreset: %s's dest_buf is NULL", ch->name ? ch->name : "(unknown)");
+      ch->substate = SUB_NONE;
+      ch->dest_buf = NULL;
+      return;
     }
-    ch->substate = SUB_NONE;
-    STR_DISPOSE(ch->dest_buf);
-    return;
+    if ( pRoom != ch->in_room )
+    {
+      extern ROOM_INDEX_DATA *room_index_hash[MAX_KEY_HASH];
+      ROOM_INDEX_DATA *tmp = NULL;
+      for ( int iHash = 0; iHash < MAX_KEY_HASH && !tmp; iHash++ )
+        for ( ROOM_INDEX_DATA *r = room_index_hash[iHash]; r; r = r->next )
+          if ( r == pRoom )
+          {
+            tmp = r;
+            break;
+          }
+      if ( !tmp )
+      {
+        send_to_char( "Your room pointer got lost.  Reset mode off.\n", ch );
+        bug("do_rreset: %s's dest_buf points to invalid room", ch->name ? ch->name : "(unknown)");
+        ch->substate = SUB_NONE;
+        ch->dest_buf = NULL;
+        return;
+      }
+    }
+    if ( !pRoom->area )
+    {
+      send_to_char( "Your room pointer got lost.  Reset mode off.\n", ch );
+      bug("do_rreset: %s's room has NULL area", ch->name ? ch->name : "(unknown)");
+      ch->substate = SUB_NONE;
+      ch->dest_buf = NULL;
+      return;
+    }
+    if ( arg.empty() )
+    {
+      ch_printf(ch, "Editing resets for room #%d: %s\n",
+                pRoom->vnum, pRoom->name ? pRoom->name : "(none)");
+      return;
+    }
   }
   else
     pRoom = ch->in_room;
-  if ( !can_rmodify(ch, pRoom) )
+
+  if ( !pRoom || !pRoom->area )
+  {
+    send_to_char( "You are not in a valid room.\n", ch );
     return;
-  edit_reset(ch, argument, pRoom->area, pRoom);
+  }
+  if ( !can_rmodify(ch, pRoom) )
+  {
+    if ( ch->substate == SUB_REPEATCMD )
+    {
+      ch->substate = SUB_NONE;
+      ch->dest_buf = NULL;
+    }
+    return;
+  }
+  edit_reset(ch, argstr, pRoom->area, pRoom);
   return;
 }
 
@@ -1302,14 +1481,14 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
   OBJ_INDEX_DATA *pObjIndex;
   OBJ_INDEX_DATA *pObjToIndex;
   EXIT_DATA *pexit;
-  OBJ_DATA *to_obj;
+  OBJ_DATA *to_obj = NULL;
   int level = 0;
-  int *plc;
+  int *plc = NULL;
   FLAG_SET *fsplc = NULL;
     
   if ( !pArea )
   {
-      bug( "reset_area: NULL pArea", 0 );
+      bug( "reset_area: NULL pArea" );
       return;
   }
   
@@ -1317,14 +1496,17 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
   obj = NULL;
   lastobj = NULL;
   if ( !pArea->first_reset )
-  {
-      bug( "%s: reset_area: no resets", pArea->filename );
       return;
-  }
   level = 0;
   for ( pReset = pArea->first_reset; pReset; pReset = next_reset )
   {
       next_reset = pReset->next;
+      auto prune_reset = [&]( bool is_parent )
+      {
+          // Keep a failed parent as a boundary until a builder can repair it.
+          if ( !bootup && (!is_parent || !has_implicit_reset_dependents(pReset)) )
+              unlink_reset(pArea, pReset);
+      };
       switch( pReset->command )
       {
           default:
@@ -1332,24 +1514,18 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
               break;
             
           case 'M':
+              mob = nullptr;
+              obj = lastobj = nullptr;
               if ( !(pMobIndex = get_mob_index(pReset->arg1)) )
               {
                   bug( "%s: Reset_area: 'M': bad mob vnum %d.", pArea->filename, pReset->arg1 );
-                  if( !bootup )
-                  {
-                      UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                      DISPOSE( pReset );
-                  }
+                  prune_reset(true);
                   continue;
               }
               if ( !(pRoomIndex = get_room_index(pReset->arg3)) )
               {
                   bug( "%s: Reset_area: 'M': bad room vnum %d.", pArea->filename, pReset->arg3 );
-                  if( !bootup )
-                  {
-                    UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                    DISPOSE( pReset );
-                  }
+                  prune_reset(true);
                     continue;
               }
               if ( pMobIndex->count >= pReset->arg2 )
@@ -1375,14 +1551,11 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
             
           case 'G':
           case 'E':
+              obj = lastobj = nullptr;
               if ( !(pObjIndex = get_obj_index(pReset->arg1)) )
               {
                   bug( "%s: Reset_area: 'E' or 'G': bad obj vnum %d.", pArea->filename, pReset->arg1 );
-                  if( !bootup )
-                  {
-                    UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                    DISPOSE( pReset );
-                  }
+                  prune_reset(true);
                     continue;
               }
               if ( !mob )
@@ -1414,24 +1587,17 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
               break;
             
           case 'O':
+              obj = lastobj = nullptr;
               if ( !(pObjIndex = get_obj_index(pReset->arg1)) )
               {
                   bug( "%s: Reset_area: 'O': bad obj vnum %d.", pArea->filename, pReset->arg1 );
-                  if( !bootup )
-                  {
-                      UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                      DISPOSE( pReset );
-                  }
+                  prune_reset(true);
                   continue;
               }
               if ( !(pRoomIndex = get_room_index(pReset->arg3)) )
               {
                   bug( "%s: Reset_area: 'O': bad room vnum %d.", pArea->filename, pReset->arg3 );
-                  if( !bootup )
-                  {
-                      UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                      DISPOSE( pReset );
-                  }
+                  prune_reset(true);
                   continue;
               }
               if ( count_obj_list(pObjIndex, pRoomIndex->first_content) > 0 )
@@ -1442,6 +1608,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                       lastobj = NULL;
                       break;
                   }                
+                  lastobj = obj;
                   obj->objflags.copy_range_from(pObjIndex->objflags,ITEM_FIRST,ITEM_MAX); // Copies item flags from index to object to be reset.
                   for( int x = 0; x < 6; ++x )
                       obj->value[x] = pObjIndex->value[x];                
@@ -1455,14 +1622,12 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
               break;
             
           case 'P':
+              obj = nullptr;
               if ( !(pObjIndex = get_obj_index(pReset->arg1)) )
               {
                   bug( "%s: Reset_area: 'P': bad obj vnum %d.", pArea->filename, pReset->arg1 );
-                  if( !bootup )
-                  {
-                    UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                    DISPOSE( pReset );
-                  }
+                  lastobj = nullptr;
+                  prune_reset(true);
                   continue;
               }
               if ( pReset->arg3 > 0 )
@@ -1470,11 +1635,8 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                   if ( !(pObjToIndex = get_obj_index(pReset->arg3)) )
                   {
                       bug( "%s: Reset_area: 'P': bad objto vnum %d.", pArea->filename, pReset->arg3 );
-                      if( !bootup )
-                      {
-                          UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                          DISPOSE( pReset );
-                      }
+                      lastobj = nullptr;
+                      prune_reset(true);
                       continue;
                   }
                   if ( pArea->nplayer > 0 ||
@@ -1482,7 +1644,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                       !to_obj->in_room ||
                       count_obj_list(pObjIndex, to_obj->first_content) > 0 )
                   {
-                      obj = NULL;
+                      lastobj = nullptr;
                       break;
                   }
                   lastobj = to_obj;
@@ -1502,7 +1664,10 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                       break;
                     }
                 if ( iNest < 0 )
+                {
+                    lastobj = nullptr;
                     continue;
+                }
               }
               obj = create_object(pObjIndex, number_fuzzy(UMAX(generate_itemlevel(pArea, pObjIndex),to_obj->level)));
               obj->level = UMIN(obj->level, LEVEL_AVATAR);
@@ -1520,11 +1685,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                         if ( !(pObjToIndex = get_obj_index(pReset->arg3)) )
                         {
                             bug( "%s: Reset_area: 'T': bad objto vnum %d.", pArea->filename, pReset->arg3 );
-                            if( !bootup )
-                            {
-                              UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                              DISPOSE( pReset );
-                            }
+                            prune_reset(false);
                             continue;
                         }
                         if ( pArea->nplayer > 0 ||
@@ -1548,19 +1709,16 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                   if ( !(pRoomIndex = get_room_index(pReset->arg3)) )
                   {
                       bug( "%s: Reset_area: 'T': bad room %d.", pArea->filename, pReset->arg3 );
-                      if( !bootup )
-                      {
-                          UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                          DISPOSE( pReset );
-                      }
+                      prune_reset(false);
                       continue;
                   }
                   if ( pArea->nplayer > 0 ||
                       count_obj_list(get_obj_index(OBJ_VNUM_TRAP),
                         pRoomIndex->first_content) > 0 )
                       break;
-                  to_obj = make_trap(pReset->arg1, pReset->arg1, 10, pReset->extra);
-                  obj_to_room(to_obj, pRoomIndex);
+                  to_obj = make_trap(pReset->arg2, pReset->arg1, 10, pReset->extra);
+                  if ( to_obj )
+                      obj_to_room(to_obj, pRoomIndex);
               }
               break;
             
@@ -1570,11 +1728,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                   if ( !(pObjToIndex = get_obj_index(pReset->arg1)) )
                   {
                       bug( "%s: Reset_area: 'H': bad objto vnum %d.", pArea->filename, pReset->arg1 );
-                      if( !bootup )
-                      {
-                          UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                          DISPOSE( pReset );
-                      }
+                      prune_reset(false);
                       continue;
                   }
                   if ( pArea->nplayer > 0 ||
@@ -1594,6 +1748,8 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
               break;
             
             case 'B':
+              plc = NULL;
+              fsplc = NULL;
               switch(pReset->arg2 & BIT_RESET_TYPE_MASK)
               {
                   case BIT_RESET_DOOR:
@@ -1603,17 +1759,16 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                         if ( !(pRoomIndex = get_room_index(pReset->arg1)) )
                         {
                             bug( "%s: Reset_area: 'B': door: bad room vnum %d.", pArea->filename, pReset->arg1 );
-                            if( !bootup )
-                            {
-                                UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                                DISPOSE( pReset );
-                            }
+                            prune_reset(false);
                             continue;
                         }
                         doornum = (pReset->arg2 & BIT_RESET_DOOR_MASK)
                                 >> BIT_RESET_DOOR_THRESHOLD;
                         if ( !(pexit = get_exit(pRoomIndex, doornum)) )
+                        {
+                            plc = NULL;
                             break;
+                        }
                         plc = &pexit->exit_info;
                     }
                     break;
@@ -1621,11 +1776,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                     if ( !(pRoomIndex = get_room_index(pReset->arg1)) )
                         {
                             bug( "%s: Reset_area: 'B': room: bad room vnum %d.", pArea->filename, pReset->arg1 );
-                            if( !bootup )
-                            {
-                              UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                              DISPOSE( pReset );
-                            }
+                            prune_reset(false);
                             continue;
                         }
                         fsplc = &pRoomIndex->room_flags;
@@ -1637,11 +1788,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                         if ( !(pObjToIndex = get_obj_index(pReset->arg1)) )
                         {
                             bug( "%s: Reset_area: 'B': object: bad objto vnum %d.", pArea->filename, pReset->arg1 );
-                            if( !bootup )
-                            {
-                                UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                                DISPOSE( pReset );
-                            }
+                            prune_reset(false);
                             continue;
                         }
                         if ( !(to_obj = get_obj_type(pObjToIndex)) ||
@@ -1661,7 +1808,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                   case BIT_RESET_MOBILE:
                       if ( !mob )
                         continue;
-                      fsplc = &to_obj->objflags;
+                      fsplc = &mob->affected_by;
                       plc = NULL;
                       break;
                   default:
@@ -1671,6 +1818,12 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
 
               if (fsplc) 
               {
+                  if ( pReset->arg3 < 0 || pReset->arg3 >= MAX_BITS )
+                  {
+                      bug( "%s: Reset_area: 'B': bit %d out of range.", pArea->filename, pReset->arg3 );
+                      fsplc = NULL;
+                      continue;
+                  }
                   if ( IS_SET(pReset->arg2, BIT_RESET_SET) )
                       BV_SET_BIT(*fsplc, pReset->arg3);
                   else if ( IS_SET(pReset->arg2, BIT_RESET_TOGGLE) )
@@ -1679,7 +1832,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                       BV_REMOVE_BIT(*fsplc, pReset->arg3);
                   fsplc = NULL;
               }
-              else 
+              else if (plc)
               {
                   if ( IS_SET(pReset->arg2, BIT_RESET_SET) )
                       SET_BIT(*plc, pReset->arg3);
@@ -1687,6 +1840,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
                       TOGGLE_BIT(*plc, pReset->arg3);
                   else
                       REMOVE_BIT(*plc, pReset->arg3);
+                  plc = NULL;
               }
               break;
             
@@ -1694,11 +1848,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
               if ( !(pRoomIndex = get_room_index(pReset->arg1)) )
               {
                   bug( "%s: Reset_area: 'D': bad room vnum %d.", pArea->filename, pReset->arg1 );
-                  if( !bootup )
-                  {
-                      UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                      DISPOSE( pReset );
-                  }
+                  prune_reset(false);
                   continue;
               }
               if ( !(pexit = get_exit(pRoomIndex, pReset->arg2)) )
@@ -1728,11 +1878,7 @@ void reset_area( GameContext *game, AREA_DATA *pArea )
               if ( !(pRoomIndex = get_room_index(pReset->arg1)) )
               {
                   bug( "%s: Reset_area: 'R': bad room vnum %d.", pArea->filename, pReset->arg1 );
-                  if( !bootup )
-                  {
-                      UNLINK( pReset, pArea->first_reset, pArea->last_reset, next, prev );
-                      DISPOSE( pReset );
-                  }
+                  prune_reset(false);
                   continue;
               }
               randomize_exits(pRoomIndex, pReset->arg2-1);
@@ -1756,7 +1902,9 @@ void list_resets( CHAR_DATA *ch, AREA_DATA *pArea, ROOM_INDEX_DATA *pRoom,
   RESET_DATA *lo_reset;
 //  bool found;
   int num = 0;
-  const char *rname, *mname, *oname;
+  const char *rname;
+  const char *mname = "*NULL mob*";
+  const char *oname = "Object: *NULL obj*";
   std::string buf, pbuf;
   
   if ( !ch || !pArea )
@@ -1900,8 +2048,8 @@ void list_resets( CHAR_DATA *ch, AREA_DATA *pArea, ROOM_INDEX_DATA *pRoom,
       break;
     case 'B':
       {
-      bool skip = false;
-      const char * const *flagarray;
+      const flag_name *flag_table = nullptr;
+      bool door_flags = false;
       
       pbuf += "BIT: ";
 
@@ -1930,21 +2078,19 @@ void list_resets( CHAR_DATA *ch, AREA_DATA *pArea, ROOM_INDEX_DATA *pRoom,
         door = (pReset->arg2 & BIT_RESET_DOOR_MASK)
              >> BIT_RESET_DOOR_THRESHOLD;
         door = URANGE(0, door, MAX_DIR+1);
-        pbuf = str_printf("Exit %s%s (%d), Room %s (%d)", dir_name[door],
+        pbuf += str_printf("Exit %s%s (%d), Room %s (%d)", dir_name[door],
             (room && get_exit(room, door) ? "" : " (NO EXIT!)"), door,
             rname, pReset->arg1);
         }
-        flagarray = ex_flags;
+        door_flags = true;
         break;
       case BIT_RESET_ROOM:
         if ( !(room = get_room_index(pReset->arg1)) )
           rname = "Room: *BAD VNUM*";
         else
           rname = room->name;
-        pbuf = str_printf("Room %s (%d)", rname, pReset->arg1);
-        pbuf += str_printf("; flag: %s [%d]\n",
-            flag_bit_name(pReset->arg3, obj_flag_table), pReset->arg3);
-        skip = true;
+        pbuf += str_printf("Room %s (%d)", rname, pReset->arg1);
+        flag_table = r_flags;
         break;
       case BIT_RESET_OBJECT:
         if ( pReset->arg1 > 0 )
@@ -1956,11 +2102,9 @@ void list_resets( CHAR_DATA *ch, AREA_DATA *pArea, ROOM_INDEX_DATA *pRoom,
           rname = "Object: *NULL obj*";
         else
           rname = oname;
-        pbuf = str_printf("Object %s (%d)", rname,
+        pbuf += str_printf("Object %s (%d)", rname,
             (pReset->arg1 > 0 ? pReset->arg1 : obj ? obj->vnum : 0));
-        pbuf += str_printf("; flag: %s [%d]\n",
-            flag_bit_name(pReset->arg3, obj_flag_table), pReset->arg3);
-        skip = true;
+        flag_table = obj_flag_table;
 
         break;
       case BIT_RESET_MOBILE:
@@ -1977,25 +2121,23 @@ void list_resets( CHAR_DATA *ch, AREA_DATA *pArea, ROOM_INDEX_DATA *pRoom,
           rname = "Mobile: *NULL mob*";
         else
           rname = mname;
-        pbuf = str_printf("Mobile %s (%d)", rname,
+        pbuf += str_printf("Mobile %s (%d)", rname,
             (pReset->arg1 > 0 ? pReset->arg1 : mob ? mob->vnum : 0));
-        pbuf += str_printf("; flag: %s [%d]\n",
-            flag_bit_name(pReset->arg3, aff_flags), pReset->arg3);            
-        flagarray = NULL;
-        skip = true;
+        flag_table = aff_flags;
         break;
       default:
-        pbuf = str_printf("bad type %d", pReset->arg2 & BIT_RESET_TYPE_MASK);
-        flagarray = NULL;
+        pbuf += str_printf("bad type %d", pReset->arg2 & BIT_RESET_TYPE_MASK);
         break;
       }
-        if (!skip)
+        if ( door_flags )
+          pbuf += str_printf("; flags: %s [%d]\n", flag_string(pReset->arg3, (char* const*)ex_flags), pReset->arg3);
+        else if ( flag_table )
         {
-          if ( flagarray )
-            pbuf += str_printf("; flags: %s [%d]\n", flag_string(pReset->arg3, (char* const*)flagarray), pReset->arg3);
-          else
-            pbuf += str_printf("; flags %d\n", pReset->arg3);
+          const char *flag = flag_bit_name(pReset->arg3, flag_table);
+          pbuf += str_printf("; flag: %s [%d]\n", flag ? flag : "unknown", pReset->arg3);
         }
+        else
+          pbuf += str_printf("; flags %d\n", pReset->arg3);
       }
       break;
     case 'D':
@@ -2099,17 +2241,19 @@ RESET_DATA *add_reset( AREA_DATA *tarea, char letter, int extra, int arg1, int a
 
     if ( !tarea )
     {
-	bug( "add_reset: NULL area!", 0 );
+	bug( "add_reset: NULL area!" );
 	return NULL;
     }
 
     letter = UPPER(letter);
-    pReset = make_reset( letter, extra, arg1, arg2, arg3 );
-    pReset->game = tarea->game;
+    pReset = make_area_reset(tarea, letter, extra, arg1, arg2, arg3);
     switch( letter )
     {
 	case 'M':  tarea->last_mob_reset = pReset;	break;
-	case 'H':  if ( arg1 > 0 )			break;
+	case 'H':
+	    if ( arg1 > 0 )
+		break;
+	    [[fallthrough]];
 	case 'E':  case 'G':  case 'P':
 	case 'O':  tarea->last_obj_reset = pReset;	break;
 	case 'T':
@@ -2131,12 +2275,17 @@ RESET_DATA *place_reset( AREA_DATA *tarea, char letter, int extra, int arg1, int
 
     if ( !tarea )
     {
-	bug( "place_reset: NULL area!", 0 );
+	bug( "place_reset: NULL area!" );
 	return NULL;
     }
 
     letter = UPPER(letter);
-    pReset = make_reset( letter, extra, arg1, arg2, arg3 );
+    if ( !letter || !strchr("DROMGEPTH", letter) )
+    {
+	bug("place_reset: Bad reset type %c", letter);
+	return NULL;
+    }
+    pReset = make_area_reset(tarea, letter, extra, arg1, arg2, arg3);
     if ( letter == 'M' )
 	tarea->last_mob_reset = pReset;
 
@@ -2144,9 +2293,6 @@ RESET_DATA *place_reset( AREA_DATA *tarea, char letter, int extra, int arg1, int
     {
 	switch( letter )
 	{
-	    default:
-		bug( "place_reset: Bad reset type %c", letter );
-		return NULL;
 	    case 'D':	case 'R':
 		for ( tmp = tarea->last_reset; tmp; tmp = tmp->prev )
 		    if ( tmp->command == letter )

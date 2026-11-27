@@ -35,7 +35,7 @@ Rockets     0
 Maxrockets  0
 Torpedos     0
 Maxtorpedos  0
-Lastdoc      4100
+Lastdoc      21943
 Firstroom    32410
 Lastroom     32419
 Shield       0
@@ -79,5 +79,7 @@ Cargo9         0
 CaughtSmug     0
 Dockingports   0
 Guard   0
-Home         corperate~
+Home         Kuat~
 End
+
+#END

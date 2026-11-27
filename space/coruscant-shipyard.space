@@ -1,0 +1,16 @@
+#SPACE
+Name         Coruscant Shipyard~
+Filename     coruscant-shipyard.space~
+Type         3
+Locationa    Docking Platform Alpha~
+Doca         32000
+Locationb    ~
+Docb         0
+Locationc    ~
+Docc         0
+Xpos         2796
+Ypos         3074
+Zpos         -487
+End
+
+#END

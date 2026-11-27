@@ -383,10 +383,15 @@ landing pads to the areas below. One of these staircases lead up to a
 security door to the upper levels. Two solid doors stand to either side of
 one of the entry tunnels. Keypads are imbedded next to them waiting for 
 entry codes. The light grey durasteel walls rise high above the hanger
-floor.  A dotted yellow line has been painted three meters off the ground,
+floor. The Rebel Alliance shipyard is north of the hangar.
+A dotted yellow line has been painted three meters off the ground,
 making it clear where the floor ends and where the walls begin.
 ~
 0 536870920 0
+D0
+~
+~
+0 -1 1900
 D5
 ~
 ~
@@ -1087,7 +1092,7 @@ A secret cranny~
 D1
 ~
 ~
-7 1837 1836
+7 -1 1836
 S
 #1838
 A large apartment~
@@ -1378,6 +1383,17 @@ S
 Floating in a void~
 ~
 0 4 1
+S
+#1900
+Rebel Alliance Shipyard~
+A launch pad serves Rebel Alliance vessels at the XFS Space Colony.
+The colony's main hangar is directly south.
+~
+0 536870928 1
+D2
+~
+~
+0 -1 1800
 S
 #0
 

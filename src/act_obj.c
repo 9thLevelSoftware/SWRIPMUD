@@ -19,6 +19,10 @@
 ****************************************************************************/
 
 #include <sys/types.h>
+#include <cerrno>
+#include <climits>
+#include <vector>
+#include <cstdlib>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -39,7 +43,7 @@ void    show_list_to_char  args( ( OBJ_DATA *list, CHAR_DATA *ch,
 void	get_obj		args( ( CHAR_DATA *ch, OBJ_DATA *obj,
 			    OBJ_DATA *container ) );
 bool	remove_obj	args( ( CHAR_DATA *ch, int iWear, bool fReplace ) );
-void	wear_obj	args( ( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, sh_int wear_bit ) );
+void	wear_obj	args( ( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit ) );
 
 
 /*
@@ -72,10 +76,26 @@ sh_int get_obj_resistance( OBJ_DATA *obj )
 }
 
 
+static bool has_remaining_money( OBJ_DATA *start, CHAR_DATA *ch, bool fAll, const std::string& chk )
+{
+    for ( OBJ_DATA *tmp = start; tmp; tmp = tmp->next_content )
+    {
+        if ( tmp->item_type == ITEM_MONEY
+        &&   (fAll || nifty_is_name( chk, tmp->name ))
+        &&   can_see_obj( ch, tmp ) )
+            return TRUE;
+    }
+    return FALSE;
+}
+
 void get_obj( CHAR_DATA *ch, OBJ_DATA *obj, OBJ_DATA *container )
 {
     CLAN_DATA *clan;
     int weight;
+    ROOM_INDEX_DATA *orig_room;
+
+    if ( !ch || !obj || char_died(ch) || obj_extracted(obj) )
+        return;
 
     if ( !CAN_WEAR(obj, ITEM_TAKE)
        && (ch->top_level < ch->game->get_sysdata()->level_getobjnotake )  )
@@ -91,7 +111,8 @@ void get_obj( CHAR_DATA *ch, OBJ_DATA *obj, OBJ_DATA *container )
 	return;
     }
 
-    if ( ch->carry_number + get_obj_number( obj ) > can_carry_n( ch ) )
+    if ( obj->item_type != ITEM_MONEY
+    &&   ch->carry_number + get_obj_number( obj ) > can_carry_n( ch ) )
     {
 	act( AT_PLAIN, "$d: you can't carry that many items.",
 		ch, NULL, obj->name, TO_CHAR );
@@ -142,6 +163,7 @@ void get_obj( CHAR_DATA *ch, OBJ_DATA *obj, OBJ_DATA *container )
 			return;
 		}
 	}
+    orig_room = ch->in_room;
     if ( container )
     {
 		act( AT_ACTION, IS_OBJ_STAT(container, ITEM_COVERING) ? 
@@ -160,7 +182,7 @@ void get_obj( CHAR_DATA *ch, OBJ_DATA *obj, OBJ_DATA *container )
     }
 
     /* Clan storeroom checks */
-    if ( BV_IS_SET(ch->in_room->room_flags, ROOM_CLANSTOREROOM) 
+    if ( ch->in_room && BV_IS_SET(ch->in_room->room_flags, ROOM_CLANSTOREROOM) 
     && (!container || container->carried_by == NULL) )
 	for ( clan = first_clan; clan; clan = clan->next )
 	  if ( clan->storeroom == ch->in_room->vnum )
@@ -168,13 +190,24 @@ void get_obj( CHAR_DATA *ch, OBJ_DATA *obj, OBJ_DATA *container )
 
     if ( obj->item_type != ITEM_CONTAINER )
       check_for_trap( ch, obj, TRAP_GET );
-    if ( char_died(ch) )
+    if ( obj_extracted(obj) )
       return;
+    if ( char_died(ch) )
+    {
+      if ( container && !obj_extracted(container) )
+        obj_to_obj( obj, container );
+      else if ( orig_room )
+        obj_to_room( obj, orig_room );
+      else
+        extract_obj( obj );
+      return;
+    }
 
     if ( obj->item_type == ITEM_MONEY )
     {
       	ch->gold += obj->value[0] * obj->count;
       	extract_obj( obj );
+      	return;
     }
     else
     {
@@ -196,22 +229,20 @@ void do_get( CHAR_DATA *ch, char *argument )
     OBJ_DATA *obj;
     OBJ_DATA *obj_next;
     OBJ_DATA *container;
-    sh_int number;
+    int number;
     bool found, foundowner = FALSE;
     CHAR_DATA *p, *p_prev;
 
-    argstr = one_argument( argument, arg1 );
+    if ( !ch || !ch->in_room )
+        return;
+
+    argstr = one_argument( argument ? argument : "", arg1 );
     if ( is_number(arg1) )
     {
 		number = strtoi(arg1);
 		if ( number < 1 )
 		{
 			send_to_char( "That was easy...\n", ch );
-			return;
-		}
-		if ( (ch->carry_number + number) > can_carry_n(ch) )
-		{
-			send_to_char( "You can't carry that many.\n", ch );
 			return;
 		}
 		argstr = one_argument( argstr, arg1 );
@@ -271,15 +302,15 @@ void do_get( CHAR_DATA *ch, char *argument )
 	    if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_GET ) )
 	    {
 		save_char_obj( ch );
-	    	if( BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
+	    	if( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
 	    	  save_home (ch );
-    		if ( BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
+    		if ( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
     		  save_storeroom( ch->in_room );
    	    }
 	}
 	else
 	{
-	    sh_int cnt = 0;
+	    int cnt = 0;
 	    bool fAll;
 	    std::string chk;
 
@@ -308,32 +339,51 @@ void do_get( CHAR_DATA *ch, char *argument )
 		}
 	    /* 'get all' or 'get all.obj' */
 	    found = FALSE;
-	    for ( obj = ch->in_room->first_content; obj; obj = obj_next )
 	    {
-		obj_next = obj->next_content;
-		if ( ( fAll || nifty_is_name( chk, obj->name ) )
-		&&   can_see_obj( ch, obj ) )
+		bool carry_limited = (ch->carry_number >= can_carry_n( ch ) || ch->carry_weight >= can_carry_w( ch ));
+		bool warned_limit = FALSE;
+		for ( obj = ch->in_room->first_content; obj; obj = obj_next )
 		{
-		    found = TRUE;
-		    if ( number && (cnt + obj->count) > number )
-			split_obj( obj, number - cnt );
-		    cnt += obj->count;
-		    get_obj( ch, obj, NULL );
-		    if ( char_died(ch)
-		    ||   ch->carry_number >= can_carry_n( ch )
-		    ||   ch->carry_weight >= can_carry_w( ch )
-		    ||   (number && cnt >= number) )
+		    obj_next = obj->next_content;
+		    if ( ( fAll || nifty_is_name( chk, obj->name ) )
+		    &&   can_see_obj( ch, obj ) )
 		    {
-			if ( BV_IS_SET(ch->game->get_sysdata()->save_flags, SV_GET)
-			&&  !char_died(ch) )
+			if ( carry_limited && warned_limit && obj->item_type != ITEM_MONEY )
+			{
+			    if ( obj_next && (obj_extracted(obj_next) || obj_next->in_room != ch->in_room) )
+				break;
+			    continue;
+			}
+			ROOM_INDEX_DATA *cur_room = ch->in_room;
+			found = TRUE;
+			if ( number && (cnt + obj->count) > number )
+			    split_obj( obj, number - cnt );
+			int attempt_cnt = obj->count;
+			get_obj( ch, obj, NULL );
+			if ( char_died(ch) )
+			    return;
+			bool picked_up = ( obj_extracted(obj) || obj->carried_by == ch || obj->in_room != cur_room );
+			if ( picked_up )
+			    cnt += attempt_cnt;
+			carry_limited = (ch->carry_number >= can_carry_n( ch ) || ch->carry_weight >= can_carry_w( ch ));
+			if ( carry_limited && obj->item_type != ITEM_MONEY && !picked_up )
+			    warned_limit = TRUE;
+			bool next_invalid = ( obj_next && (obj_extracted(obj_next) || obj_next->in_room != cur_room) );
+			if ( (number && cnt >= number)
+			||   (carry_limited && (next_invalid || !has_remaining_money( obj_next, ch, fAll, chk ))) )
+			{
+			    if ( BV_IS_SET(ch->game->get_sysdata()->save_flags, SV_GET) )
 			    {
 				save_char_obj( ch );
-	 		   	if( BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
-			    	  save_home (ch );
-    				if ( BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
-    				  save_storeroom( ch->in_room );
-   			    }
-			return;
+				if( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) )
+				    save_home (ch );
+				if ( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
+				    save_storeroom( ch->in_room );
+			    }
+			    return;
+			}
+			if ( next_invalid )
+			    break;
 		    }
 		}
 	    }
@@ -349,9 +399,9 @@ void do_get( CHAR_DATA *ch, char *argument )
 	    if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_GET ) )
 	    {
 		save_char_obj( ch );
-	    	if( BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
+	    	if( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
 	    	  save_home (ch );
-    		if ( BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
+    		if ( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
     		  save_storeroom( ch->in_room );
    	    }
 	}
@@ -413,15 +463,16 @@ void do_get( CHAR_DATA *ch, char *argument )
 	    separate_obj(obj);
 	    get_obj( ch, obj, container );
 
-	    check_for_trap( ch, container, TRAP_GET );
+	    if ( !char_died(ch) && !obj_extracted(container) )
+	      check_for_trap( ch, container, TRAP_GET );
 	    if ( char_died(ch) )
 	      return;
 	    if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_GET ) )
 	    {
 		save_char_obj( ch );
-	    	if( BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
+	    	if( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
 	    	  save_home (ch );
-    		if ( BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
+    		if ( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
     		  save_storeroom( ch->in_room );
    	    }
 	}
@@ -454,29 +505,52 @@ void do_get( CHAR_DATA *ch, char *argument )
 				chk = arg2;
 		}
 	    found = FALSE;
-	    for ( obj = container->first_content; obj; obj = obj_next )
 	    {
+		bool carry_limited = (ch->carry_number >= can_carry_n( ch ) || ch->carry_weight >= can_carry_w( ch ));
+		bool warned_limit = FALSE;
+		for ( obj = container->first_content; obj; obj = obj_next )
+		{
 			obj_next = obj->next_content;
 			if ( ( fAll || nifty_is_name( chk, obj->name ) )
 			&&   can_see_obj( ch, obj ) )
 			{
+				if ( carry_limited && warned_limit && obj->item_type != ITEM_MONEY )
+				{
+					if ( obj_next && (obj_extracted(obj_next) || obj_next->in_obj != container) )
+						break;
+					continue;
+				}
 				found = TRUE;
 				if ( number && (cnt + obj->count) > number )
 					split_obj( obj, number - cnt );
-				cnt += obj->count;
+				int attempt_cnt = obj->count;
 				get_obj( ch, obj, container );
-				if ( char_died(ch)
-					||   ch->carry_number >= can_carry_n( ch )
-					||   ch->carry_weight >= can_carry_w( ch )
-					||   (number && cnt >= number) )
+				if ( char_died(ch) )
+					return;
+				bool picked_up = ( obj_extracted(obj) || obj->carried_by == ch || obj->in_obj != container );
+				if ( picked_up )
+					cnt += attempt_cnt;
+				if ( obj_extracted(container) )
+					return;
+				carry_limited = (ch->carry_number >= can_carry_n( ch ) || ch->carry_weight >= can_carry_w( ch ));
+				if ( carry_limited && obj->item_type != ITEM_MONEY && !picked_up )
+					warned_limit = TRUE;
+				bool next_invalid = ( obj_next && (obj_extracted(obj_next) || obj_next->in_obj != container) );
+				if ( (number && cnt >= number)
+				||   (carry_limited && (next_invalid || !has_remaining_money( obj_next, ch, fAll, chk ))) )
 				{
-					if( container->item_type == ITEM_CORPSE_PC )
+					if( container->item_type == ITEM_CORPSE_PC
+					&&  container->short_descr
+					&&  strlen(container->short_descr) >= 14 )
 						write_corpses( NULL, container->short_descr + 14 );
 					if( found && BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_GET ) )
 						save_char_obj( ch );
 					return;
 				}
+				if ( next_invalid )
+					break;
 			}
+		}
 	    }
 
 	    if ( !found )
@@ -489,16 +563,16 @@ void do_get( CHAR_DATA *ch, char *argument )
 				"I see nothing like that beneath the $T." :
 				"I see nothing like that in the $T.", ch, NULL, container->short_descr, TO_CHAR );
 	    }
-	    else
+	    else if ( !obj_extracted(container) )
 	      check_for_trap( ch, container, TRAP_GET );
 	    if ( char_died(ch) )
 		return;
 	    if ( found && BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_GET ) )
 	    {
 		save_char_obj( ch );
-	    	if( BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
+	    	if( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
 	    	  save_home (ch );
-    		if ( BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
+    		if ( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
     		  save_storeroom( ch->in_room );
    	    }
 	}
@@ -521,7 +595,10 @@ void do_put( CHAR_DATA *ch, char *argument )
     int		number;
     bool	save_char = FALSE;
 
-    argstr = one_argument( argument, arg1 );
+    if ( !ch || !ch->in_room )
+	return;
+
+    argstr = one_argument( argument ? argument : "", arg1 );
     if ( is_number(arg1) )
     {
 	number = strtoi(arg1);
@@ -632,26 +709,31 @@ void do_put( CHAR_DATA *ch, char *argument )
 	check_for_trap ( ch, container, TRAP_PUT );
 	if ( char_died(ch) )
 	  return;
-	count = obj->count;
-	obj->count = 1;
- 	act( AT_ACTION, IS_OBJ_STAT( container, ITEM_COVERING )
+	if ( !obj_extracted(obj) && !obj_extracted(container) )
+	{
+	  count = obj->count;
+	  obj->count = 1;
+ 	  act( AT_ACTION, IS_OBJ_STAT( container, ITEM_COVERING )
  		? "$n hides $p beneath $P." : "$n puts $p in $P.",
 		ch, obj, container, TO_ROOM );
-	act( AT_ACTION, IS_OBJ_STAT( container, ITEM_COVERING )
+	  act( AT_ACTION, IS_OBJ_STAT( container, ITEM_COVERING )
 		? "You hide $p beneath $P." : "You put $p in $P.",
 		ch, obj, container, TO_CHAR );
-	obj->count = count;
+	  obj->count = count;
+	}
 
 	if ( save_char )
 	    {
 		save_char_obj( ch );
-	    	if( BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
+	    	if( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
 	    	  save_home (ch );
-    		if ( BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
+    		if ( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
     		  save_storeroom( ch->in_room );
    	    }
 	/* Clan storeroom check */
-	if ( BV_IS_SET(ch->in_room->room_flags, ROOM_CLANSTOREROOM) 
+	if ( !obj_extracted(container)
+	&&   ch->in_room
+	&&   BV_IS_SET(ch->in_room->room_flags, ROOM_CLANSTOREROOM) 
 	&&   container->carried_by == NULL)
 	   for ( clan = first_clan; clan; clan = clan->next )
 	      if ( clan->storeroom == ch->in_room->vnum )
@@ -691,10 +773,15 @@ void do_put( CHAR_DATA *ch, char *argument )
 	    &&   can_see_obj( ch, obj )
 	    &&   obj->wear_loc == WEAR_NONE
 	    &&   obj != container
-	    &&   can_drop_obj( ch, obj )
-	    &&   get_obj_weight( obj ) + get_obj_weight( container )
-		 <= container->value[0] )
+	    &&   can_drop_obj( ch, obj ) )
 	    {
+		int put_count = (number && (cnt + obj->count) > number) ? (number - cnt) : obj->count;
+		int item_weight = (obj->count > 0 && put_count < obj->count)
+		    ? (get_obj_weight( obj ) * put_count) / obj->count
+		    : get_obj_weight( obj );
+		if ( item_weight + get_obj_weight( container ) > container->value[0] )
+		    continue;
+
 		if ( number && (cnt + obj->count) > number )
 		    split_obj( obj, number - cnt );
 		cnt += obj->count;
@@ -705,9 +792,11 @@ void do_put( CHAR_DATA *ch, char *argument )
 		found = TRUE;
 
 		check_for_trap( ch, container, TRAP_PUT );
-		if ( char_died(ch) )
+		if ( char_died(ch) || obj_extracted(container) )
 		  return;
 		if ( number && cnt >= number )
+		  break;
+		if ( obj_next && (obj_extracted(obj_next) || obj_next->carried_by != ch) )
 		  break;
 	    }
 	}
@@ -729,13 +818,15 @@ void do_put( CHAR_DATA *ch, char *argument )
 	if ( save_char )
 	    {
 		save_char_obj( ch );
-	    	if( BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
+	    	if( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
 	    	  save_home (ch );
-    		if ( BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
+    		if ( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
     		  save_storeroom( ch->in_room );
    	    }
 	/* Clan storeroom check */
-        if ( BV_IS_SET(ch->in_room->room_flags, ROOM_CLANSTOREROOM) 
+        if ( !obj_extracted(container)
+	&& ch->in_room
+	&& BV_IS_SET(ch->in_room->room_flags, ROOM_CLANSTOREROOM) 
 	&& container->carried_by == NULL )
 	  for ( clan = first_clan; clan; clan = clan->next )
 	     if ( clan->storeroom == ch->in_room->vnum )
@@ -759,12 +850,14 @@ void do_drop( CHAR_DATA *ch, char *argument )
     argstr = one_argument( argument, arg );
     if ( is_number(arg) )
     {
-	number = strtoi(arg);
-	if ( number < 1 )
+        errno = 0;
+        const long parsed = strtol(arg.c_str(), nullptr, 10);
+        if ( errno == ERANGE || parsed < 1 || parsed > INT_MAX )
 	{
 	    send_to_char( "That was easy...\n", ch );
 	    return;
 	}
+        number = static_cast<int>(parsed);
 	argstr = one_argument( argstr, arg );
     }
     else
@@ -801,28 +894,41 @@ void do_drop( CHAR_DATA *ch, char *argument )
 		return;
 	    }
 
-	    ch->gold -= number;
+            int total = number;
+            std::vector<OBJ_DATA *> piles;
+            for ( obj = ch->in_room->first_content; obj; obj = obj->next_content )
+            {
+                int unit_value;
+                switch ( obj->pIndexData->vnum )
+                {
+                case OBJ_VNUM_MONEY_ONE:
+                    unit_value = 1;
+                    break;
+                case OBJ_VNUM_MONEY_SOME:
+                    unit_value = obj->value[0];
+                    break;
+                default:
+                    continue;
+                }
+                const long long value = static_cast<long long>(unit_value) * obj->count;
+                if ( value <= 0 || value > INT_MAX - total )
+                    continue;
+                total += static_cast<int>(value);
+                piles.push_back(obj);
+            }
 
-	    for ( obj = ch->in_room->first_content; obj; obj = obj_next )
-	    {
-		obj_next = obj->next_content;
+            OBJ_DATA *money = create_money(total);
+            if ( !money )
+            {
+                send_to_char("You cannot drop your credits here.\n", ch);
+                return;
+            }
+            ch->gold -= number;
+            for ( OBJ_DATA *pile : piles )
+                extract_obj(pile);
 
-		switch ( obj->pIndexData->vnum )
-		{
-		case OBJ_VNUM_MONEY_ONE:
-		   number += 1;
-		   extract_obj( obj );
-		   break;
-
-		case OBJ_VNUM_MONEY_SOME:
-		   number += obj->value[0];
-		   extract_obj( obj );
-		   break;
-		}
-	    }
-
-	    act( AT_ACTION, "$n drops some credits.", ch, NULL, NULL, TO_ROOM );
-	    obj_to_room( create_money( number ), ch->in_room );
+            act(AT_ACTION, "$n drops some credits.", ch, NULL, NULL, TO_ROOM);
+            obj_to_room(money, ch->in_room);
 	    send_to_char( "OK.\n", ch );
 	    if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_DROP ) )
 	    {
@@ -836,6 +942,7 @@ void do_drop( CHAR_DATA *ch, char *argument )
 	}
     }
 
+    ROOM_INDEX_DATA *drop_room = ch->in_room;
     if ( number <= 1 && str_cmp( arg, "all" ) && str_prefix( "all.", arg ) )
     {
 	/* 'drop obj' */
@@ -857,13 +964,14 @@ void do_drop( CHAR_DATA *ch, char *argument )
 
 	obj_from_char( obj );
 	obj = obj_to_room( obj, ch->in_room );
-	oprog_drop_trigger ( ch, obj );   /* mudprogs */
+	if ( !obj_extracted(obj) )
+	    oprog_drop_trigger ( ch, obj );   /* mudprogs */
 
-        if( char_died(ch) || obj_extracted(obj) )
+        if ( char_died(ch) )
           return;
 
 	/* Clan storeroom saving */
-	if ( BV_IS_SET(ch->in_room->room_flags, ROOM_CLANSTOREROOM) )
+	if ( ch->in_room == drop_room && BV_IS_SET(drop_room->room_flags, ROOM_CLANSTOREROOM) )
 	   for ( clan = first_clan; clan; clan = clan->next )
  	      if ( clan->storeroom == ch->in_room->vnum )
 		save_clan_storeroom(ch, clan);
@@ -925,15 +1033,19 @@ void do_drop( CHAR_DATA *ch, char *argument )
 		act( AT_ACTION, "$n drops $p.", ch, obj, NULL, TO_ROOM );
 		act( AT_ACTION, "You drop $p.", ch, obj, NULL, TO_CHAR );
 		obj = obj_to_room( obj, ch->in_room );
-		oprog_drop_trigger( ch, obj );		/* mudprogs */
+		if ( !obj_extracted(obj) )
+		    oprog_drop_trigger( ch, obj );		/* mudprogs */
                 if ( char_died(ch) )
                     return;
+                if ( ch->in_room != drop_room || (obj_next &&
+                     (obj_extracted(obj_next) || obj_next->carried_by != ch)) )
+                    break;
 		if ( number && cnt >= number )
 		    break;
 	    }
 	}
 
-        if ( BV_IS_SET(ch->in_room->room_flags, ROOM_CLANSTOREROOM) )
+        if ( ch->in_room == drop_room && BV_IS_SET(drop_room->room_flags, ROOM_CLANSTOREROOM) )
 	   for ( clan = first_clan; clan; clan = clan->next )
  	      if ( clan->storeroom == ch->in_room->vnum )
 		save_clan_storeroom(ch, clan);
@@ -948,14 +1060,14 @@ void do_drop( CHAR_DATA *ch, char *argument )
 		    ch, NULL, chk, TO_CHAR );
 	}
     }
-    if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_DROP ) )
-	    {
-		save_char_obj( ch );
-	    	if( BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) 
-	    	  save_home (ch );
-    		if ( BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
-    		  save_storeroom( ch->in_room );
-   	    } /* duping protector */
+    if ( BV_IS_SET(ch->game->get_sysdata()->save_flags, SV_DROP) )
+    {
+        save_char_obj(ch);
+        if ( ch->in_room == drop_room && BV_IS_SET(drop_room->room_flags, ROOM_PLR_HOME) )
+            save_home(ch);
+        if ( BV_IS_SET(drop_room->room_flags, ROOM_CLANSTOREROOM) )
+            save_storeroom(drop_room);
+    }
     return;
 }
 
@@ -987,10 +1099,9 @@ void do_give( CHAR_DATA *ch, char *argument )
     if ( is_number( arg1 ) )
     {
 	/* 'give NNNN coins victim' */
-	int amount;
-
-	amount   = strtoi(arg1);
-	if ( amount <= 0
+	errno = 0;
+	const long parsed = strtol(arg1.c_str(), nullptr, 10);
+	if ( errno == ERANGE || parsed <= 0 || parsed > INT_MAX
 	|| ( str_cmp( arg2, "credits" ) && str_cmp( arg2, "credit" ) ) )
 	{
 	    send_to_char( "Sorry, you can't do that.\n", ch );
@@ -1012,11 +1123,18 @@ void do_give( CHAR_DATA *ch, char *argument )
 	    return;
 	}
 
+	const int amount = static_cast<int>(parsed);
 	if ( ch->gold < amount )
 	{
 	    send_to_char( "Very generous of you, but you haven't got that many credits.\n", ch );
 	    return;
 	}
+
+        if ( victim != ch && victim->gold > INT_MAX - amount )
+        {
+            send_to_char("They cannot carry that many credits.\n", ch);
+            return;
+        }
 
 	ch->gold     -= amount;
 	victim->gold += amount;
@@ -1185,6 +1303,9 @@ bool remove_obj( CHAR_DATA *ch, int iWear, bool fReplace )
 {
     OBJ_DATA *obj, *tmpobj;
 
+    if ( !ch || char_died(ch) )
+	return FALSE;
+
     if ( ( obj = get_eq_char( ch, iWear ) ) == NULL )
 	return TRUE;
 
@@ -1284,12 +1405,22 @@ bool can_layer( CHAR_DATA *ch, OBJ_DATA *obj, sh_int wear_loc )
  * Big repetitive code, ick.
  * Restructured a bit to allow for specifying body location	-Thoric
  */
+static void finish_wear( CHAR_DATA *ch, OBJ_DATA *obj, int iWear )
+{
+    equip_char( ch, obj, iWear );
+    if ( !char_died(ch) && !obj_extracted(obj) && obj->carried_by == ch && obj->wear_loc != WEAR_NONE )
+        oprog_wear_trigger( ch, obj );
+}
+
 void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 {
 //  char buf[MAX_STRING_LENGTH];
     OBJ_DATA *tmpobj;
     sh_int bit, tmp;
     bool check_size;
+
+    if ( !ch || !obj || char_died(ch) || obj_extracted(obj) )
+        return;
 
     separate_obj( obj );
     
@@ -1334,7 +1465,7 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
     || obj->item_type == ITEM_LIGHT ||   bit == ITEM_WEAR_SHIELD )
        check_size = FALSE;
     else if ( ch->race == RACE_DEFEL )
-       check_size = TRUE; 
+       check_size = bit != ITEM_WEAR_WRIST;
     else if ( !IS_NPC(ch) )
       switch (ch->race)
       {
@@ -1383,7 +1514,7 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
    
    if ( check_size )
    { 
-    if ( ch->race == RACE_DEFEL && ( wear_bit != ITEM_WEAR_WRIST ) )
+    if ( ch->race == RACE_DEFEL && ( bit != ITEM_WEAR_WRIST ) )
     {
 	act( AT_MAGIC, "It is against your nature to wear anything that might make you visible.", ch, NULL, NULL, TO_CHAR );
 	act( AT_ACTION, "$n wants to use $p, but doesn't.",
@@ -1421,6 +1552,8 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
     {
 	if ( !remove_obj( ch, WEAR_LIGHT, fReplace ) )
 	    return;  
+	if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	    return;
 	if ( !oprog_use_trigger( ch, obj, NULL, NULL, NULL ) )
         {
           if ( !obj->action_desc || obj->action_desc[0]=='\0' )
@@ -1431,8 +1564,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 	   else
 	    actiondesc( ch, obj, NULL );
         }
-        equip_char( ch, obj, WEAR_LIGHT );
-        oprog_wear_trigger( ch, obj );
+        if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+            return;
+        finish_wear( ch, obj, WEAR_LIGHT );
 	return;
     }
 
@@ -1453,10 +1587,19 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 
 	case ITEM_WEAR_FINGER:
 	    if ( get_eq_char( ch, WEAR_FINGER_L )
-	    &&   get_eq_char( ch, WEAR_FINGER_R )
-	    &&   !remove_obj( ch, WEAR_FINGER_L, fReplace )
-	    &&   !remove_obj( ch, WEAR_FINGER_R, fReplace ) )
-	      return;
+	    &&   get_eq_char( ch, WEAR_FINGER_R ) )
+	    {
+	        bool removed = remove_obj( ch, WEAR_FINGER_L, fReplace );
+	        if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	          return;
+	        if ( !removed )
+	        {
+	          if ( !remove_obj( ch, WEAR_FINGER_R, fReplace ) )
+	            return;
+	          if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	            return;
+	        }
+	    }
 
 	    if ( !get_eq_char( ch, WEAR_FINGER_L ) )
 	    {
@@ -1470,8 +1613,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
         	 else
 	          actiondesc( ch, obj, NULL );
                 }
-		equip_char( ch, obj, WEAR_FINGER_L );
-		oprog_wear_trigger( ch, obj );
+		if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+		  return;
+		finish_wear( ch, obj, WEAR_FINGER_L );
 		return;
 	    }
 
@@ -1487,8 +1631,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
         	 else
 	          actiondesc( ch, obj, NULL );
                 }
-		equip_char( ch, obj, WEAR_FINGER_R );
-		oprog_wear_trigger( ch, obj );
+		if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+		  return;
+		finish_wear( ch, obj, WEAR_FINGER_R );
 		return;
 	    }
 
@@ -1498,10 +1643,19 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 
 	case ITEM_WEAR_NECK:
 	    if ( get_eq_char( ch, WEAR_NECK_1 ) != NULL
-	    &&   get_eq_char( ch, WEAR_NECK_2 ) != NULL
-	    &&   !remove_obj( ch, WEAR_NECK_1, fReplace )
-	    &&   !remove_obj( ch, WEAR_NECK_2, fReplace ) )
-	      return;
+	    &&   get_eq_char( ch, WEAR_NECK_2 ) != NULL )
+	    {
+	        bool removed = remove_obj( ch, WEAR_NECK_1, fReplace );
+	        if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	          return;
+	        if ( !removed )
+	        {
+	          if ( !remove_obj( ch, WEAR_NECK_2, fReplace ) )
+	            return;
+	          if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	            return;
+	        }
+	    }
 
 	    if ( !get_eq_char( ch, WEAR_NECK_1 ) )
 	    {
@@ -1515,8 +1669,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
         	 else
 	          actiondesc( ch, obj, NULL );
                 }
-		equip_char( ch, obj, WEAR_NECK_1 );
-		oprog_wear_trigger( ch, obj );
+		if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+		  return;
+		finish_wear( ch, obj, WEAR_NECK_1 );
 		return;
 	    }
 
@@ -1532,8 +1687,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
         	 else
 	          actiondesc( ch, obj, NULL );
                 }
-		equip_char( ch, obj, WEAR_NECK_2 );
-		oprog_wear_trigger( ch, obj );
+		if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+		  return;
+		finish_wear( ch, obj, WEAR_NECK_2 );
 		return;
 	    }
 
@@ -1561,8 +1717,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
 	      actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_BODY );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_BODY );
 	    return;
 
 	case ITEM_WEAR_HEAD:
@@ -1572,6 +1729,8 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 		return;
 	    }
 	    if ( !remove_obj( ch, WEAR_HEAD, fReplace ) )
+	      return;
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
 	      return;
             if ( !oprog_use_trigger( ch, obj, NULL, NULL, NULL ) )
             {
@@ -1583,12 +1742,15 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
 	      actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_HEAD );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_HEAD );
 	    return;
 
 	case ITEM_WEAR_EYES:
 	    if ( !remove_obj( ch, WEAR_EYES, fReplace ) )
+	      return;
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
 	      return;
             if ( !oprog_use_trigger( ch, obj, NULL, NULL, NULL ) )
             {
@@ -1600,8 +1762,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
 	      actiondesc( ch, obj, NULL );
            }
-	    equip_char( ch, obj, WEAR_EYES );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_EYES );
 	    return;
 
 	case ITEM_WEAR_EARS:
@@ -1611,6 +1774,8 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 		return;
 	    }
 	    if ( !remove_obj( ch, WEAR_EARS, fReplace ) )
+	      return;
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
 	      return;
             if ( !oprog_use_trigger( ch, obj, NULL, NULL, NULL ) )
             {
@@ -1622,8 +1787,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
              actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_EARS );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_EARS );
 	    return;
 
 	case ITEM_WEAR_LEGS:
@@ -1651,8 +1817,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
              actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_LEGS );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_LEGS );
 	    return;
 
 	case ITEM_WEAR_FEET:
@@ -1680,8 +1847,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
              actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_FEET );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_FEET );
 	    return;
 
 	case ITEM_WEAR_HANDS:
@@ -1704,8 +1872,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
              actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_HANDS );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_HANDS );
 	    return;
 
 	case ITEM_WEAR_ARMS:
@@ -1728,8 +1897,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
              actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_ARMS );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_ARMS );
 	    return;
 
 	case ITEM_WEAR_ABOUT:
@@ -1752,8 +1922,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
              actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_ABOUT );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_ABOUT );
 	    return;
 
 	case ITEM_WEAR_WAIST:
@@ -1776,16 +1947,26 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
              actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_WAIST );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_WAIST );
 	    return;
 
 	case ITEM_WEAR_WRIST:
 	    if ( get_eq_char( ch, WEAR_WRIST_L )
-	    &&   get_eq_char( ch, WEAR_WRIST_R )
-	    &&   !remove_obj( ch, WEAR_WRIST_L, fReplace )
-	    &&   !remove_obj( ch, WEAR_WRIST_R, fReplace ) )
-	       return;
+	    &&   get_eq_char( ch, WEAR_WRIST_R ) )
+	    {
+	       bool removed = remove_obj( ch, WEAR_WRIST_L, fReplace );
+	       if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	         return;
+	       if ( !removed )
+	       {
+	         if ( !remove_obj( ch, WEAR_WRIST_R, fReplace ) )
+	           return;
+	         if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	           return;
+	       }
+	    }
 
 	    if ( !get_eq_char( ch, WEAR_WRIST_L ) )
 	    {
@@ -1801,8 +1982,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
                  else
                   actiondesc( ch, obj, NULL );
 		}
-		equip_char( ch, obj, WEAR_WRIST_L );
-		oprog_wear_trigger( ch, obj );
+		if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+		  return;
+		finish_wear( ch, obj, WEAR_WRIST_L );
 		return;
 	    }
 
@@ -1820,8 +2002,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
                else
                 actiondesc( ch, obj, NULL );
               }
-		equip_char( ch, obj, WEAR_WRIST_R );
-		oprog_wear_trigger( ch, obj );
+		if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+		  return;
+		finish_wear( ch, obj, WEAR_WRIST_R );
 		return;
 	    }
 
@@ -1831,6 +2014,8 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 
 	case ITEM_WEAR_SHIELD:
 	    if ( !remove_obj( ch, WEAR_SHIELD, fReplace ) )
+	      return;
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
 	      return;
             if ( !oprog_use_trigger( ch, obj, NULL, NULL, NULL ) )
             {
@@ -1842,12 +2027,33 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
               actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_SHIELD );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_SHIELD );
 	    return;
 
     	case ITEM_MISSILE_WIELD:
-		case ITEM_WIELD:
+	case ITEM_WIELD:
+	{
+	    const bool missile = bit == ITEM_MISSILE_WIELD;
+	    const bool two_handed = IS_OBJ_STAT(obj, ITEM_TWO_HANDS);
+	    OBJ_DATA *missile_weapon = get_eq_char(ch, WEAR_MISSILE_WIELD);
+	    if ( (two_handed && get_eq_char(ch, WEAR_HOLD))
+	         || (!missile && missile_weapon && (two_handed || IS_OBJ_STAT(missile_weapon, ITEM_TWO_HANDS))) )
+	    {
+	        send_to_char("Both hands are needed to wield that weapon.\n", ch);
+	        return;
+	    }
+	    if ( missile_weapon && !missile && get_eq_char(ch, WEAR_WIELD) )
+	    {
+	        send_to_char("You are already wielding two weapons!\n", ch);
+	        return;
+	    }
+	    if ( missile && get_eq_char(ch, WEAR_DUAL_WIELD) )
+	    {
+	        send_to_char("You are already wielding two weapons!\n", ch);
+	        return;
+	    }
 	    if ( (tmpobj  = get_eq_char( ch, WEAR_WIELD )) != NULL &&   !could_dual(ch) )
 	    {
 		send_to_char( "You're already wielding something.\n", ch );
@@ -1876,6 +2082,10 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 			return;
 		    }
 
+                    if ( missile && !remove_obj(ch, WEAR_MISSILE_WIELD, fReplace) )
+                        return;
+                    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+                        return;
                     if ( !oprog_use_trigger( ch, obj, NULL, NULL, NULL ) )
                     {
                      if ( !obj->action_desc || obj->action_desc[0]=='\0' )  
@@ -1886,8 +2096,9 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
                      else
                       actiondesc( ch, obj, NULL );
                     }
-		    equip_char( ch, obj, WEAR_DUAL_WIELD );
-		    oprog_wear_trigger( ch, obj );
+		    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+		      return;
+		    finish_wear( ch, obj, missile ? WEAR_MISSILE_WIELD : WEAR_DUAL_WIELD );
 		}
 	        return;
 	    }
@@ -1904,6 +2115,10 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 		return;
 	    }
 
+            if ( missile && !remove_obj(ch, WEAR_MISSILE_WIELD, fReplace) )
+                return;
+            if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+                return;
             if ( !oprog_use_trigger( ch, obj, NULL, NULL, NULL ) )
             {
              if ( !obj->action_desc || obj->action_desc[0]=='\0' )  
@@ -1914,11 +2129,22 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
               actiondesc( ch, obj, NULL );
             }
-	    equip_char( ch, obj, WEAR_WIELD );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, missile ? WEAR_MISSILE_WIELD : WEAR_WIELD );
 	    return;
+	}
 
 	case ITEM_HOLD:
+	{
+	    OBJ_DATA *weapon = get_eq_char(ch, WEAR_WIELD);
+	    OBJ_DATA *missile = get_eq_char(ch, WEAR_MISSILE_WIELD);
+	    if ( (weapon && IS_OBJ_STAT(weapon, ITEM_TWO_HANDS))
+	         || (missile && IS_OBJ_STAT(missile, ITEM_TWO_HANDS)) )
+	    {
+	        send_to_char("Both hands are occupied wielding that weapon.\n", ch);
+	        return;
+	    }
 	    if ( get_eq_char( ch, WEAR_DUAL_WIELD )
          || ( get_eq_char( ch, WEAR_WIELD )
          && ( get_eq_char( ch, WEAR_MISSILE_WIELD ) ) ) )		
@@ -1927,6 +2153,8 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 		return;
 	    }
 	    if ( !remove_obj( ch, WEAR_HOLD, fReplace ) )
+	      return;
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
 	      return;
             if ( obj->item_type == ITEM_DEVICE
 				|| obj->item_type == ITEM_GRENADE
@@ -1943,9 +2171,11 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
 	      act( AT_ACTION, "$n holds $p in $s hands.",   ch, obj, NULL, TO_ROOM );
 	      act( AT_ACTION, "You hold $p in your hands.", ch, obj, NULL, TO_CHAR );
             }
-	    equip_char( ch, obj, WEAR_HOLD );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_HOLD );
 	    return;
+	}
 
 	case ITEM_WEAR_FLOATING:
 	    if ( !can_layer( ch, obj, WEAR_FLOATING ) )
@@ -1963,11 +2193,14 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
 	      actiondesc( ch, obj, NULL );
            }
-	    equip_char( ch, obj, WEAR_FLOATING );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_FLOATING );
 	    return;
 	case ITEM_WEAR_OVER:
 	    if ( !remove_obj( ch, WEAR_OVER, fReplace ) )
+	      return;
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
 	      return;
             if ( !oprog_use_trigger( ch, obj, NULL, NULL, NULL ) )
             {
@@ -1979,8 +2212,29 @@ void wear_obj( CHAR_DATA *ch, OBJ_DATA *obj, bool fReplace, int wear_bit )
              else
 	      actiondesc( ch, obj, NULL );
            }
-	    equip_char( ch, obj, WEAR_OVER );
-	    oprog_wear_trigger( ch, obj );
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+	      return;
+	    finish_wear( ch, obj, WEAR_OVER );
+	    return;
+
+	case ITEM_WEAR_DISGUISE:
+	    if ( !remove_obj( ch, WEAR_DISGUISE, fReplace ) )
+		return;
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+		return;
+	    if ( !oprog_use_trigger( ch, obj, NULL, NULL, NULL ) )
+	    {
+		if ( !obj->action_desc || obj->action_desc[0] == '\0' )
+		{
+		    act( AT_ACTION, "$n puts on $p.", ch, obj, NULL, TO_ROOM );
+		    act( AT_ACTION, "You put on $p.", ch, obj, NULL, TO_CHAR );
+		}
+		else
+		    actiondesc( ch, obj, NULL );
+	    }
+	    if ( char_died(ch) || obj_extracted(obj) || obj->carried_by != ch || obj->wear_loc != WEAR_NONE )
+		return;
+	    finish_wear( ch, obj, WEAR_DISGUISE );
 	    return;
 
     }
@@ -1995,7 +2249,10 @@ void do_wear( CHAR_DATA *ch, char *argument )
     int wear_bit;
 	std::string argstr;
 
-    argstr = one_argument( argument, arg1 );
+    if ( !ch || !ch->in_room )
+	return;
+
+    argstr = one_argument( argument ? argument : "", arg1 );
     argstr = one_argument( argstr, arg2 );
     if ( (!str_cmp(arg2, "on")  || !str_cmp(arg2, "upon") || !str_cmp(arg2, "around"))
     &&   !argstr.empty() )
@@ -2005,6 +2262,13 @@ void do_wear( CHAR_DATA *ch, char *argument )
     {
 	send_to_char( "Wear, wield, or hold what?\n", ch );
 	return;
+    }
+
+    wear_bit = arg2.empty() ? -1 : get_wflag(arg2);
+    if ( !arg2.empty() && wear_bit < 0 )
+    {
+        send_to_char("That is not a valid wear location.\n", ch);
+        return;
     }
 
     if ( ms_find_obj(ch) )
@@ -2018,7 +2282,13 @@ void do_wear( CHAR_DATA *ch, char *argument )
 	{
 	    obj_next = obj->next_content;
 	    if ( obj->wear_loc == WEAR_NONE && can_see_obj( ch, obj ) )
+	    {
 		wear_obj( ch, obj, FALSE, -1 );
+		if ( char_died(ch) )
+		    return;
+		if ( obj_next && (obj_extracted(obj_next) || obj_next->carried_by != ch) )
+		    break;
+	    }
 	}
 	return;
     }
@@ -2029,10 +2299,6 @@ void do_wear( CHAR_DATA *ch, char *argument )
 	    send_to_char( "You do not have that item.\n", ch );
 	    return;
 	}
-	if ( arg2[0] != '\0' )
-	  wear_bit = get_wflag(arg2);
-	else
-	  wear_bit = -1;
 	wear_obj( ch, obj, TRUE, wear_bit );
     }
 
@@ -2046,8 +2312,10 @@ void do_remove( CHAR_DATA *ch, char *argument )
     std::string arg;
     OBJ_DATA *obj, *obj_next;
 
+    if ( !ch || !ch->in_room )
+	return;
 
-    one_argument( argument, arg );
+    one_argument( argument ? argument : "", arg );
 
     if ( arg.empty() )
     {
@@ -2064,7 +2332,13 @@ void do_remove( CHAR_DATA *ch, char *argument )
       {
         obj_next = obj->next_content;
         if ( obj->wear_loc != WEAR_NONE && can_see_obj ( ch, obj ) )
+        {
           remove_obj ( ch, obj->wear_loc, TRUE );
+          if ( char_died(ch) )
+            return;
+          if ( obj_next && (obj_extracted(obj_next) || obj_next->carried_by != ch) )
+            break;
+        }
       }
       return;
     }
@@ -2232,8 +2506,8 @@ void do_brandish( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    if ( ( sn = staff->value[3] ) < 0
-    ||   sn >= top_sn
+    sn = staff->value[3];
+    if ( !IS_VALID_SN(sn)
     ||   skill_table[sn]->spell_fun == NULL )
     {
       	bug( "%s: bad sn %d.", __func__, sn );
@@ -2244,7 +2518,10 @@ void do_brandish( CHAR_DATA *ch, char *argument )
 
     if ( staff->value[2] > 0 )
     {
-      if ( !oprog_use_trigger( ch, staff, NULL, NULL, NULL ) )
+      const bool handled = oprog_use_trigger(ch, staff, NULL, NULL, NULL);
+      if ( char_died(ch) || !ch->in_room || obj_extracted(staff) )
+          return;
+      if ( !handled )
       {
         act( AT_MAGIC, "$n brandishes $p.", ch, staff, NULL, TO_ROOM );
         act( AT_MAGIC, "You brandish $p.",  ch, staff, NULL, TO_CHAR );
@@ -2285,11 +2562,9 @@ void do_brandish( CHAR_DATA *ch, char *argument )
 	    }
 
 	    retcode = obj_cast_spell( staff->value[3], staff->value[0], ch, vch, NULL );
-	    if ( retcode == rCHAR_DIED || retcode == rBOTH_DIED )
-	    {
-            bug( "%s: char died", __func__ );
-			return;
-	    }  
+	    if ( retcode == rCHAR_DIED || retcode == rBOTH_DIED || char_died(ch)
+	         || !ch->in_room || obj_extracted(staff) )
+	        return;
 	}
     }
 
@@ -2363,7 +2638,10 @@ void do_zap( CHAR_DATA *ch, char *argument )
     {
 	if ( victim )
 	{
-          if ( !oprog_use_trigger( ch, wand, victim, NULL, NULL ) )
+          const bool handled = oprog_use_trigger(ch, wand, victim, NULL, NULL);
+          if ( char_died(ch) || obj_extracted(wand) || char_died(victim) )
+              return;
+          if ( !handled )
           {
 	    act( AT_MAGIC, "$n aims $p at $N.", ch, wand, victim, TO_ROOM );
 	    act( AT_MAGIC, "You aim $p at $N.", ch, wand, victim, TO_CHAR );
@@ -2371,7 +2649,10 @@ void do_zap( CHAR_DATA *ch, char *argument )
 	}
 	else
 	{
-          if ( !oprog_use_trigger( ch, wand, NULL, obj, NULL ) )
+          const bool handled = oprog_use_trigger(ch, wand, NULL, obj, NULL);
+          if ( char_died(ch) || obj_extracted(wand) || obj_extracted(obj) )
+              return;
+          if ( !handled )
           {
 	    act( AT_MAGIC, "$n aims $p at $P.", ch, wand, obj, TO_ROOM );
 	    act( AT_MAGIC, "You aim $p at $P.", ch, wand, obj, TO_CHAR );
@@ -2379,11 +2660,8 @@ void do_zap( CHAR_DATA *ch, char *argument )
 	}
 
 	retcode = obj_cast_spell( wand->value[3], wand->value[0], ch, victim, obj );
-	if ( retcode == rCHAR_DIED || retcode == rBOTH_DIED )
-	{
-        bug( "%s: char died", __func__ );
-	   	return;
-	}
+	if ( retcode == rCHAR_DIED || retcode == rBOTH_DIED || char_died(ch) || obj_extracted(wand) )
+	    return;
     }
 
     if ( --wand->value[2] <= 0 )
@@ -2441,6 +2719,121 @@ void save_clan_storeroom( CHAR_DATA *ch, CLAN_DATA *clan )
     return;
 }
 
+static void auction_cleanup_char_impl( CHAR_DATA *ch, bool return_to_seller )
+{
+    if ( !ch || !auction )
+        return;
+
+    if ( auction->item != NULL )
+    {
+        if ( ch == auction->seller )
+        {
+            OBJ_DATA *item = auction->item;
+            CHAR_DATA *buyer = auction->buyer;
+            int bet = auction->bet;
+
+            auction->item = NULL;
+            auction->seller = NULL;
+            auction->buyer = NULL;
+            auction->bet = 0;
+            auction->going = 0;
+            auction->pulse = 0;
+            auction->starting = 0;
+
+            if ( buyer && buyer != ch && !char_died( buyer ) )
+            {
+                buyer->gold += bet;
+                send_to_char( "Your money has been returned.\n", buyer );
+            }
+
+            talk_auction( str_printf( "Sale of %s has been cancelled.",
+                item->short_descr ? item->short_descr : "an item" ) );
+
+            if ( !obj_extracted( item ) )
+            {
+                if ( return_to_seller )
+                {
+                    if ( !ch->in_room || ( ch->carry_number + get_obj_number( item ) <= can_carry_n( ch )
+                                          && ch->carry_weight + get_obj_weight( item ) <= can_carry_w( ch ) ) )
+                    {
+                        obj_to_char( item, ch );
+                    }
+                    else
+                    {
+                        act( AT_PLAIN, "You drop $p as it is just too much to carry with everything else you're carrying.",
+                             ch, item, NULL, TO_CHAR );
+                        obj_to_room( item, ch->in_room );
+                    }
+                    send_to_char( "Your item has been returned.\n", ch );
+                }
+                else
+                {
+                    extract_obj( item );
+                }
+            }
+            return;
+        }
+        else if ( ch == auction->buyer )
+        {
+            OBJ_DATA *item = auction->item;
+            CHAR_DATA *seller = auction->seller;
+            int bet = auction->bet;
+
+            auction->item = NULL;
+            auction->seller = NULL;
+            auction->buyer = NULL;
+            auction->bet = 0;
+            auction->going = 0;
+            auction->pulse = 0;
+            auction->starting = 0;
+
+            if ( bet > 0 )
+                ch->gold += bet;
+
+            talk_auction( str_printf( "Auction of %s has been cancelled.",
+                item->short_descr ? item->short_descr : "an item" ) );
+
+            if ( seller && !char_died( seller ) )
+            {
+                if ( ( seller->carry_weight + get_obj_weight( item ) ) > can_carry_w( seller )
+                  && seller->in_room )
+                {
+                    act( AT_PLAIN, "You drop $p as it is just too much to carry with everything else you're carrying.",
+                         seller, item, NULL, TO_CHAR );
+                    obj_to_room( item, seller->in_room );
+                }
+                else
+                {
+                    obj_to_char( item, seller );
+                }
+                send_to_char( "Your item has been returned.\n", seller );
+                if ( seller->game && BV_IS_SET( seller->game->get_sysdata()->save_flags, SV_AUCTION ) )
+                    save_char_obj( seller );
+            }
+            else if ( !obj_extracted( item ) )
+            {
+                extract_obj( item );
+            }
+            return;
+        }
+    }
+
+    if ( auction->seller == ch )
+        auction->seller = NULL;
+    if ( auction->buyer == ch )
+        auction->buyer = NULL;
+}
+
+void auction_cleanup_char( CHAR_DATA *ch )
+{
+    auction_cleanup_char_impl( ch, FALSE );
+}
+
+void auction_cleanup_char_for_quit( CHAR_DATA *ch )
+{
+    auction_cleanup_char_impl( ch, TRUE );
+}
+
 /* put an item on auction, or see the stats on the current item or bet */
 void do_auction (CHAR_DATA *ch, char *argument)
 {
@@ -2455,7 +2848,7 @@ void do_auction (CHAR_DATA *ch, char *argument)
     if (IS_NPC(ch)) /* NPC can be extracted at any time and thus can't auction! */
 	return;
     
-    if ( !BV_IS_SET( ch->in_room->room_flags , ROOM_HOTEL ) && !BV_IS_SET( ch->in_room->room_flags , ROOM_SAFE ) )
+    if ( !ch->in_room || (!BV_IS_SET( ch->in_room->room_flags , ROOM_HOTEL ) && !BV_IS_SET( ch->in_room->room_flags , ROOM_SAFE )) )
     {
        set_char_color ( AT_LBLUE, ch );
        send_to_char ( "\nYou must go to an auction hall to do that!\n", ch );
@@ -2525,7 +2918,8 @@ void do_auction (CHAR_DATA *ch, char *argument)
 	    if (IS_IMMORTAL(ch))
 	    {
 		buf = str_printf("Seller: %s.  Bidder: %s.  Round: %d.\n",
-                        auction->seller->name, auction->buyer->name,
+                        auction->seller ? auction->seller->name : "(none)",
+                        auction->buyer ? auction->buyer->name : "(none)",
                         (auction->going + 1));
 		send_to_char(buf, ch);
 		buf = str_printf("Time left in round: %d.\n", auction->pulse);
@@ -2550,18 +2944,37 @@ void do_auction (CHAR_DATA *ch, char *argument)
       }
       else /* stop the auction */
       {
+        OBJ_DATA *item = auction->item;
+        CHAR_DATA *seller = auction->seller;
+        CHAR_DATA *buyer = auction->buyer;
+        int bet = auction->bet;
+
+        auction->item = NULL;
+        auction->seller = NULL;
+        auction->buyer = NULL;
+        auction->bet = 0;
+        auction->going = 0;
+        auction->pulse = 0;
+        auction->starting = 0;
+
 	set_char_color ( AT_LBLUE, ch );
         buf = str_printf("Sale of %s has been stopped by an Immortal.",
-                        auction->item->short_descr);
+                        item->short_descr);
         talk_auction (buf);
-        obj_to_char (auction->item, auction->seller);
-	if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_AUCTION ) )
-	    save_char_obj(auction->seller);
-        auction->item = NULL;
-        if (auction->buyer != NULL && auction->buyer != auction->seller) /* return money to the buyer */
+        if ( seller && !char_died(seller) )
         {
-            auction->buyer->gold += auction->bet;
-            send_to_char ("Your money has been returned.\n",auction->buyer);
+            obj_to_char (item, seller);
+	    if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_AUCTION ) )
+	        save_char_obj(seller);
+        }
+        else if ( !obj_extracted(item) )
+        {
+            extract_obj(item);
+        }
+        if (buyer != NULL && buyer != seller && !char_died(buyer)) /* return money to the buyer */
+        {
+            buyer->gold += bet;
+            send_to_char ("Your money has been returned.\n",buyer);
         }
         return;
       }
@@ -2580,13 +2993,19 @@ void do_auction (CHAR_DATA *ch, char *argument)
 	    }
 
             /* make - perhaps - a bet now */
-            if (argstr.empty() || !is_number(argstr) )
+            argstr = one_argument(argstr, arg2);
+            if (arg2.empty())
             {
                 send_to_char ("Bid how much?\n",ch);
                 return;
             }
 
-            newbet = parsebet (auction->bet, argstr);
+            newbet = parsebet (auction->bet, arg2);
+            if (newbet <= 0)
+            {
+                send_to_char ("Invalid bid amount.\n", ch);
+                return;
+            }
 /*	    ch_printf( ch, "Bid: %d\n",newbet);	*/
 
 	    if (newbet < auction->starting)
@@ -2599,9 +3018,9 @@ void do_auction (CHAR_DATA *ch, char *argument)
  	       is higher up - changed to 100 for our high economy
             */
 
-            if (newbet < (auction->bet + 100))
+            if ((long long)newbet < (long long)auction->bet + 100LL)
             {
-                send_to_char ("You must at least bid 10000 credits over the current bid.\n",ch);
+                send_to_char ("You must at least bid 100 credits over the current bid.\n",ch);
                 return;
             }
 
@@ -2662,27 +3081,51 @@ void do_auction (CHAR_DATA *ch, char *argument)
 	return;
     }
 
-    argstr = one_argument (argstr, arg2);
-
-    if (arg2.empty())
+    if ( !can_drop_obj( ch, obj ) || IS_OBJ_STAT( obj, ITEM_NODROP ) )
     {
-      auction->starting = 0;
-      arg2 = "0";
-    }
-
-    if ( !is_number(arg2) )
-    {
-	send_to_char("You must input a number at which to start the auction.\n", ch);
+	send_to_char ("You can't auction that item.\n", ch);
 	return;
     }
 
-    if ( strtoi(arg2) < 0 )
+    if ( IS_OBJ_STAT( obj, ITEM_PROTOTYPE ) )
     {
-	send_to_char("You can't auction something for less than 0 credits!\n", ch);
- 	return;
+	send_to_char ("You can't auction prototype objects.\n", ch);
+	return;
     }
 
-    if (auction->item == NULL)
+    if ( auction->item != NULL )
+    {
+        act (AT_TELL, "Try again later - $p is being auctioned right now!",ch,auction->item,NULL,TO_CHAR);
+	WAIT_STATE( ch, (int) ( 1.5 * PULSE_VIOLENCE ) );
+        return;
+    }
+
+    argstr = one_argument (argstr, arg2);
+    int starting_bid = 0;
+
+    if ( !arg2.empty() )
+    {
+	if ( !is_number(arg2) )
+	{
+	    send_to_char("You must input a number at which to start the auction.\n", ch);
+	    return;
+	}
+	errno = 0;
+	char *endptr = NULL;
+	long long parsed = strtoll( arg2.c_str(), &endptr, 10 );
+	if ( endptr == arg2.c_str() || *endptr != '\0' || parsed < 0 )
+	{
+	    send_to_char("You can't auction something for less than 0 credits!\n", ch);
+	    return;
+	}
+	if ( errno == ERANGE || parsed > 2000000000LL )
+	{
+	    send_to_char("You can't start an auction over 2 billion credits.\n", ch);
+	    return;
+	}
+	starting_bid = (int)parsed;
+    }
+
     switch (obj->item_type)
     {
 
@@ -2711,7 +3154,7 @@ void do_auction (CHAR_DATA *ch, char *argument)
 	auction->seller = ch;
 	auction->pulse = PULSE_AUCTION;
 	auction->going = 0;
-	auction->starting = strtoi(arg2);
+	auction->starting = starting_bid;
 
 	if (auction->starting > 0)
 	  auction->bet = auction->starting;
@@ -2722,12 +3165,6 @@ void do_auction (CHAR_DATA *ch, char *argument)
 	return;
 
     } /* switch */
-    else
-    {
-        act (AT_TELL, "Try again later - $p is being auctioned right now!",ch,auction->item,NULL,TO_CHAR);
-	WAIT_STATE( ch, (int) ( 1.5 * PULSE_VIOLENCE ) );
-        return;
-    }
 }
 
 
@@ -2742,7 +3179,7 @@ void obj_fall( OBJ_DATA *obj, bool through )
 //  char buf[MAX_STRING_LENGTH];
     static bool is_falling; /* Stop loops from the call to obj_to_room()  -- Altrag */
 	
-    if ( !obj->in_room || is_falling )
+    if ( !obj || obj_extracted(obj) || !obj->in_room || is_falling )
     	return;
 
     if (fall_count > 30)
@@ -2759,6 +3196,8 @@ void obj_fall( OBJ_DATA *obj, bool through )
      {
 
 	pexit = get_exit( obj->in_room, DIR_DOWN );
+	if ( !pexit || !pexit->to_room )
+	    return;
     	to_room = pexit->to_room;
 
     	if (through)
@@ -2813,6 +3252,11 @@ void obj_fall( OBJ_DATA *obj, bool through )
                act( AT_WHITE, "$p falls on $n!", vch, obj, NULL, TO_ROOM );
                act( AT_WHITE, "$p falls on you!", vch, obj, NULL, TO_CHAR );
                damage( vch, vch, dam * vch->top_level, TYPE_UNDEFINED );
+               if ( obj_extracted(obj) || !obj->in_room )
+               {
+                   fall_count = 0;
+                   return;
+               }
             }
 		}
     	/* Damage objects */
@@ -2830,6 +3274,8 @@ void obj_fall( OBJ_DATA *obj, bool through )
 				obj->in_room->first_person, obj, NULL, TO_CHAR );
 			}
 			make_scraps(obj);
+			fall_count = 0;
+			return;
 	 	    }
 		    else
 	           	obj->value[0] -= dam;
@@ -2845,6 +3291,8 @@ void obj_fall( OBJ_DATA *obj, bool through )
 		    		obj->in_room->first_person, obj, NULL, TO_CHAR );
 		      }
 		      make_scraps(obj);
+		      fall_count = 0;
+		      return;
 		    }
 		    break;
 	    }

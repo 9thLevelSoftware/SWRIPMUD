@@ -28,32 +28,29 @@
 #include <sys/stat.h>
 #include "mud.h"
 
-ALIAS_DATA *find_alias( CHAR_DATA *ch, const std::string& argument )
+static ALIAS_DATA *find_alias( CHAR_DATA *ch, const std::string& name )
 {
-    ALIAS_DATA *pal;
-    std::string buf;
-    
-    if (!ch || !ch->pcdata)
-        return(NULL);
-    
-    one_argument(argument, buf);
-    
-    for (pal=ch->pcdata->first_alias;pal;pal=pal->next)
-        if ( !str_prefix(buf, pal->name) )
-            return(pal);
-    
-    return(NULL);
+    if ( !ch || !ch->pcdata || name.empty() )
+        return NULL;
+
+    for ( ALIAS_DATA *alias = ch->pcdata->first_alias; alias; alias = alias->next )
+        if ( alias->name && !str_cmp( name, alias->name ) )
+            return alias;
+
+    return NULL;
 }
 
 void do_alias( CHAR_DATA *ch, char *argument )
 {
     ALIAS_DATA *pal = NULL;
-    std::string arg, argstr = argument;
+    std::string arg, argstr = argument ? argument : "";
     
     if (!ch || !ch->pcdata)
         return;
     
     argstr = one_argument(argstr, arg);
+    smash_tilde( arg );
+    smash_tilde( argstr );
     
     if ( arg.empty() )
     {
@@ -117,55 +114,43 @@ void free_aliases( CHAR_DATA *ch )
             STR_DISPOSE(pal->cmd);
         DISPOSE( pal );
     }
+    ch->pcdata->first_alias = NULL;
+    ch->pcdata->last_alias = NULL;
 }
 
-bool check_alias( CHAR_DATA *ch, const std::string& command, const std::string&argument )
+bool check_alias( CHAR_DATA *ch, const std::string& command, const std::string& argument )
 {
-    std::string arg;
-    ALIAS_DATA *alias;
-    bool nullarg = TRUE;
-    
+    ALIAS_DATA *alias = find_alias( ch, command );
+    if ( !alias || !alias->cmd || !*alias->cmd )
+        return FALSE;
+
+    if ( char_died( ch ) || ( ch->desc && ( ch->desc->closing || ch->desc->write_failed
+            || ch->desc->character != ch ) ) )
+        return TRUE;
+
+    if ( ch->cmd_recurse >= 50 )
+    {
+        send_to_char( "Unable to further process command, recurses too much.\n", ch );
+        return TRUE;
+    }
+
+    struct AliasDepth
+    {
+        CHAR_DATA *character;
+        sh_int previous;
+
+        ~AliasDepth()
+        {
+            if ( !char_died( character ) )
+                character->cmd_recurse = previous;
+        }
+    } depth{ ch, ch->cmd_recurse };
+
+    ++ch->cmd_recurse;
+    std::string arg = alias->cmd;
     if ( !argument.empty() )
-      nullarg = FALSE;
-      
-    if ( (alias=find_alias(ch,command)) == NULL )
-	return FALSE;
+        arg += " " + argument;
 
-    if (!alias->cmd || !*alias->cmd)
-	return FALSE;
-
-    arg = alias->cmd;
-
-    if (ch->cmd_recurse==-1 || ++ch->cmd_recurse>50)
-    {
-	if (ch->cmd_recurse!=-1)
-	{
-	    send_to_char("Unable to further process command, recurses too much.\n", ch);
-	    ch->cmd_recurse=-1;
-	}
-	return FALSE;
-    }
-
-/*
-   {
-    std::string buf;
-
-    buf = alias->name;
-
-    if ( (alias=find_alias(ch,arg)) != NULL )
-    {
-	buf = str_printf("Your alias '%s' calls another alias and cannot be executed.\n", buf.c_str());
-	send_to_char(buf, ch);
-	return TRUE;
-    }
-   }
-*/
-    if (!argument.empty() && !nullarg)
-    {
-        arg += " ";
-        arg += argument;
-    }
-
-    interpret(ch, arg);
+    interpret( ch, arg );
     return TRUE;
 }

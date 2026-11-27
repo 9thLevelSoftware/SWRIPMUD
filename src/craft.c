@@ -3,6 +3,10 @@
 #include "mud.h"
 #include "craft.h"
 #include "olc.h"
+#include <cerrno>
+#include <cstdint>
+#include <filesystem>
+#include <limits>
 
 extern int      top_affect;
 extern const OlcItemValueInfo g_olc_item_value_info[];
@@ -10,7 +14,7 @@ extern const size_t g_olc_item_value_info_count;
 extern char *fread_string_core(FILE *fp);
 extern const OlcOps craft_olc_ops;
 std::vector<CraftRecipe>& craft_get_recipes_for_olc();
-bool craft_save_all_recipes_for_olc(CHAR_DATA* ch);
+CraftRecipe *craft_append_recipe_for_olc( const CraftRecipe &recipe );
 
 
 static const char *CRAFT_RECIPE_FILE = "../system/craft_recipes.dat";
@@ -18,7 +22,11 @@ static const char *CRAFT_RECIPE_FILE = "../system/craft_recipes.dat";
 static const CraftRecipe *craft_get_session_recipe( const CraftSession *sess );
 static std::string craft_expr_to_string( const CraftExpr &expr );
 static std::vector<CraftRecipe> &craft_get_recipes();
-static bool craft_expr_from_string( const std::string &text, CraftExpr &out, std::string &err );
+static constexpr unsigned CRAFT_MAX_EXPR_DEPTH = 32;
+static bool craft_expr_from_string( const std::string &text, CraftExpr &out, std::string &err, unsigned depth = 1 );
+static bool craft_parse_sexrace( const std::string &input, int &sex, int &race );
+static void craft_prune_invalid_selections( CHAR_DATA *ch, CraftSession *sess );
+static bool craft_item_fits_slot( const OBJ_DATA *obj, const CraftSlotDef &slot );
 
 static void craft_show_help( CHAR_DATA *ch, const std::string &field )
 {
@@ -26,8 +34,8 @@ static void craft_show_help( CHAR_DATA *ch, const std::string &field )
     {
         send_to_char(
             "&YCrafting Help&w\n"
-            "  list                   - show learned recipes\n"
-            "  select                 - show learned recipes\n"            
+            "  list                   - show available recipes\n"
+            "  select                 - show available recipes\n"
             "  select <recipe>        - choose a recipe\n"
             "  select auto            - auto-fill required slots from inventory\n"            
             "  show                   - show current crafting session\n"
@@ -107,7 +115,7 @@ static int craft_skill_level( CHAR_DATA *ch, int gsn )
     if ( IS_NPC(ch) )
         return ch->top_level;
 
-    if ( gsn < 0 )
+    if ( !ch->pcdata || gsn < 0 || gsn >= top_sn || gsn >= MAX_SKILL )
         return 0;
 
     return ch->pcdata->learned[gsn];
@@ -124,7 +132,21 @@ static bool craft_knows_recipe( CHAR_DATA *ch, const CraftRecipe *recipe )
     if ( IS_NPC(ch) )
         return true;
 
-    return recipe->gsn >= 0 && ch->pcdata->learned[recipe->gsn] > 0;
+    return ch->pcdata && ( recipe->gsn == -1 ||
+        ( recipe->gsn >= 0 && recipe->gsn < top_sn && recipe->gsn < MAX_SKILL
+          && ch->pcdata->learned[recipe->gsn] > 0 ) );
+}
+
+static void craft_learn_failure( CHAR_DATA *ch, int gsn )
+{
+    if ( gsn >= 0 && gsn < top_sn && gsn < MAX_SKILL && skill_table[gsn] )
+        learn_from_failure( ch, gsn );
+}
+
+static void craft_learn_success( CHAR_DATA *ch, int gsn )
+{
+    if ( gsn >= 0 && gsn < top_sn && gsn < MAX_SKILL && skill_table[gsn] )
+        learn_from_success( ch, gsn );
 }
 
 static bool craft_check_room( CHAR_DATA *ch, const CraftRecipe *recipe, std::string &err )
@@ -316,10 +338,21 @@ static int craft_compute_derived_var( CHAR_DATA *ch, CraftSession *sess, const C
     return result;
 }
 
-static void craft_seed_builtin_vars( CraftSession *sess )
+static void craft_seed_builtin_vars( CraftSession *sess, const CraftRecipe &recipe )
 {
     if ( !sess )
         return;
+
+    if ( recipe.requires_extra_arg && !str_cmp( recipe.extra_arg_name, "sexrace" ) )
+    {
+        int sex = 0;
+        int race = 0;
+        if ( craft_parse_sexrace( sess->extra_arg, sex, race ) )
+        {
+            sess->vars["sex"] = sex;
+            sess->vars["race"] = race;
+        }
+    }
 
     if ( sess->base_material )
     {
@@ -344,8 +377,10 @@ static bool craft_recompute_vars( CHAR_DATA *ch, CraftSession *sess, std::string
         return false;
     }
 
+    craft_prune_invalid_selections( ch, sess );
+
     sess->vars.clear();
-    craft_seed_builtin_vars( sess );
+    craft_seed_builtin_vars( sess, *recipe );
 
     for ( const auto &def : recipe->derived_vars )
         sess->vars[def.var_name] = craft_compute_derived_var( ch, sess, def );
@@ -479,7 +514,7 @@ static bool craft_recipe_blocks_wearloc( const CraftRecipe *recipe, int wearflag
 
 static const std::string craft_item_type_name( int item_type )
 {
-    return get_flag_name(o_types, item_type, ITEMTYPE_MAX);
+    return get_flag_name(o_types, item_type, ITEMTYPE_MAX + 1);
 }
 
 static int craft_item_type_from_name( const std::string &name )
@@ -489,7 +524,7 @@ static int craft_item_type_from_name( const std::string &name )
 
 static const char *craft_gsn_name( int gsn )
 {
-    if ( gsn < 0 || !skill_table[gsn] )
+    if ( gsn < 0 || gsn >= top_sn || gsn >= MAX_SKILL || !skill_table[gsn] || !skill_table[gsn]->name )
         return "none";
 
     return skill_table[gsn]->name;
@@ -513,6 +548,7 @@ static void save_one_craft_recipe( FILE *fp, const CraftRecipe &recipe )
     fprintf( fp, "Gsn %s~\n", craft_gsn_name( recipe.gsn ) );
     fprintf( fp, "RoomReq %s~\n", craft_room_req_name( recipe.room_req ) );
     fprintf( fp, "Timer %d\n", recipe.timer_ticks );
+    fprintf( fp, "Disabled %d\n", recipe.disabled );
     fprintf( fp, "OutputMode %s~\n", craft_output_mode_name( recipe.output_mode ) );
     fprintf( fp, "ResultVnum %d\n", recipe.result_vnum );
     fprintf( fp, "ResultItemType %s~\n", craft_item_type_name( recipe.result_item_type ).c_str() );
@@ -542,6 +578,8 @@ static void save_one_craft_recipe( FILE *fp, const CraftRecipe &recipe )
             "true", // optional is no longer supported, but write true for backward compatibility
             craft_consume_mode_name( slot.consume_mode ),
             craft_bool_str( slot.may_be_base_material ).c_str() );
+        if ( slot.item_vnum > 0 )
+            fprintf( fp, "SlotVnum %d\n", slot.item_vnum );
     }
 
     for ( const auto &dv : recipe.derived_vars )
@@ -583,28 +621,71 @@ static void save_one_craft_recipe( FILE *fp, const CraftRecipe &recipe )
     fprintf( fp, "End\n\n" );
 }
 
-static void save_all_craft_recipes()
+static bool save_all_craft_recipes( const CraftRecipe *original = nullptr, const CraftRecipe *candidate = nullptr )
 {
-    FILE *fp = fopen( CRAFT_RECIPE_FILE, "w" );
+    const auto &recipes = craft_get_recipes();
+    if ( original && std::none_of( recipes.begin(), recipes.end(),
+                                   [original]( const CraftRecipe &recipe ) { return &recipe == original; } ) )
+        return false;
+
+    const std::string temporary = std::string( CRAFT_RECIPE_FILE ) + ".tmp";
+    FILE *fp = fopen( temporary.c_str(), "w" );
 
     if ( !fp )
     {
-        bug( "%s: cannot open %s for writing", __func__, CRAFT_RECIPE_FILE );
-        return;
+        bug( "%s: cannot open %s for writing", __func__, temporary.c_str() );
+        return false;
     }
 
-    for ( const auto &recipe : craft_get_recipes() )
-        save_one_craft_recipe( fp, recipe );
+    for ( const auto &recipe : recipes )
+        save_one_craft_recipe( fp, &recipe == original ? *candidate : recipe );
+    if ( !original && candidate )
+        save_one_craft_recipe( fp, *candidate );
 
     fprintf( fp, "#END\n" );
-    fclose( fp );
+    bool written = fflush( fp ) == 0 && !ferror( fp );
+    if ( fclose( fp ) != 0 )
+        written = false;
+
+    std::error_code error;
+    if ( written )
+    {
+        std::filesystem::rename( temporary, CRAFT_RECIPE_FILE, error );
+        if ( !error )
+            return true;
+        bug( "%s: cannot replace %s: %s", __func__, CRAFT_RECIPE_FILE, error.message().c_str() );
+    }
+    else
+        bug( "%s: could not finish writing %s", __func__, temporary.c_str() );
+
+    std::filesystem::remove( temporary, error );
+    return false;
+}
+
+static const char *read_craft_keyword( FILE *fp )
+{
+    int c;
+    do
+        c = getc( fp );
+    while ( c != EOF && isspace( static_cast<unsigned char>(c) ) );
+
+    if ( c == EOF || ungetc( c, fp ) == EOF )
+        return "";
+
+    return fread_word( fp );
 }
 
 static bool load_one_craft_recipe( FILE *fp, CraftRecipe &recipe )
 {
     for ( ;; )
     {
-        const char *word = fread_word( fp );
+        const char *word = read_craft_keyword( fp );
+
+        if ( ferror( fp ) || !*word || *word == '#' )
+        {
+            bug( "%s: missing End for recipe '%s'", __func__, recipe.name.c_str() );
+            return false;
+        }
 
         if ( !str_cmp( word, "End" ) )
             return true;
@@ -616,7 +697,7 @@ static bool load_one_craft_recipe( FILE *fp, CraftRecipe &recipe )
         else if ( !str_cmp( word, "Gsn" ) )
         {
             recipe.gsn = craft_gsn_from_name( fread_std_string( fp ) );
-            if ( recipe.gsn < 0 )
+            if ( recipe.gsn < 0 || recipe.gsn >= top_sn || recipe.gsn >= MAX_SKILL )
                 recipe.gsn = -1;
         }
         else if ( !str_cmp( word, "RoomReq" ) )
@@ -627,6 +708,8 @@ static bool load_one_craft_recipe( FILE *fp, CraftRecipe &recipe )
         }
         else if ( !str_cmp( word, "Timer" ) )
             recipe.timer_ticks = fread_number( fp );
+        else if ( !str_cmp( word, "Disabled" ) )
+            recipe.disabled = fread_number( fp ) != 0;
         else if ( !str_cmp( word, "OutputMode" ) )
         {
             std::string text = fread_std_string( fp );
@@ -703,6 +786,21 @@ static bool load_one_craft_recipe( FILE *fp, CraftRecipe &recipe )
                 slot.may_be_base_material = b;
 
             recipe.slots.push_back( slot );
+        }
+        else if ( !str_cmp( word, "SlotVnum" ) )
+        {
+            if ( recipe.slots.empty() )
+            {
+                bug( "%s: SlotVnum must follow a Slot in recipe '%s'", __func__, recipe.name.c_str() );
+                return false;
+            }
+            int item_vnum = fread_number( fp );
+            if ( item_vnum <= 0 )
+            {
+                bug( "%s: invalid slot prototype VNUM in recipe '%s'", __func__, recipe.name.c_str() );
+                return false;
+            }
+            recipe.slots.back().item_vnum = item_vnum;
         }
         else if ( !str_cmp( word, "DerivedVar" ) )
         {
@@ -799,7 +897,14 @@ static bool load_all_craft_recipes( std::vector<CraftRecipe> &out )
 
     for ( ;; )
     {
-        const char *word = fread_word( fp );
+        const char *word = read_craft_keyword( fp );
+
+        if ( ferror( fp ) || !*word )
+        {
+            bug( "%s: missing #END in %s", __func__, CRAFT_RECIPE_FILE );
+            fclose( fp );
+            return false;
+        }
 
         if ( !str_cmp( word, "#END" ) )
             break;
@@ -849,13 +954,56 @@ CraftRecipe *craft_find_recipe_for_olc( const std::string &name )
     return nullptr;
 }
 
-void craft_save_all_recipes_for_olc()
+CraftRecipe *craft_append_recipe_for_olc( const CraftRecipe &recipe )
 {
-    save_all_craft_recipes();
+    if ( recipe.name.empty() || craft_find_recipe_for_olc( recipe.name ) != nullptr )
+        return nullptr;
+
+    auto &list = craft_get_recipes();
+    std::vector<std::pair<DESCRIPTOR_DATA *, size_t>> active_craft_sessions;
+
+    for ( DESCRIPTOR_DATA *d = first_descriptor; d; d = d->next )
+    {
+        if ( !d->olc || d->olc->mode != OlcEditMode::CRAFT_INLINE || !d->olc->original )
+            continue;
+
+        const CraftRecipe *orig = static_cast<const CraftRecipe *>( d->olc->original );
+        for ( size_t i = 0; i < list.size(); ++i )
+        {
+            if ( &list[i] == orig )
+            {
+                active_craft_sessions.push_back( { d, i } );
+                break;
+            }
+        }
+    }
+
+    list.push_back( recipe );
+
+    for ( const auto &entry : active_craft_sessions )
+    {
+        if ( entry.first && entry.first->olc )
+            entry.first->olc->original = &list[entry.second];
+    }
+
+    return &list.back();
 }
 
-static int craft_eval_expr( CHAR_DATA *ch, CraftSession *sess, const CraftExpr &expr )
+bool craft_save_all_recipes_for_olc( const CraftRecipe *original, const CraftRecipe *candidate )
 {
+    return save_all_craft_recipes( original, candidate );
+}
+
+static int craft_clamp_int( std::int64_t value )
+{
+    return static_cast<int>( std::clamp<std::int64_t>( value, std::numeric_limits<int>::min(), std::numeric_limits<int>::max() ) );
+}
+
+static int craft_eval_expr( CHAR_DATA *ch, CraftSession *sess, const CraftExpr &expr, unsigned depth = 1 )
+{
+    if ( depth > CRAFT_MAX_EXPR_DEPTH )
+        return 0;
+
     const CraftRecipe *recipe = craft_get_session_recipe( sess );
 
     if ( !str_cmp( expr.op, "const" ) )
@@ -876,49 +1024,36 @@ static int craft_eval_expr( CHAR_DATA *ch, CraftSession *sess, const CraftExpr &
     if ( !expr.left || !expr.right )
         return 0;
 
+    const int lhs = craft_eval_expr( ch, sess, *expr.left, depth + 1 );
+    const int rhs = craft_eval_expr( ch, sess, *expr.right, depth + 1 );
+
     if ( !str_cmp( expr.op, "add" ) )
-        return craft_eval_expr( ch, sess, *expr.left ) + craft_eval_expr( ch, sess, *expr.right );
+        return craft_clamp_int( static_cast<std::int64_t>( lhs ) + rhs );
 
     if ( !str_cmp( expr.op, "sub" ) )
-        return craft_eval_expr( ch, sess, *expr.left ) - craft_eval_expr( ch, sess, *expr.right );
+        return craft_clamp_int( static_cast<std::int64_t>( lhs ) - rhs );
 
     if ( !str_cmp( expr.op, "mul" ) )
-        return craft_eval_expr( ch, sess, *expr.left ) * craft_eval_expr( ch, sess, *expr.right );
+        return craft_clamp_int( static_cast<std::int64_t>( lhs ) * rhs );
 
     if ( !str_cmp( expr.op, "div" ) )
-    {
-        int rhs = craft_eval_expr( ch, sess, *expr.right );
-        if ( rhs == 0 )
-            return 0;
-        return craft_eval_expr( ch, sess, *expr.left ) / rhs;
-    }
+        return rhs == 0 ? 0 : craft_clamp_int( static_cast<std::int64_t>( lhs ) / rhs );
 
     if ( !str_cmp( expr.op, "min" ) )
-    {
-        int lhs = craft_eval_expr( ch, sess, *expr.left );
-        int rhs = craft_eval_expr( ch, sess, *expr.right );
-        return UMIN( lhs, rhs );
-    }
+        return std::min( lhs, rhs );
 
     if ( !str_cmp( expr.op, "max" ) )
-    {
-        int lhs = craft_eval_expr( ch, sess, *expr.left );
-        int rhs = craft_eval_expr( ch, sess, *expr.right );
-        return UMAX( lhs, rhs );
-    }
+        return std::max( lhs, rhs );
 
     if ( !str_cmp( expr.op, "iflt" ) )
     {
-        if ( !expr.left || !expr.right || !expr.third || !expr.fourth )
+        if ( !expr.third || !expr.fourth )
             return 0;
 
-        int lhs = craft_eval_expr( ch, sess, *expr.left );
-        int rhs = craft_eval_expr( ch, sess, *expr.right );
-
         if ( lhs < rhs )
-            return craft_eval_expr( ch, sess, *expr.third );
+            return craft_eval_expr( ch, sess, *expr.third, depth + 1 );
 
-        return craft_eval_expr( ch, sess, *expr.fourth );
+        return craft_eval_expr( ch, sess, *expr.fourth, depth + 1 );
     }
 
     return 0;
@@ -955,6 +1090,10 @@ static bool craft_parse_sexrace( const std::string &input, int &sex, int &race )
     if ( !( iss >> sex >> race ) )
         return false;
 
+    iss >> std::ws;
+    if ( !iss.eof() )
+        return false;
+
     if ( sex < 0 || sex > 2 )
         return false;
 
@@ -973,8 +1112,10 @@ static bool craft_parse_int_str( const std::string &text, int &out )
     if ( trimmed.empty() )
         return false;
 
+    errno = 0;
     v = strtol( trimmed.c_str(), &endptr, 10 );
-    if ( !endptr || *endptr != '\0' )
+    if ( errno == ERANGE || endptr != trimmed.c_str() + trimmed.size() ||
+         v < std::numeric_limits<int>::min() || v > std::numeric_limits<int>::max() )
         return false;
 
     out = (int)v;
@@ -1018,7 +1159,7 @@ static bool craft_split_expr_args4(
         }
     }
 
-    if ( p1 == std::string::npos || p2 == std::string::npos || p3 == std::string::npos )
+    if ( depth != 0 || p1 == std::string::npos || p2 == std::string::npos || p3 == std::string::npos )
         return false;
 
     a = craft_trim_copy( text.substr( 0, p1 ) );
@@ -1032,6 +1173,7 @@ static bool craft_split_expr_args4(
 static bool craft_split_expr_args( const std::string &text, std::string &left, std::string &right )
 {
     int depth = 0;
+    size_t comma = std::string::npos;
 
     for ( size_t i = 0; i < text.size(); ++i )
     {
@@ -1047,13 +1189,18 @@ static bool craft_split_expr_args( const std::string &text, std::string &left, s
         }
         else if ( c == ',' && depth == 0 )
         {
-            left = craft_trim_copy( text.substr( 0, i ) );
-            right = craft_trim_copy( text.substr( i + 1 ) );
-            return !left.empty() && !right.empty();
+            if ( comma != std::string::npos )
+                return false;
+            comma = i;
         }
     }
 
-    return false;
+    if ( depth != 0 || comma == std::string::npos )
+        return false;
+
+    left = craft_trim_copy( text.substr( 0, comma ) );
+    right = craft_trim_copy( text.substr( comma + 1 ) );
+    return !left.empty() && !right.empty();
 }
 
 static std::string craft_expr_to_string( const CraftExpr &expr )
@@ -1087,12 +1234,17 @@ static std::string craft_expr_to_string( const CraftExpr &expr )
     return "const(0)";
 }
 
-static bool craft_expr_from_string( const std::string &text, CraftExpr &out, std::string &err )
+static bool craft_expr_from_string( const std::string &text, CraftExpr &out, std::string &err, unsigned depth )
 {
-    std::string s = craft_trim_copy( text );
-
     out = CraftExpr();
 
+    if ( depth > CRAFT_MAX_EXPR_DEPTH )
+    {
+        err = str_printf( "Expressions may have at most %u levels.", CRAFT_MAX_EXPR_DEPTH );
+        return false;
+    }
+
+    std::string s = craft_trim_copy( text );
     if ( s.empty() )
     {
         err = "Empty expression.";
@@ -1125,7 +1277,7 @@ static bool craft_expr_from_string( const std::string &text, CraftExpr &out, std
     {
         std::string inner = craft_trim_copy( s.substr( 4, s.size() - 5 ) );
 
-        if ( inner.empty() )
+        if ( inner.empty() || inner.find_first_of( "()," ) != std::string::npos )
         {
             err = "var() requires a variable name.";
             return false;
@@ -1148,13 +1300,13 @@ static bool craft_expr_from_string( const std::string &text, CraftExpr &out, std
             return false;
         }
 
-        if ( !craft_expr_from_string( a, ea, err ) )
+        if ( !craft_expr_from_string( a, ea, err, depth + 1 ) )
             return false;
-        if ( !craft_expr_from_string( b, eb, err ) )
+        if ( !craft_expr_from_string( b, eb, err, depth + 1 ) )
             return false;
-        if ( !craft_expr_from_string( c, ec, err ) )
+        if ( !craft_expr_from_string( c, ec, err, depth + 1 ) )
             return false;
-        if ( !craft_expr_from_string( d, ed, err ) )
+        if ( !craft_expr_from_string( d, ed, err, depth + 1 ) )
             return false;
 
         out.op = "iflt";
@@ -1193,10 +1345,10 @@ static bool craft_expr_from_string( const std::string &text, CraftExpr &out, std
             return false;
         }
 
-        if ( !craft_expr_from_string( left_text, left_expr, err ) )
+        if ( !craft_expr_from_string( left_text, left_expr, err, depth + 1 ) )
             return false;
 
-        if ( !craft_expr_from_string( right_text, right_expr, err ) )
+        if ( !craft_expr_from_string( right_text, right_expr, err, depth + 1 ) )
             return false;
 
         out.op = op;
@@ -1235,6 +1387,64 @@ static void craft_debug_expr_test( CHAR_DATA *ch, const std::string &text )
         send_to_char( "WARNING: roundtrip mismatch.\n", ch );
 }
 
+static void craft_prune_invalid_selections( CHAR_DATA *ch, CraftSession *sess )
+{
+    if ( !ch || !sess )
+        return;
+
+    const CraftRecipe *recipe = craft_get_session_recipe( sess );
+    if ( !recipe )
+    {
+        sess->selected.clear();
+        sess->base_material = nullptr;
+        sess->vars.clear();
+        return;
+    }
+
+    std::map<OBJ_DATA *, int> avail;
+    for ( OBJ_DATA *obj = ch->last_carrying; obj; obj = obj->prev_content )
+    {
+        if ( obj->wear_loc == WEAR_NONE && !obj_extracted( obj ) && obj->count > 0 )
+            avail[obj] = obj->count;
+    }
+
+    for ( auto it = sess->selected.begin(); it != sess->selected.end(); )
+    {
+        const CraftSlotDef *slot = craft_find_slot( recipe, it->slot_name );
+        auto found = avail.find( it->obj );
+
+        if ( !slot
+        || it->obj == nullptr
+        || found == avail.end()
+        || found->second <= 0
+        || !craft_item_fits_slot( it->obj, *slot ) )
+        {
+            it = sess->selected.erase( it );
+            continue;
+        }
+
+        --(found->second);
+        ++it;
+    }
+
+    bool base_valid = false;
+    if ( sess->base_material != nullptr && avail.find( sess->base_material ) != avail.end() )
+    {
+        for ( const auto &sel : sess->selected )
+        {
+            const CraftSlotDef *slot = craft_find_slot( recipe, sel.slot_name );
+            if ( sel.obj == sess->base_material && slot && slot->may_be_base_material )
+            {
+                base_valid = true;
+                break;
+            }
+        }
+    }
+
+    if ( !base_valid )
+        sess->base_material = nullptr;
+}
+
 static bool craft_selected_items_still_valid( CHAR_DATA *ch, CraftSession *sess, std::string &err )
 {
     if ( !ch || !sess )
@@ -1247,11 +1457,16 @@ static bool craft_selected_items_still_valid( CHAR_DATA *ch, CraftSession *sess,
         return false;
     }
 
+    std::map<OBJ_DATA *, int> carried;
+    for ( OBJ_DATA *obj = ch->last_carrying; obj; obj = obj->prev_content )
+    {
+        if ( obj->wear_loc == WEAR_NONE && !obj_extracted( obj ) && obj->count > 0 )
+            carried[obj] = obj->count;
+    }
+
+    std::map<OBJ_DATA *, int> needed;
     for ( const auto &sel : sess->selected )
     {
-        bool found = false;
-        OBJ_DATA *obj;
-
         const CraftSlotDef *slot = craft_find_slot( recipe, sel.slot_name );
         if ( !slot )
         {
@@ -1259,39 +1474,52 @@ static bool craft_selected_items_still_valid( CHAR_DATA *ch, CraftSession *sess,
             return false;
         }
 
-        for ( obj = ch->last_carrying; obj; obj = obj->prev_content )
-        {
-            if ( obj == sel.obj )
-            {
-                found = true;
-                break;
-            }
-        }
-
-        if ( !found )
+        if ( !sel.obj || carried.find( sel.obj ) == carried.end() )
         {
             err = "One of your selected materials is no longer in your inventory.";
+            return false;
+        }
+
+        if ( !craft_item_fits_slot( sel.obj, *slot ) )
+        {
+            err = "One of your selected materials no longer matches its slot.";
+            return false;
+        }
+
+        ++needed[sel.obj];
+    }
+
+    for ( const auto &kv : needed )
+    {
+        if ( kv.second > kv.first->count )
+        {
+            err = "You do not have enough of one of your selected materials.";
             return false;
         }
     }
 
     if ( sess->base_material )
     {
-        bool found = false;
-        OBJ_DATA *obj;
-
-        for ( obj = ch->last_carrying; obj; obj = obj->prev_content )
+        if ( carried.find( sess->base_material ) == carried.end() )
         {
-            if ( obj == sess->base_material )
+            err = "Your base material is no longer in your inventory.";
+            return false;
+        }
+
+        bool base_in_slot = false;
+        for ( const auto &sel : sess->selected )
+        {
+            const CraftSlotDef *slot = craft_find_slot( recipe, sel.slot_name );
+            if ( sel.obj == sess->base_material && slot && slot->may_be_base_material )
             {
-                found = true;
+                base_in_slot = true;
                 break;
             }
         }
 
-        if ( !found )
+        if ( !base_in_slot )
         {
-            err = "Your base material is no longer in your inventory.";
+            err = "Your base material is no longer assigned to a valid base slot.";
             return false;
         }
     }
@@ -1326,6 +1554,12 @@ static bool craft_apply_one_affect( CHAR_DATA *ch, CraftSession *sess, OBJ_DATA 
     if ( !sess || !recipe || !result )
     {
         err = "Cannot apply recipe affect.";
+        return false;
+    }
+
+    if ( def.location < 0 || def.location >= MAX_APPLY_TYPE )
+    {
+        err = "Invalid affect location in recipe.";
         return false;
     }
 
@@ -1480,16 +1714,31 @@ static bool craft_create_result_object( CHAR_DATA *ch, CraftSession *sess, OBJ_D
             break;
 
         case CraftOutputMode::TransformBaseMaterial:
-            if ( !sess->base_material )
+            result = sess->base_material;
+            if ( !result || result->carried_by != ch || result->wear_loc != WEAR_NONE )
             {
-                err = "No base material has been selected.";
+                err = "Your base material must be carried and unworn.";
                 return false;
             }
 
-            result = sess->base_material;
+            std::fill_n( result->value, 6, 0 );
+            result->wear_flags.reset();
+            result->objflags.reset();
+            result->timer = 0;
+            while ( AFFECT_DATA *affect = result->first_affect )
+            {
+                UNLINK( affect, result->first_affect, result->last_affect, next, prev );
+                DISPOSE( affect );
+                --top_affect;
+            }
             break;
     }
 
+    if ( !result )
+    {
+        err = "Could not create the result object.";
+        return false;
+    }
     result->item_type = recipe->result_item_type;
 
     for ( int flag : recipe->set_wear_flags )
@@ -1566,6 +1815,21 @@ static bool craft_validate_session( CHAR_DATA *ch, CraftSession *sess, std::stri
     if ( !craft_check_room( ch, recipe, err ) )
         return false;
 
+    if ( recipe->disabled )
+    {
+        err = "That recipe is currently disabled.";
+        return false;
+    }
+
+    if ( recipe->output_mode == CraftOutputMode::CreateFromPrototype && !get_obj_index( recipe->result_vnum ) )
+    {
+        err = "The recipe result object is missing from the database.";
+        return false;
+    }
+
+    if ( !craft_selected_items_still_valid( ch, sess, err ) )
+        return false;
+
     if ( !craft_validate_slot_counts( sess, err ) )
         return false;
 
@@ -1579,6 +1843,17 @@ static bool craft_validate_session( CHAR_DATA *ch, CraftSession *sess, std::stri
     {
         err = str_printf( "You must set %s first.", recipe->extra_arg_name );
         return false;
+    }
+
+    if ( recipe->requires_extra_arg && !str_cmp( recipe->extra_arg_name, "sexrace" ) )
+    {
+        int sex = 0;
+        int race = 0;
+        if ( !craft_parse_sexrace( sess->extra_arg, sex, race ) )
+        {
+            err = "Set sexrace to <sex 0-2> <race 0-33>.";
+            return false;
+        }
     }
 
     return craft_recompute_vars( ch, sess, err );
@@ -1807,7 +2082,10 @@ static bool craft_expr_contains_var( const CraftExpr &expr, const std::string &n
     if ( expr.right && craft_expr_contains_var( *expr.right, name ) )
         return true;
 
-    return false;
+    if ( expr.third && craft_expr_contains_var( *expr.third, name ) )
+        return true;
+
+    return expr.fourth && craft_expr_contains_var( *expr.fourth, name );
 }
 
 static const char *craft_get_base_var_label( CraftSession *sess, const std::string &var_name )
@@ -1849,6 +2127,7 @@ static void craft_show_session( CHAR_DATA *ch )
         return;
     }
 
+    craft_prune_invalid_selections( ch, sess );
     craft_recompute_vars( ch, sess, err );
 
     ch_printf( ch, "&YRecipe:&w %s\n", recipe->display_name.c_str() );
@@ -1860,7 +2139,7 @@ static void craft_show_session( CHAR_DATA *ch )
             sess->extra_arg.empty() ? "(unset)" : sess->extra_arg.c_str() );
 
     if ( sess->base_material )
-        ch_printf( ch, "&YBase:&w   %s\n", sess->base_material->short_descr );
+        ch_printf( ch, "&YBase:&w   %s\n", sess->base_material->short_descr ? sess->base_material->short_descr : "(unnamed)" );
     else
         ch_printf( ch, "&YBase:&w   (none)\n" );
 
@@ -1960,9 +2239,10 @@ static void craft_show_recipe_list( CHAR_DATA *ch )
         if ( recipe.disabled )
             continue;            
 
-        ch_printf( ch, "  %-16s (%d%%)\n",
-            recipe.display_name.c_str(),
-            craft_skill_level( ch, recipe.gsn ) );
+        if ( recipe.gsn == -1 )
+            ch_printf( ch, "  %-16s (no skill required)\n", recipe.display_name.c_str() );
+        else
+            ch_printf( ch, "  %-16s (%d%%)\n", recipe.display_name.c_str(), craft_skill_level( ch, recipe.gsn ) );
     }
 }
 
@@ -2004,7 +2284,7 @@ static void craft_dump_recipe( CHAR_DATA *ch, const CraftRecipe *recipe )
     {
         for ( int flag : recipe->set_wear_flags )
         {   
-            ch_printf( ch, "  %s\n",  get_flag_name(w_flags, flag, WEAR_MAX) );
+            ch_printf( ch, "  %s\n",  get_flag_name(w_flags, flag, ITEM_WEAR_MAX + 1) );
         }
     }
 
@@ -2016,7 +2296,7 @@ static void craft_dump_recipe( CHAR_DATA *ch, const CraftRecipe *recipe )
     else
     {
         for ( int flag : recipe->set_objflags )
-            ch_printf( ch, "  %s\n",  get_flag_name(obj_flag_table, flag, ITEM_MAX) );
+            ch_printf( ch, "  %s\n",  get_flag_name_sparse(obj_flag_table, flag, static_cast<int>(obj_flag_table_count)) );
     }
 
     send_to_char( "\n&YSlots:&w\n", ch );
@@ -2143,6 +2423,8 @@ static void craft_cmd_unuse( CHAR_DATA *ch, const std::string &slot_name, const 
         return;
     }
 
+    craft_prune_invalid_selections( ch, sess );
+
     if ( slot_name.empty() || item_name.empty() )
     {
         send_to_char( "Usage: unuse <slot> <item>\n", ch );
@@ -2153,12 +2435,15 @@ static void craft_cmd_unuse( CHAR_DATA *ch, const std::string &slot_name, const 
     {
         if ( !str_cmp( it->slot_name, slot_name )
         && it->obj
+        && it->obj->name
         && nifty_is_name( item_name, it->obj->name ) )
         {
             if ( sess->base_material == it->obj )
                 sess->base_material = nullptr;
 
-            ch_printf( ch, "You remove %s from %s.\n", it->obj->short_descr, it->slot_name.c_str() );
+            ch_printf( ch, "You remove %s from %s.\n",
+                it->obj->short_descr ? it->obj->short_descr : "(unnamed)",
+                it->slot_name.c_str() );
             sess->selected.erase( it );
             return;
         }
@@ -2212,6 +2497,12 @@ static bool craft_try_select_recipe( CHAR_DATA *ch, const std::string &arg, bool
     return true;
 }
 
+static bool craft_item_fits_slot( const OBJ_DATA *obj, const CraftSlotDef &slot )
+{
+    return obj->item_type == slot.item_type
+        && ( slot.item_vnum == 0 || ( obj->pIndexData && obj->pIndexData->vnum == slot.item_vnum ) );
+}
+
 static bool craft_find_auto_item_for_slot( CHAR_DATA *ch, CraftSession *sess,
                                            const CraftSlotDef &slot, OBJ_DATA *&out )
 {
@@ -2224,7 +2515,10 @@ static bool craft_find_auto_item_for_slot( CHAR_DATA *ch, CraftSession *sess,
 
     for ( obj = ch->last_carrying; obj; obj = obj->prev_content )
     {
-        if ( obj->item_type != slot.item_type )
+        if ( obj->wear_loc != WEAR_NONE || obj_extracted( obj ) || obj->count <= 0 )
+            continue;
+
+        if ( !craft_item_fits_slot( obj, slot ) )
             continue;
 
         if ( craft_count_selected_object( sess, obj ) >= obj->count )
@@ -2255,7 +2549,7 @@ static bool craft_try_autoselect( CHAR_DATA *ch, std::string &err )
 
     for ( const auto &slot : recipe->slots )
     {
-        while ( slot.max_count == 0 || craft_count_selected( sess, &slot ) < slot.min_count )
+        while ( craft_count_selected( sess, &slot ) < slot.min_count )
         {
             OBJ_DATA *obj = nullptr;
 
@@ -2276,6 +2570,18 @@ static bool craft_try_autoselect( CHAR_DATA *ch, std::string &err )
 
     if ( recipe->output_mode == CraftOutputMode::TransformBaseMaterial )
     {
+        if ( !first_base_candidate )
+        {
+            for ( const auto &slot : recipe->slots )
+            {
+                if ( slot.may_be_base_material && craft_find_auto_item_for_slot( ch, sess, slot, first_base_candidate ) )
+                {
+                    sess->selected.push_back( { slot.name, first_base_candidate } );
+                    break;
+                }
+            }
+        }
+
         if ( first_base_candidate )
             sess->base_material = first_base_candidate;
         else
@@ -2385,10 +2691,6 @@ static void craft_cmd_set( CHAR_DATA *ch, const std::string &field, const std::s
                 send_to_char( "Usage: set sexrace <sex 0-2> <race 0-33>\n", ch );
                 return;
             }
-
-            // Store parsed values as session variables
-            sess->vars["sex"] = sex;
-            sess->vars["race"] = race;
         }
         sess->extra_arg = value;
         ch_printf( ch, "%s set to %s.\n", field.c_str(), value.c_str() );
@@ -2411,6 +2713,8 @@ static void craft_cmd_use( CHAR_DATA *ch, const std::string &slot_name, const st
         return;
     }
 
+    craft_prune_invalid_selections( ch, sess );
+
     if ( slot_name.empty() || item_name.empty() )
     {
         send_to_char( "Usage: use <slot> <item>\n", ch );
@@ -2431,7 +2735,7 @@ static void craft_cmd_use( CHAR_DATA *ch, const std::string &slot_name, const st
         return;
     }
 
-    if ( obj->item_type != slot->item_type )
+    if ( !craft_item_fits_slot( obj, *slot ) )
     {
         send_to_char( "That item does not fit that slot.\n", ch );
         return;
@@ -2454,7 +2758,7 @@ static void craft_cmd_use( CHAR_DATA *ch, const std::string &slot_name, const st
     if ( slot->consume_mode == CraftConsumeMode::TransformBase && slot->may_be_base_material && !sess->base_material )
         sess->base_material = obj;
 
-    ch_printf( ch, "You assign %s to %s.\n", obj->short_descr, slot->name.c_str() );
+    ch_printf( ch, "You assign %s to %s.\n", obj->short_descr ? obj->short_descr : "(unnamed)", slot->name.c_str() );
 }
 
 static void craft_cmd_base( CHAR_DATA *ch, const std::string &item_name )
@@ -2468,6 +2772,8 @@ static void craft_cmd_base( CHAR_DATA *ch, const std::string &item_name )
         send_to_char( "No recipe selected.\n", ch );
         return;
     }
+
+    craft_prune_invalid_selections( ch, sess );
 
     if ( recipe->output_mode != CraftOutputMode::TransformBaseMaterial )
     {
@@ -2488,7 +2794,7 @@ static void craft_cmd_base( CHAR_DATA *ch, const std::string &item_name )
         if ( sel.obj == obj && slot && slot->may_be_base_material )
         {
             sess->base_material = obj;
-            ch_printf( ch, "Base material set to %s.\n", obj->short_descr );
+            ch_printf( ch, "Base material set to %s.\n", obj->short_descr ? obj->short_descr : "(unnamed)" );
             return;
         }
     }
@@ -2496,73 +2802,134 @@ static void craft_cmd_base( CHAR_DATA *ch, const std::string &item_name )
     send_to_char( "That item is not an eligible base material for this recipe.\n", ch );
 }
 
-static bool craft_prepare_selected_items( CraftSession *sess, std::string &err )
+static bool craft_prepare_selected_items( CHAR_DATA *ch, CraftSession *sess, std::string &err )
 {
-    std::vector<OBJ_DATA*> prepared;
-
     const CraftRecipe *recipe = craft_get_session_recipe( sess );
-    if ( !sess || !recipe )
+    if ( !ch || !sess || !recipe )
     {
         err = "No recipe selected.";
         return false;
     }
 
-    auto already = [&]( OBJ_DATA *obj ) -> bool
+    for ( size_t i = 0; i < sess->selected.size(); ++i )
     {
-        for ( OBJ_DATA *p : prepared )
-            if ( p == obj )
-                return true;
-        return false;
-    };
+        OBJ_DATA *orig = sess->selected[i].obj;
+        const CraftSlotDef *slot = craft_get_selected_slot_def( sess, sess->selected[i] );
 
-    for ( auto &sel : sess->selected )
-    {
-        const CraftSlotDef *slot = craft_get_selected_slot_def( sess, sel );
-
-        if ( !slot || !sel.obj )
+        if ( !slot || !orig )
             continue;
 
-        if ( slot->consume_mode == CraftConsumeMode::Consume
-        || slot->consume_mode == CraftConsumeMode::TransformBase )
+        bool has_later_dup = false;
+        for ( size_t j = i + 1; j < sess->selected.size(); ++j )
         {
-            if ( !already( sel.obj ) )
+            if ( sess->selected[j].obj == orig )
             {
-                separate_obj( sel.obj );
-                prepared.push_back( sel.obj );
+                has_later_dup = true;
+                break;
+            }
+        }
+
+        bool needs_single = has_later_dup
+            || slot->consume_mode == CraftConsumeMode::Consume
+            || slot->consume_mode == CraftConsumeMode::TransformBase;
+
+        if ( needs_single && orig->count > 1 )
+        {
+            separate_obj( orig );
+
+            if ( has_later_dup )
+            {
+                OBJ_DATA *rest = ( ch->last_carrying && ch->last_carrying != orig ) ? ch->last_carrying : nullptr;
+                if ( !rest || rest->carried_by != ch )
+                {
+                    err = "Failed to separate stacked crafting materials.";
+                    return false;
+                }
+
+                for ( size_t j = i + 1; j < sess->selected.size(); ++j )
+                {
+                    if ( sess->selected[j].obj == orig )
+                        sess->selected[j].obj = rest;
+                }
+
+                if ( sess->base_material == orig )
+                {
+                    bool stay_on_orig = ( slot->consume_mode == CraftConsumeMode::TransformBase && slot->may_be_base_material );
+                    if ( !stay_on_orig )
+                    {
+                        bool later_has_base_slot = false;
+                        for ( size_t j = i + 1; j < sess->selected.size(); ++j )
+                        {
+                            if ( sess->selected[j].obj == rest )
+                            {
+                                const CraftSlotDef *jslot = craft_get_selected_slot_def( sess, sess->selected[j] );
+                                if ( jslot && jslot->may_be_base_material )
+                                {
+                                    later_has_base_slot = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if ( later_has_base_slot || slot->consume_mode == CraftConsumeMode::Consume )
+                            sess->base_material = rest;
+                    }
+                }
             }
         }
     }
 
-    if ( sess->base_material && !already( sess->base_material ) )
+    if ( sess->base_material && sess->base_material->count > 1 )
         separate_obj( sess->base_material );
 
     return true;
 }
 
-static bool craft_consume_input_items( CraftSession *sess, std::string &err )
+static bool craft_consume_input_items( CHAR_DATA *ch, CraftSession *sess, std::string &err )
 {
     std::vector<OBJ_DATA*> consumed;
 
     const CraftRecipe *recipe = craft_get_session_recipe( sess );
-    if ( !sess || !recipe )
+    if ( !ch || !sess || !recipe )
     {
         err = "No recipe selected.";
         return false;
     }
 
-    for ( const auto &sel : sess->selected )
+    auto already_consumed = [&]( OBJ_DATA *obj ) -> bool
     {
-        const CraftSlotDef *slot = craft_get_selected_slot_def( sess, sel );
+        for ( OBJ_DATA *p : consumed )
+            if ( p == obj )
+                return true;
+        return false;
+    };
 
-        if ( !slot || !sel.obj )
+    for ( auto it = sess->selected.begin(); it != sess->selected.end(); )
+    {
+        const CraftSlotDef *slot = craft_get_selected_slot_def( sess, *it );
+
+        if ( !slot || !it->obj )
+        {
+            it = sess->selected.erase( it );
             continue;
+        }
 
         if ( slot->consume_mode == CraftConsumeMode::Consume )
-            consumed.push_back( sel.obj );
+        {
+            if ( it->obj != sess->base_material && !already_consumed( it->obj ) )
+                consumed.push_back( it->obj );
+            it = sess->selected.erase( it );
+            continue;
+        }
+
+        ++it;
     }
 
     for ( OBJ_DATA *obj : consumed )
     {
+        if ( !obj || obj_extracted( obj ) || obj->carried_by != ch )
+            continue;
+
         separate_obj( obj );
         obj_from_char( obj );
         extract_obj( obj );
@@ -2626,38 +2993,24 @@ static void craft_cleanup_session_after_build( CraftSession *sess, OBJ_DATA *res
 void do_craft_build( CHAR_DATA *ch, char *argument )
 {
     CraftSession *sess = craft_get_session( ch );
+    const CraftRecipe *recipe = craft_get_session_recipe( sess );
     std::string err;
     OBJ_DATA *result = nullptr;
     int chance;
 
-    switch ( ch->substate )
+    if ( ch->substate != 1 && ch->substate != SUB_TIMER_DO_ABORT )
+        return;
+
+    if ( !recipe )
     {
-        default:
-            return;
-
-        case SUB_TIMER_DO_ABORT:
-            ch->substate = SUB_CRAFT_MENU;
-            send_to_char( "You are interrupted and fail to finish your work.\n", ch );
-            craft_show_session( ch );
-            return;
-
-        case 1:
-            break;
-    }
-
-    ch->substate = SUB_CRAFT_MENU;
-
-    const CraftRecipe *recipe = craft_get_session_recipe( sess );
-    if ( !sess || !recipe )
-    {
+        ch->substate = SUB_NONE;
         send_to_char( "Your crafting session has been lost.\n", ch );
         return;
     }
 
-    if (!craft_selected_items_still_valid(ch, sess, err))
+    if ( ch->substate == SUB_TIMER_DO_ABORT )
     {
-        send_to_char( err, ch );
-        send_to_char( "\n", ch );
+        send_to_char( "You are interrupted and fail to finish your work.\n", ch );
         craft_show_session( ch );
         return;
     }
@@ -2670,29 +3023,29 @@ void do_craft_build( CHAR_DATA *ch, char *argument )
         return;
     }
 
-    if ( !craft_prepare_selected_items( sess, err ) )
+    if ( !craft_prepare_selected_items( ch, sess, err ) )
     {
         send_to_char( err, ch );
         send_to_char( "\n", ch );
-        learn_from_failure( ch, recipe->gsn );
+        craft_learn_failure( ch, recipe->gsn );
         craft_show_session( ch );
         return;
     }
 
-    if ( !craft_consume_input_items( sess, err ) )
+    if ( !craft_consume_input_items( ch, sess, err ) )
     {
         send_to_char( err, ch );
         send_to_char( "\n", ch );
-        learn_from_failure( ch, recipe->gsn );
+        craft_learn_failure( ch, recipe->gsn );
         craft_show_session( ch );
         return;
     }
 
     chance = craft_skill_level( ch, recipe->gsn );
-    if ( number_percent() > chance * 2 )
+    if ( recipe->gsn != -1 && number_percent() > chance * 2 )
     {
         send_to_char( "Your work falls apart at the last moment.\n", ch );
-        learn_from_failure( ch, recipe->gsn );
+        craft_learn_failure( ch, recipe->gsn );
         craft_show_session( ch );
         return;
     }
@@ -2701,7 +3054,7 @@ void do_craft_build( CHAR_DATA *ch, char *argument )
     {
         send_to_char( err, ch );
         send_to_char( "\n", ch );
-        learn_from_failure( ch, recipe->gsn );
+        craft_learn_failure( ch, recipe->gsn );
         craft_show_session( ch );
         return;
     }
@@ -2711,7 +3064,7 @@ void do_craft_build( CHAR_DATA *ch, char *argument )
         send_to_char( err, ch );
         send_to_char( "\n", ch );
         craft_discard_failed_result( sess, result );
-        learn_from_failure( ch, recipe->gsn );
+        craft_learn_failure( ch, recipe->gsn );
         craft_show_session( ch );
         return;
     }
@@ -2721,7 +3074,7 @@ void do_craft_build( CHAR_DATA *ch, char *argument )
         send_to_char( err, ch );
         send_to_char( "\n", ch );
         craft_discard_failed_result( sess, result );
-        learn_from_failure( ch, recipe->gsn );
+        craft_learn_failure( ch, recipe->gsn );
         craft_show_session( ch );        
         return;
     }
@@ -2733,19 +3086,25 @@ void do_craft_build( CHAR_DATA *ch, char *argument )
     act( AT_PLAIN, "$n finishes a crafting project.", ch, NULL, NULL, TO_ROOM );
 
     {
-         long xpgain;
-         
-         xpgain = UMIN( result->cost*100 ,( exp_level(ch->skill_level[ENGINEERING_ABILITY]+1) - exp_level(ch->skill_level[ENGINEERING_ABILITY]) ) );
+         const auto level = ch->skill_level[ENGINEERING_ABILITY];
+         const long long level_gap = static_cast<long long>( exp_level( level + 1 ) ) - exp_level( level );
+         const long xpgain = static_cast<long>( std::min( 100LL * std::max( 0, result->cost ), std::max( 0LL, level_gap ) ) );
          gain_exp(ch, xpgain, ENGINEERING_ABILITY);
-         ch_printf( ch , "You gain %ld engineering experience.", xpgain );
+         ch_printf( ch, "You gain %ld engineering experience.\n", xpgain );
     }    
-    learn_from_success( ch, recipe->gsn );
+    craft_learn_success( ch, recipe->gsn );
     craft_cleanup_session_after_build( sess, result );
     craft_show_session( ch );
 }
 
 static void craft_begin_build( CHAR_DATA *ch )
 {
+    if ( get_timerptr( ch, TIMER_DO_FUN ) )
+    {
+        send_to_char( "You are already working on something.\n", ch );
+        return;
+    }
+
     CraftSession *sess = craft_get_session( ch );
     std::string err;
     int chance;
@@ -2757,6 +3116,8 @@ static void craft_begin_build( CHAR_DATA *ch )
         return;
     }
 
+    craft_prune_invalid_selections( ch, sess );
+
     if ( !craft_validate_session( ch, sess, err ) )
     {
         send_to_char( err, ch );
@@ -2765,17 +3126,15 @@ static void craft_begin_build( CHAR_DATA *ch )
     }
 
     chance = craft_skill_level( ch, recipe->gsn );
-    if ( number_percent() >= chance )
+    if ( recipe->gsn != -1 && number_percent() >= chance )
     {
         send_to_char( "You cannot figure out how to fit the parts together.\n", ch );
-        learn_from_failure( ch, recipe->gsn );
+        craft_learn_failure( ch, recipe->gsn );
         return;
     }
 
     ch_printf( ch, "You begin working on %s.\n", recipe->display_name.c_str() );
     act( AT_PLAIN, "$n begins working carefully on a crafting project.", ch, NULL, NULL, TO_ROOM );
-
-//    ch->substate = SUB_NONE;
 
     add_timer( ch, TIMER_DO_FUN, recipe->timer_ticks, do_craft_build, 1 );
 }
@@ -2786,6 +3145,54 @@ static void craft_pause_mode( CHAR_DATA *ch )
         return;
 
     ch->substate = SUB_NONE;
+}
+
+bool craft_interpret_during_build( CHAR_DATA *ch, const std::string &command, const std::string &argument )
+{
+    if ( !ch || IS_NPC( ch ) )
+        return false;
+
+    TIMER *timer = get_timerptr( ch, TIMER_DO_FUN );
+    if ( !timer || timer->do_fun != do_craft_build )
+        return false;
+
+    std::string action = command;
+    const bool craft_command = !str_cmp( command, "craft" );
+    if ( craft_command )
+        one_argument( argument, action );
+    else if ( ch->substate != SUB_CRAFT_MENU && str_cmp( action, "cancel" ) )
+        return false;
+
+    if ( !str_cmp( action, "cancel" ) || !str_cmp( action, "exit" ) )
+    {
+        extract_timer( ch, timer );
+        craft_exit_mode( ch );
+        send_to_char( "You leave the crafting interface.\n", ch );
+        return true;
+    }
+
+    if ( !str_cmp( action, "pause" ) )
+    {
+        craft_pause_mode( ch );
+        send_to_char( "You pause your crafting session.\n", ch );
+        return true;
+    }
+
+    if ( action.empty() || !str_cmp( action, "show" ) )
+    {
+        if ( action.empty() )
+            ch->substate = SUB_CRAFT_MENU;
+        craft_show_session( ch );
+        return true;
+    }
+
+    if ( craft_command || !str_cmp( action, "build" ) || !str_cmp( action, "select" ) )
+    {
+        send_to_char( "You are already working on a crafting project.\n", ch );
+        return true;
+    }
+
+    return false;
 }
 
 bool craft_parse_expr_for_olc( const std::string &text, CraftExpr &out, std::string &err )
@@ -2802,6 +3209,12 @@ bool craft_interpret( CHAR_DATA *ch, const std::string& argument )
 {
     std::string cmd;
     std::string rest;
+
+    if ( !ch || IS_NPC( ch ) || (ch->desc && ch->desc->olc) )
+        return false;
+
+    if ( CraftSession *sess = craft_get_session( ch ) )
+        craft_prune_invalid_selections( ch, sess );
 
     rest = one_argument( argument, cmd );
 
@@ -2821,19 +3234,33 @@ bool craft_interpret( CHAR_DATA *ch, const std::string& argument )
 
     if ( !str_cmp( cmd, "exprtest" ) )
     {
+        if ( !ch || IS_NPC(ch) || !IS_IMMORTAL(ch) || !olc_can_use_command(ch, "cfedit") )
+        {
+            send_to_char( "You are not authorized to use that crafting command.\n", ch );
+            return true;
+        }
         craft_debug_expr_test( ch, rest );
         return true;
     }
 
     if ( !str_cmp( cmd, "savercps" ) )
     {
-        save_all_craft_recipes();
-        send_to_char( "Craft recipes saved.\n", ch );
+        if ( !ch || IS_NPC(ch) || !IS_IMMORTAL(ch) || !olc_can_use_command(ch, "cfedit") )
+        {
+            send_to_char( "You are not authorized to use that crafting command.\n", ch );
+            return true;
+        }
+        send_to_char( save_all_craft_recipes() ? "Craft recipes saved.\n" : "Craft recipe save failed.\n", ch );
         return true;
     }    
 
     if ( !str_cmp( cmd, "dump" ) )
     {
+        if ( !ch || IS_NPC(ch) || !IS_IMMORTAL(ch) || !olc_can_use_command(ch, "cfedit") )
+        {
+            send_to_char( "You are not authorized to use that crafting command.\n", ch );
+            return true;
+        }
         craft_cmd_dump( ch, rest );
         return true;
     }
@@ -2928,6 +3355,17 @@ void do_craft( CHAR_DATA *ch, char *argument )
     if ( IS_NPC(ch) )
         return;
 
+    CHECK_SUBRESTRICTED( ch );
+
+    if ( craft_interpret_during_build( ch, "craft", arg ) )
+        return;
+
+    if ( ch->desc && ch->desc->olc )
+    {
+        send_to_char( "Exit OLC with 'stop save' or 'stop abort' before crafting.\n", ch );
+        return;
+    }
+
     if ( !craft_get_session( ch ) )
     {
         craft_enter_mode( ch );
@@ -2957,6 +3395,8 @@ void do_craft( CHAR_DATA *ch, char *argument )
         ch->substate = SUB_CRAFT_MENU;
         send_to_char( "You resume your crafting session.\n", ch );
     }
+
+    craft_prune_invalid_selections( ch, craft_get_session( ch ) );
 
     if ( arg.empty() )
     {

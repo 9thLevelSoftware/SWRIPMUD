@@ -8,7 +8,7 @@ Pilot        Pfalt~
 Copilot      ~
 Class        0
 Tractorbeam  0
-Shipyard     203
+Shipyard     32000
 Hanger       0
 Cargohold       0
 Vx           4218322
@@ -35,7 +35,7 @@ Rockets     0
 Maxrockets  0
 Torpedos     0
 Maxtorpedos  0
-Lastdoc      203
+Lastdoc      32000
 Firstroom    32200
 Lastroom     32200
 Shield       0
@@ -79,5 +79,7 @@ Cargo9         0
 CaughtSmug     0
 Dockingports   0
 Guard   0
-Home         Ord Mantell~
+Home         Coruscant Shipyard~
 End
+
+#END

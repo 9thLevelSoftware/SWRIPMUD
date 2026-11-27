@@ -63,12 +63,6 @@ struct CraftRecipe;
 // New OLC definitions
 
 template<typename T>
-T* field_as(void* obj, size_t offset)
-{
-    return reinterpret_cast<T*>((char*)obj + offset);
-}
-
-template<typename T>
 bool set_int_field(T& field, const std::string& value, int min = INT_MIN, int max = INT_MAX)
 {
     try
@@ -595,6 +589,11 @@ OlcField<T> make_olc_editor_field(
         OlcMetaType::NONE,
         [member, substate_val](CHAR_DATA* ch, T* obj) -> bool
         {
+            if (ch->substate == SUB_RESTRICTED || ch->editor != nullptr)
+            {
+                send_to_char("You cannot use this command from within another command.\n", ch);
+                return false;
+            }
             ch->substate = substate_val;
             ch->dest_buf = obj;
             ch->last_cmd = do_olcset;
@@ -1215,12 +1214,18 @@ template <typename T>
 void olc_start(CHAR_DATA* ch, T* target, const OlcSchema<T>* schema, const OlcOps* ops)
 {
     auto d = ch ? ch->desc : nullptr;
-    if (!d)
+    if (!d || d->closing || d->write_failed)
         return;
 
     if (d->olc)
     {
         send_to_char("You are already in a session.\n", ch);
+        return;
+    }
+
+    if (ch->substate == SUB_RESTRICTED || ch->editor != nullptr)
+    {
+        send_to_char("You cannot use this command from within another command.\n", ch);
         return;
     }
 
@@ -1967,6 +1972,7 @@ typedef bool (*olc_parse_affect_value_fn)(CHAR_DATA* ch, int loc, const std::str
 typedef AFFECT_DATA*& (*olc_affect_list_ref_fn)(void* obj);
 
 // olc.c functions
+bool olc_can_use_command(CHAR_DATA* ch, const char* command);
 void olc_stop(CHAR_DATA* ch, bool save);
 
 void olc_set(CHAR_DATA* ch, const std::string& field, const std::string& value);
@@ -2018,7 +2024,7 @@ std::vector<std::string> olc_wrap_value_pairs( const std::vector<std::string>& p
 
 std::vector<CraftRecipe> &craft_get_recipes_for_olc();
 CraftRecipe *craft_find_recipe_for_olc( const std::string &name );
-void craft_save_all_recipes_for_olc();
+bool craft_save_all_recipes_for_olc( const CraftRecipe *original, const CraftRecipe *candidate );
 bool olc_craft_in_edit_mode(CHAR_DATA* ch);
 void olc_craft_edit_help(CHAR_DATA* ch);
 bool olc_craft_edit_revert(CHAR_DATA* ch);

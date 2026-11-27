@@ -22,6 +22,10 @@
 ****************************************************************************/
 
 #include <math.h>
+#include <cmath>
+#include <cerrno>
+#include <cstdlib>
+#include <limits.h>
 #include <sys/types.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -32,6 +36,39 @@
 #define MAX_TEMPLATETYPE 38
 
 SHIP_DATA *get_ship_in_space( GameContext *game, const std::string& name );
+SPACE_DATA *space_jump_destination( SHIP_DATA *ship, SPACE_DATA *preferred = nullptr );
+
+static constexpr double space_max_coordinate = 14000000.0;
+
+inline bool space_valid_coordinate( double value )
+{
+    return std::isfinite( value ) && std::fabs( value ) <= space_max_coordinate;
+}
+
+inline bool space_parse_coordinate( const std::string &text, double &value )
+{
+    const char *start = text.c_str();
+    char *end;
+    const double parsed = std::strtod( start, &end );
+    if ( start == end || *end != '\0' || !space_valid_coordinate( parsed ) )
+        return false;
+
+    value = parsed;
+    return true;
+}
+
+inline bool space_parse_int( const std::string &text, int &value )
+{
+    const char *start = text.c_str();
+    char *end;
+    errno = 0;
+    const long parsed = std::strtol( start, &end, 10 );
+    if ( start == end || *end != '\0' || errno == ERANGE || parsed < INT_MIN || parsed > INT_MAX )
+        return false;
+
+    value = static_cast<int>( parsed );
+    return true;
+}
 
 struct scmd_data
 {
@@ -48,8 +85,20 @@ struct scmd_data
 
 
 
+inline bool space_require_char_game( CHAR_DATA *ch )
+{
+    return ch != nullptr && ch->game != nullptr;
+}
+
+inline bool space_require_char_in_room( CHAR_DATA *ch )
+{
+    return ch != nullptr && ch->in_room != nullptr && ch->game != nullptr;
+}
+
 inline bool space_require_ship_from_cockpit( CHAR_DATA *ch, scmd_data &ctx, bool showmsg = true )
 {
+    if ( !space_require_char_in_room( ch ) )
+        return false;
     ctx.ship = ship_from_cockpit( ch->game, ch->in_room->vnum );
     if ( !ctx.ship )
     {
@@ -62,6 +111,8 @@ inline bool space_require_ship_from_cockpit( CHAR_DATA *ch, scmd_data &ctx, bool
 
 inline bool space_require_ship_from_pilotseat( CHAR_DATA *ch, scmd_data &ctx, bool showmsg = true )
 {
+    if ( !space_require_char_in_room( ch ) )
+        return false;
     ctx.ship = ship_from_pilotseat( ch->game, ch->in_room->vnum );
     if ( !ctx.ship )
     {
@@ -74,6 +125,8 @@ inline bool space_require_ship_from_pilotseat( CHAR_DATA *ch, scmd_data &ctx, bo
 
 inline bool space_require_ship_from_navseat( CHAR_DATA *ch, scmd_data &ctx, bool showmsg = true )
 {
+    if ( !space_require_char_in_room( ch ) )
+        return false;
     ctx.ship = ship_from_navseat( ch->game, ch->in_room->vnum );
     if ( !ctx.ship )
     {
@@ -86,6 +139,8 @@ inline bool space_require_ship_from_navseat( CHAR_DATA *ch, scmd_data &ctx, bool
 
 inline bool space_require_ship_from_engineroom( CHAR_DATA *ch, scmd_data &ctx, bool showmsg = true )
 {
+    if ( !space_require_char_in_room( ch ) )
+        return false;
     ctx.ship = ship_from_engine( ch->game, ch->in_room->vnum );
     if ( !ctx.ship )
     {
@@ -98,6 +153,8 @@ inline bool space_require_ship_from_engineroom( CHAR_DATA *ch, scmd_data &ctx, b
 
 inline bool space_require_ship_from_hanger( CHAR_DATA *ch, scmd_data &ctx, bool showmsg = true )
 {
+    if ( !space_require_char_in_room( ch ) )
+        return false;
     ctx.ship = ship_from_hanger( ch->game, ch->in_room->vnum );
     if ( !ctx.ship )
     {
@@ -110,6 +167,8 @@ inline bool space_require_ship_from_hanger( CHAR_DATA *ch, scmd_data &ctx, bool 
 
 inline bool space_require_ship_from_turret( CHAR_DATA *ch, scmd_data &ctx, bool showmsg = true )
 {
+    if ( !space_require_char_in_room( ch ) )
+        return false;
     ctx.ship = ship_from_turret( ch->game, ch->in_room->vnum );
     if ( !ctx.ship )
     {
@@ -144,6 +203,8 @@ inline bool space_requires_in_system( CHAR_DATA *ch, scmd_data &ctx, bool showms
 
 inline bool space_require_ship_from_coseat( CHAR_DATA *ch, scmd_data &ctx, bool showmsg = true )
 {
+    if ( !space_require_char_in_room( ch ) )
+        return false;
     ctx.ship = ship_from_coseat( ch->game, ch->in_room->vnum );
     if ( !ctx.ship )
     {
@@ -232,9 +293,14 @@ inline bool space_require_ship_nottractored( CHAR_DATA *ch, scmd_data &ctx, bool
     return true;
 }
 
+static inline bool space_ship_is_not_docked( SHIP_DATA *ship )
+{
+    return ship && ship->docked == NULL && ship->docking == SHIP_READY;
+}
+
 inline bool space_require_ship_not_docked( CHAR_DATA *ch, scmd_data &ctx, bool showmsg = true )
 {
-    if ( ctx.ship->docking != SHIP_READY )
+    if ( !space_ship_is_not_docked( ctx.ship ) )
     {
         if (showmsg)
             send_to_char("&RYou can't do that while docked to another ship!\n",ch);
@@ -245,7 +311,7 @@ inline bool space_require_ship_not_docked( CHAR_DATA *ch, scmd_data &ctx, bool s
 
 inline bool space_require_ship_energy( CHAR_DATA *ch, scmd_data &ctx, int energy_required = 0, bool showmsg = true )
 {
-    if (ctx.ship->energy <= energy_required)
+    if ( ctx.ship->energy < energy_required || (energy_required == 0 && ctx.ship->energy <= 0) )
     {
       if (showmsg)
           send_to_char("&RThere is not enough fuel!\n",ch);
@@ -373,10 +439,10 @@ inline bool space_require_ship_not_disabled( CHAR_DATA *ch, scmd_data &ctx, bool
 // The below function verifies that the ship is not landed or docked with another ship
 inline bool space_require_ship_not_landed_or_docked( CHAR_DATA *ch, scmd_data &ctx, bool showmsg = true )
 {
-    if ( ctx.ship->shipstate == SHIP_LANDED && ctx.ship->docked == NULL )
+    if ( ctx.ship->shipstate == SHIP_LANDED || !space_ship_is_not_docked( ctx.ship ) )
     {
         if (showmsg)
-            send_to_char("&RYou can't do that while docked!\n",ch);
+            send_to_char("&RYou can't do that while landed or docked!\n",ch);
         return false;
     }
     return true;
@@ -446,9 +512,21 @@ enum class ProjectileKind
     ROCKET
 };
 
+static constexpr long SPACE_TEMPLATE_MAX_SHIP_ID = 20000000L;
+
+inline bool space_valid_template_ship_id( long ship_id )
+{
+    return ship_id > 0L && ship_id <= SPACE_TEMPLATE_MAX_SHIP_ID;
+}
+
+bool fread_modules_strict( SHIP_DATA *ship, FILE *fp );
+
 inline bool space_validate_tractor_links( CHAR_DATA *ch, SHIP_DATA *ship, bool showmsg = true )
 {
     bool ok = true;
+
+    if ( !ship )
+        return false;
 
     if ( ship->tractored && ship->tractored->tractoredby != ship )
     {
@@ -513,21 +591,33 @@ static inline bool target_left_or_clear( CHAR_DATA *ch, SHIP_DATA *ship, SHIP_DA
     return false;
 }
 
-static inline int ship_target_distance( SHIP_DATA *from, SHIP_DATA *to )
+static inline long long space_coord_abs_diff_ll( float a, float b )
 {
-    return ( abs( (int)( to->vx - from->vx ) )
-           + abs( (int)( to->vy - from->vy ) )
-           + abs( (int)( to->vz - from->vz ) ) ) / 3;
+    double diff = std::fabs( (double)a - (double)b );
+    if ( !std::isfinite( diff ) || diff >= (double)( LLONG_MAX / 4 ) )
+        return LLONG_MAX / 4;
+    return (long long)diff;
 }
 
-static inline bool target_out_of_coord_range( CHAR_DATA *ch, SHIP_DATA *ship, SHIP_DATA *target, int max_delta, const char *msg )
+static inline int ship_target_distance( SHIP_DATA *from, SHIP_DATA *to )
+{
+    if ( !from || !to )
+        return 0;
+    long long sum = space_coord_abs_diff_ll( to->vx, from->vx )
+                  + space_coord_abs_diff_ll( to->vy, from->vy )
+                  + space_coord_abs_diff_ll( to->vz, from->vz );
+    long long dist = sum / 3;
+    return ( dist >= (long long)INT_MAX ) ? INT_MAX : (int)dist;
+}
+
+static inline bool target_out_of_coord_range( CHAR_DATA *ch, SHIP_DATA *ship, SHIP_DATA *target, long long max_delta, const char *msg )
 {
     if ( ship->shipclass > SHIP_PLATFORM )
         return false;
 
-    if ( abs( (int)( target->vx - ship->vx ) ) > max_delta
-      || abs( (int)( target->vy - ship->vy ) ) > max_delta
-      || abs( (int)( target->vz - ship->vz ) ) > max_delta )
+    if ( space_coord_abs_diff_ll( target->vx, ship->vx ) > (long long)max_delta
+      || space_coord_abs_diff_ll( target->vy, ship->vy ) > (long long)max_delta
+      || space_coord_abs_diff_ll( target->vz, ship->vz ) > (long long)max_delta )
     {
         if (msg)
             send_to_char( msg, ch );
@@ -537,11 +627,32 @@ static inline bool target_out_of_coord_range( CHAR_DATA *ch, SHIP_DATA *ship, SH
     return false;
 }
 
-inline bool space_distance_ship_less_than( SHIP_DATA *ship1, SHIP_DATA *ship2, long distance )
+static inline long long space_clamp_ll( long long minv, long long val, long long maxv )
 {
-    if ( abs( (int) ( ship1->vx - ship2->vx )) > distance ||
-    abs( (int) ( ship1->vy - ship2->vy )) > distance ||
-    abs( (int) ( ship1->vz - ship2->vz )) > distance )
+    if ( val < minv )
+        return minv;
+    if ( val > maxv )
+        return maxv;
+    return val;
+}
+
+static inline long long space_min_ll( long long a, long long b )
+{
+    return ( a < b ) ? a : b;
+}
+
+static inline long long space_max_ll( long long a, long long b )
+{
+    return ( a > b ) ? a : b;
+}
+
+inline bool space_distance_ship_less_than( SHIP_DATA *ship1, SHIP_DATA *ship2, long long distance )
+{
+    if ( !ship1 || !ship2 )
+        return false;
+    if ( space_coord_abs_diff_ll( ship1->vx, ship2->vx ) > distance ||
+         space_coord_abs_diff_ll( ship1->vy, ship2->vy ) > distance ||
+         space_coord_abs_diff_ll( ship1->vz, ship2->vz ) > distance )
         return false;
     return true;
 }
@@ -552,7 +663,7 @@ static inline void maybe_autofly_retarget( SHIP_DATA *attacker, SHIP_DATA *targe
     {
         target->target0 = attacker;
         echo_to_cockpit( AT_BLOOD, attacker,
-                         str_printf( "You are being targetted by %s.", target->name ) );
+                         str_printf( "You are being targetted by %s.", target->name ? target->name : "" ) );
     }
 }
 
@@ -566,23 +677,34 @@ static inline void echo_ship_observers( int at_color, SHIP_DATA *ship, SHIP_DATA
 
 static inline int compute_projectile_hit_chance( int chance, int origchance, SHIP_DATA *ship, SHIP_DATA *target )
 {
-    int distance = ship_target_distance( ship, target );
+    if ( !ship || !target )
+        return URANGE( 20, chance, 99 );
 
-    chance += target->shipclass - ship->shipclass;
-    chance += ship->currspeed - target->currspeed;
-    chance += ship->mod->manuever - target->mod->manuever;
-    chance -= distance / ( 10 * ( target->shipclass + 1 ) );
-    chance -= origchance;
-    chance /= 2;
-    chance += origchance;
+    long long distance = (long long)ship_target_distance( ship, target );
+    long long eff_class = (long long)UMAX( 0, target->shipclass );
+    long long c = (long long)chance;
 
-    chance += 30;
-    return URANGE( 20, chance, 99 );
+    c += (long long)target->shipclass - (long long)ship->shipclass;
+    c += (long long)ship->currspeed - (long long)target->currspeed;
+    if ( ship->mod && target->mod )
+        c += (long long)ship->mod->manuever - (long long)target->mod->manuever;
+    c -= distance / ( 10LL * ( eff_class + 1LL ) );
+    c -= (long long)origchance;
+    c /= 2LL;
+    c += (long long)origchance;
+
+    c += 30LL;
+    c = space_clamp_ll( 20LL, c, 99LL );
+    return (int)c;
 }
 
 inline int space_chance_by_shipclass( CHAR_DATA *ch, SHIP_DATA *ship )
 {
     int chance = 50;
+    if ( !ch || !ship )
+        return 0;
+    if ( !IS_NPC( ch ) && !ch->pcdata )
+        return 0;
      if ( ship->shipclass <= FIGHTER_SHIP )
           chance = IS_NPC(ch) ? ch->top_level
           : (int)  (ch->pcdata->learned[gsn_starfighters]) ;
@@ -598,6 +720,8 @@ inline int space_chance_by_shipclass( CHAR_DATA *ch, SHIP_DATA *ship )
 inline int space_chance_combat( CHAR_DATA *ch, SHIP_DATA *ship = nullptr)
 {
     int chance;
+    if ( !ch || ( !IS_NPC( ch ) && !ch->pcdata ) )
+        return 0;
     chance = IS_NPC(ch) ? ch->top_level
             : (int) ( ch->perm_dex*2 + ch->pcdata->learned[gsn_spacecombat]/3
                     + ch->pcdata->learned[gsn_spacecombat2]/3 + ch->pcdata->learned[gsn_spacecombat3]/3 );        
@@ -607,6 +731,8 @@ inline int space_chance_combat( CHAR_DATA *ch, SHIP_DATA *ship = nullptr)
 inline int space_chance_by_shipsystems( CHAR_DATA *ch, SHIP_DATA *ship )
 {
     int chance;
+    if ( !ch || ( !IS_NPC( ch ) && !ch->pcdata ) )
+        return 0;
     chance = IS_NPC(ch) ? ch->top_level
         : (int)  (ch->pcdata->learned[gsn_shipsystems]) ;
     return chance;
@@ -693,12 +819,17 @@ static inline CLAN_DATA *get_mainclan( CLAN_DATA *clan )
 
 static inline bool ship_is_owned( SHIP_DATA *ship )
 {
-    return str_cmp( ship->owner, "" ) || ship->type == MOB_SHIP;
+    if ( !ship )
+        return false;
+    return ( ship->owner && str_cmp( ship->owner, "" ) ) || ship->type == MOB_SHIP;
 }
 
 static inline SHIP_DATA *find_ship_in_or_room( CHAR_DATA *ch, const char *argument, bool allow_cockpit )
 {
-    SHIP_DATA *ship = ship_in_room( ch->in_room, argument );
+    if ( !space_require_char_in_room( ch ) )
+        return NULL;
+
+    SHIP_DATA *ship = ( argument && argument[0] != '\0' ) ? ship_in_room( ch->in_room, argument ) : NULL;
 
     if ( !ship && allow_cockpit )
         ship = ship_from_cockpit( ch->game, ch->in_room->vnum );
@@ -715,11 +846,14 @@ static inline SHIP_DATA *find_ship_in_or_room( CHAR_DATA *ch, const char *argume
 
 static inline void ship_show( CHAR_DATA *ch, SHIP_DATA *ship, bool fromafar = false )
 {
-    ch_printf( ch, "&Y%s %s : %s (%s)\n&B",
+    if ( !ch || !ship )
+        return;
+
+    ch_printf( ch, "&Y%s %s : %s (%s) [%s]\n&B",
         ship->type == SHIP_REBEL ? "Rebel" :
         (ship->type == SHIP_IMPERIAL ? "Imperial" : "Civilian" ),
         ship->shipclass == FIGHTER_SHIP ? "Starfighter" :
-        (ship->shipclass == MIDSIZE_SHIP ? "Midtarget" : 
+        (ship->shipclass == MIDSIZE_SHIP ? "Midship" :
         (ship->shipclass == CAPITAL_SHIP ? "Capital Ship" :
         (ship->shipclass == SHIP_PLATFORM ? "Platform" : 
         (ship->shipclass == CLOUD_CAR ? "Cloudcar" : 
@@ -728,28 +862,30 @@ static inline void ship_show( CHAR_DATA *ch, SHIP_DATA *ship, bool fromafar = fa
         (ship->shipclass == WHEELED ? "Wheeled Transport" : 
         (ship->shipclass == LAND_CRAWLER ? "Crawler" : 
         (ship->shipclass == WALKER ? "Walker" : "Unknown" ) ) ) ) ) ) ) ) ),
-        ship->name,
-        ship->personalname,
-        ship->filename);
+        ship->name ? ship->name : "",
+        ship->personalname ? ship->personalname : "",
+        ship->filename ? ship->filename : "");
     ch_printf( ch, "Description: %s\nOwner: %s",
-        ship->description,
-        ship->owner );
+        ship->description ? ship->description : "",
+        ship->owner ? ship->owner : "" );
     if( fromafar == FALSE )
-        ch_printf( ch, "   Pilot: %s   Copilot: %s", ship->pilot,  ship->copilot );
+        ch_printf( ch, "   Pilot: %s   Copilot: %s",
+            ship->pilot ? ship->pilot : "",
+            ship->copilot ? ship->copilot : "" );
 
     ch_printf( ch, "\nLaser cannons: %d  Ion cannons: %d\n",
-        ship->mod->lasers, ship->mod->ions);
+        ship->mod ? ship->mod->lasers : 0, ship->mod ? ship->mod->ions : 0);
     ch_printf( ch, "Projectile Launchers (8): %d  ",
-        ship->mod->launchers);
+        ship->mod ? ship->mod->launchers : 0);
     ch_printf( ch, "Chaff Launchers (6): %d\n",
-        ship->mod->defenselaunchers);
+        ship->mod ? ship->mod->defenselaunchers : 0);
     ch_printf( ch, "Max Hull: %d  ",
-        ship->mod->maxhull);
+        ship->mod ? ship->mod->maxhull : 0);
     ch_printf( ch, "Max Shields: %d   Max Energy(fuel): %d\n",
-        ship->mod->maxshield,
-        ship->mod->maxenergy);
-    ch_printf( ch, "Maximum Speed: %d   Hyperspeed: %d  Value: %d\n",
-        ship->mod->realspeed, ship->mod->hyperspeed, get_ship_value( ship ));
+        ship->mod ? ship->mod->maxshield : 0,
+        ship->mod ? ship->mod->maxenergy : 0);
+    ch_printf( ch, "Maximum Speed: %d   Hyperspeed: %d  Value: %ld\n",
+        ship->mod ? ship->mod->realspeed : 0, ship->mod ? ship->mod->hyperspeed : 0, get_ship_value( ship ));
     ch_printf( ch, "Maximum Cargo: %d\n", ship->maxcargo );
 
 }
@@ -758,41 +894,43 @@ static inline void ship_show_status( CHAR_DATA *ch, SHIP_DATA *ship )
 {
     TURRET_DATA *turret;
     int turretnum = 0;
-    ch_printf( ch, "&W%s:\n",ship->name);
+    if ( !ch || !ship )
+        return;
+    ch_printf( ch, "&W%s:\n", ship->name ? ship->name : "");
     ch_printf( ch, "&OCurrent Coordinates:&Y %.0f %.0f %.0f\n",
                         ship->vx, ship->vy, ship->vz );
     ch_printf( ch, "&OCurrent Heading:&Y %.0f %.0f %.0f\n",
                         ship->hx, ship->hy, ship->hz );
     ch_printf( ch, "&OCurrent Speed:&Y %d&O/%d Accel: &Y%d&O/%d\n",
-                        ship->currspeed , ship->mod->realspeed, 
+                        ship->currspeed , ship->mod ? ship->mod->realspeed : 0, 
                         ship->accel, get_acceleration(ship) );
     ch_printf( ch, "&OHull:&Y %d&O/%d  Ship Condition:&Y %s\n",
                         ship->hull,
-    		                ship->mod->maxhull,
+    		                ship->mod ? ship->mod->maxhull : 0,
     			              ship->shipstate == SHIP_DISABLED ? "Disabled" : "Running");
     ch_printf( ch, "&OShields:&Y %d&O/%d   Energy(fuel):&Y %d&O/%d\n",
                         ship->shield,
-                        ship->mod->maxshield,
+                        ship->mod ? ship->mod->maxshield : 0,
                         ship->energy,
-                        ship->mod->maxenergy);
+                        ship->mod ? ship->mod->maxenergy : 0);
     ch_printf( ch, "&OLaser Condition:&Y %s  &OCurrent Target:&Y %s\n",
-    		                ship->statet0 == LASER_DAMAGED ? "Damaged" : "Good" , ship->target0 ? ship->target0->name : "none");
+    		                ship->statet0 == LASER_DAMAGED ? "Damaged" : "Good" , ( ship->target0 && ship->target0->name ) ? ship->target0->name : "none");
     if (ship->first_turret)
         for ( turret = ship->first_turret, turretnum = 0; turret; turret= turret->next, turretnum++ )
             ch_printf( ch, "&OTurret %d:  &Y %s  &OCurrent Target:&Y %s\n",
-    			      turretnum, turret->state == LASER_DAMAGED ? "Damaged" : "Good" , turret->target ? turret->target->name : "none");
+    			      turretnum, turret->state == LASER_DAMAGED ? "Damaged" : "Good" , ( turret->target && turret->target->name ) ? turret->target->name : "none");
 
-    ch_printf( ch, "&OSensors:    &Y%d   &OTractor Beam:   &Y%d\n", ship->mod->sensor, ship->mod->tractorbeam);
-    ch_printf( ch, "&OAstroArray: &Y%d   &OComm:           &Y%d\n", ship->mod->astro_array, ship->mod->comm);
-    if( ship->mod->gravitypower > 0 )
+    ch_printf( ch, "&OSensors:    &Y%d   &OTractor Beam:   &Y%d\n", ship->mod ? ship->mod->sensor : 0, ship->mod ? ship->mod->tractorbeam : 0);
+    ch_printf( ch, "&OAstroArray: &Y%d   &OComm:           &Y%d\n", ship->mod ? ship->mod->astro_array : 0, ship->mod ? ship->mod->comm : 0);
+    if( ship->mod && ship->mod->gravitypower > 0 )
         ch_printf( ch, "&OGravity Well Projectors: Power: &Y%d\n", ship->mod->gravitypower );
     ch_printf( ch, "\n&OMissiles:&Y %d&O  Torpedos: &Y%d&ORockets:  &Y%d&O\n  Chaff:    &Y%d&O  Gravity Power: %d/%d\n Launchers: %d/%d Condition:&Y %s&w\n",
        			ship->missiles,
     			  ship->torpedos,
     			  ship->rockets,
-            ship->chaff, ship->mod->gravproj, ship->mod->gravitypower,
-            ship->mod->launchers,
-            ship->mod->defenselaunchers,
+            ship->chaff, ship->mod ? ship->mod->gravproj : 0, ship->mod ? ship->mod->gravitypower : 0,
+            ship->mod ? ship->mod->launchers : 0,
+            ship->mod ? ship->mod->defenselaunchers : 0,
     			  ship->missilestate == MISSILE_DAMAGED ? "Damaged" : "Good");
     ch_printf( ch, "\n&OMaxMods Ext:&Y %d&O/%d  Int: &Y%d&O/%d\n", 
             get_extmodule_count(ship), ship->maxextmodules, get_intmodule_count(ship), ship->maxintmodules );
@@ -801,35 +939,45 @@ static inline void ship_show_status( CHAR_DATA *ch, SHIP_DATA *ship )
 
 static inline int compute_autofly_laser_ion_hit_chance( int chance, int origchance, SHIP_DATA *ship, SHIP_DATA *target )
 {
-    int distance;
-    distance = abs( (int) ( target->vx - ship->vx ))
-            + abs( (int) ( target->vy - ship->vy ))
-            + abs( (int) ( target->vz - ship->vz ));
-    distance /= 3;
+    if ( !ship || !target )
+        return URANGE( 1, chance, 99 );
 
-    chance += target->shipclass - ship->shipclass;
-    chance += ship->currspeed - target->currspeed;
-    chance += ship->mod->manuever - target->mod->manuever;
-    chance -= distance/(10*(target->shipclass+1));
-    chance -= origchance;
-    chance /= 2;
-    chance += origchance;
-    chance = URANGE( 1 , chance , 99 );
+    long long sum = space_coord_abs_diff_ll( target->vx, ship->vx )
+                  + space_coord_abs_diff_ll( target->vy, ship->vy )
+                  + space_coord_abs_diff_ll( target->vz, ship->vz );
+    long long distance_ll = sum / 3;
+    long long eff_class = (long long)UMAX( 0, target->shipclass );
+    long long c = (long long)chance;
 
-    return chance;
+    c += (long long)target->shipclass - (long long)ship->shipclass;
+    c += (long long)ship->currspeed - (long long)target->currspeed;
+    if ( ship->mod && target->mod )
+        c += (long long)ship->mod->manuever - (long long)target->mod->manuever;
+    c -= distance_ll / ( 10LL * ( eff_class + 1LL ) );
+    c -= (long long)origchance;
+    c /= 2LL;
+    c += (long long)origchance;
+    c = space_clamp_ll( 1LL, c, 99LL );
+
+    return (int)c;
 }
 
 static inline int compute_autopilot_projectile_launch_chance( int chance, SHIP_DATA *ship, SHIP_DATA *target )
 {
-    chance -= target->mod->manuever/5;
-    chance -= target->currspeed/20;
-    chance += target->shipclass*target->shipclass*25;
-    chance -= ( abs( (int) ( target->vx - ship->vx ))/100 );
-    chance -= ( abs( (int) ( target->vy - ship->vy ))/100 );
-    chance -= ( abs( (int) ( target->vz - ship->vz ))/100 );
-    chance += 30;
-    chance = URANGE( 10 , chance , 90 );
-    return chance;
+    if ( !ship || !target )
+        return URANGE( 10, chance, 90 );
+
+    long long c = (long long)chance;
+    if ( target->mod )
+        c -= (long long)target->mod->manuever / 5LL;
+    c -= (long long)target->currspeed / 20LL;
+    c += (long long)target->shipclass * (long long)target->shipclass * 25LL;
+    c -= space_coord_abs_diff_ll( target->vx, ship->vx ) / 100LL;
+    c -= space_coord_abs_diff_ll( target->vy, ship->vy ) / 100LL;
+    c -= space_coord_abs_diff_ll( target->vz, ship->vz ) / 100LL;
+    c += 30LL;
+    c = space_clamp_ll( 10LL, c, 90LL );
+    return (int)c;
 }
 
 static inline bool ship_target_in_combat_range( SHIP_DATA *ship, SHIP_DATA *target, int max_delta )
@@ -852,21 +1000,16 @@ static inline int select_autopilot_projectile_type( SHIP_DATA *ship, SHIP_DATA *
        && ship->torpedos > 0 )
         return PROTON_TORPEDO;
 
-    if( ship->missiles < 0 && ship->torpedos > 0 )
+    if( ship->missiles <= 0 && ship->torpedos > 0 )
         return PROTON_TORPEDO;
 
-    if( ship->missiles < 0 && ship->rockets > 0 )
+    if( ship->missiles <= 0 && ship->rockets > 0 )
         return HEAVY_ROCKET;
 
     if( ship->missiles > 0 )
         return CONCUSSION_MISSILE;
 
     return -1;
-}
-
-static inline bool space_ship_is_not_docked( SHIP_DATA *ship )
-{
-    return ship && ship->docked == NULL && ship->shipstate != SHIP_DOCKED;
 }
 
 inline bool space_ship_is_ready( SHIP_DATA *ship )
@@ -934,7 +1077,7 @@ inline void space_release_tractor_target( SHIP_DATA *ship )
 
     if ( target->location )
         target->shipstate = SHIP_LANDED;
-    else if ( target->shipstate != SHIP_DOCKED && target->shipstate != SHIP_DISABLED )
+    else if ( space_ship_is_not_docked( target ) && target->shipstate != SHIP_DISABLED )
         target->shipstate = SHIP_READY;
 }
 
@@ -953,7 +1096,8 @@ inline bool space_enforce_ship_invariants( SHIP_DATA *ship, bool checkch = false
 
     space_validate_ship_links( NULL, ship, false );
 
-    if ( ship->shipstate == SHIP_DOCKED && ship->docked == NULL )
+    // Normalize legacy saves that used the docking enum as a flight state.
+    if ( ship->shipstate == SHIP_DOCKED )
         ship->shipstate = ship->location ? SHIP_LANDED : SHIP_READY;
 
     if ( ( ship->docking == SHIP_DOCK || ship->docking == SHIP_DOCK_2 ) && ship->docked == NULL )
@@ -983,9 +1127,12 @@ inline void space_set_shipstate( SHIP_DATA *ship, int state )
     if ( !ship )
         return;
 
+    const int old_state = ship->shipstate;
+    const int old_docking = ship->docking;
     ship->shipstate = state;
     space_enforce_ship_invariants( ship );
-    ship->dirty = true;
+    if ( old_state != ship->shipstate || old_docking != ship->docking )
+        ship->dirty = true;
 }
 
 inline void space_set_docking_state( SHIP_DATA *ship, int state )
@@ -993,10 +1140,12 @@ inline void space_set_docking_state( SHIP_DATA *ship, int state )
     if ( !ship )
         return;
 
+    const int old_state = ship->shipstate;
+    const int old_docking = ship->docking;
     ship->docking = state;
     space_enforce_ship_invariants( ship );
-    ship->dirty = true;
-
+    if ( old_state != ship->shipstate || old_docking != ship->docking )
+        ship->dirty = true;
 }
 
 inline void space_beg_docking_state( CHAR_DATA *ch, SHIP_DATA *ship, SHIP_DATA *dockto )
@@ -1035,21 +1184,7 @@ inline void space_ship_force_docked_match (SHIP_DATA *ship, SHIP_DATA *dockedto 
             ship->currspeed = dockedto->currspeed;
             ship->orighyperdistance = dockedto->orighyperdistance;
             ship->location = dockedto->location;
-            if ( dockedto->dest )
-            {
-                if ( !ship->dest || str_cmp( ship->dest, dockedto->dest ) )
-                {
-                    if ( ship->dest )
-                        STRFREE( ship->dest );
-                    ship->dest = STRALLOC( dockedto->dest );
-                }
-            }
-            else if ( ship->dest )
-            {
-                STRFREE( ship->dest );
-                ship->dest = NULL;
-            }
-            space_set_shipstate( ship, dockedto->shipstate );
+            // Docking shares movement. The carrier's landing order belongs to the carrier.
             ship->spaceobject = dockedto->spaceobject;
             ship->currjump = dockedto->currjump;    
 }

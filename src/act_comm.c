@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <vector>
 #include "mud.h"
 
 /*
@@ -33,6 +34,7 @@ void send_obj_page_to_char(CHAR_DATA * ch, OBJ_INDEX_DATA * idx, char page);
 void send_room_page_to_char(CHAR_DATA * ch, ROOM_INDEX_DATA * idx, char page);
 void send_page_to_char(CHAR_DATA * ch, MOB_INDEX_DATA * idx, char page);
 void send_control_page_to_char(CHAR_DATA * ch, char page);
+extern void auction_cleanup_char_for_quit( CHAR_DATA *ch );
 
 /*
  * Local functions.
@@ -54,7 +56,7 @@ typedef struct channel_info
     bool imm_only;
     int  command_group;
 
-    bool clan_only, allclan, order_only, guild_only;
+    bool clan_only, allclan;
     bool room_only, ship_channel;
 
     bool no_scramble;
@@ -79,112 +81,102 @@ typedef struct channel_info
 
 static const CHANNEL_INFO channel_table[] =
 {
-//  channel             com imm                           allclan       guild      ship      drunk     act                  color 
-//  channel             com     cgroup               clan         order       room      no_scr    verb       name            
-    { CHANNEL_CHAT,     T,  F,  CGROUP_NONE,         F,   F,      F,    F,    F,   F,   F,   F,   T,   F,   "chat",         AT_GOSSIP,  
+//  channel             com imm                           allclan       ship      drunk     act                  color
+//  channel             com     cgroup               clan        room      no_scr    verb       name
+    { CHANNEL_CHAT,     T,  F,  CGROUP_NONE,         F,   F,    F,   F,   F,   F,   T,   F,   "chat",         AT_GOSSIP,
       NULL,                                                                         // <---- prefix_fmt                 - Prefix sent before message to others
       "&z&CYou %s over the public network in %s&c, '&C%s&c'\n",                     // <---- self_fmt (ch_printf)       - message to self
       "&z&C$n &C%ss over the public network in $l&c, '&C$t&c'" },                   // <---- other_fmt (act()/snprintf) - message to others
 
-    { CHANNEL_OOC,      F,  F,  CGROUP_NONE,         F,   F,      F,    F,    F,   F,   T,   F,   F,   T,   "ooc",          AT_OOC,
+    { CHANNEL_OOC,      F,  F,  CGROUP_NONE,         F,   F,    F,   F,   T,   F,   F,   T,   "ooc",          AT_OOC,
       "&z&g(&GOOC&g)&Y",
       NULL,
       "$n&Y: $t" },
 
-    { CHANNEL_IMMTALK,  F,  T,  CGROUP_NONE,         F,   F,      F,    F,    F,   F,   T,   F,   F,   T,   "immtalk",      AT_IMMORT,
+    { CHANNEL_IMMTALK,  F,  T,  CGROUP_NONE,         F,   F,    F,   F,   T,   F,   F,   T,   "immtalk",      AT_IMMORT,
       NULL,
       NULL,
       "$n&Y>&W $t" },
 
-    { CHANNEL_AVTALK,   F,  F,  CGROUP_NONE,         F,   F,      F,    F,    F,   F,   T,   T,   F,   T,   "avtalk",       AT_AVATAR,
+    { CHANNEL_AVTALK,   F,  F,  CGROUP_NONE,         F,   F,    F,   F,   T,   T,   F,   T,   "avtalk",       AT_AVATAR,
       "&z&B<&cAvatar&B>&c",
       NULL,
       "$n&c: $t" },
 
-    { CHANNEL_CLAN,     T,  F,  CGROUP_NONE,         T,   F,      F,    F,    F,   F,   F,   F,   F,   F,   "clan",         AT_CLAN,
+    { CHANNEL_CLAN,     T,  F,  CGROUP_NONE,         T,   F,    F,   F,   F,   F,   F,   F,   "clan",         AT_CLAN,
       NULL,
       "&z&POver the organizations private network you say in %s&R, '&P%s&R'\n",
       "&z&P$n &Pspeaks over the organizations network in $l&R, '&P$t&R'" },
 
-    { CHANNEL_ALLCLAN,  T,  F,  CGROUP_NONE,         T,   T,      F,    F,    F,   F,   F,   F,   F,   F,   "allclan",      AT_CLAN,
+    { CHANNEL_ALLCLAN,  T,  F,  CGROUP_NONE,         T,   T,    F,   F,   F,   F,   F,   F,   "allclan",      AT_CLAN,
       NULL,
       "&z&POver the entire organizations private network you say in %s&R, '&P%s&R'\n",
       "&z&P$n &Pspeaks over the entire organizations network in $l&R, '&P$t&R'" },
 
-    { CHANNEL_ORDER,    T,  F,  CGROUP_NONE,         F,   F,      T,    F,    F,   F,   F,   F,   F,   F,   "order",        AT_GOSSIP,
-      NULL,
-      "&z&CYou %s over the order network in %s&c, '&C%s&c'\n",
-      "&z&C$n &C%ss over the order network in $l&c, '&C$t&c'" },
-
-    { CHANNEL_GUILD,    T,  F,  CGROUP_NONE,         F,   F,      F,    T,    F,   F,   F,   F,   F,   F,   "guild",        AT_GOSSIP,
-      NULL,
-      "&z&CYou %s over the guild network in %s&c, '&C%s&c'\n",
-      "&z&C$n &C%ss over the guild network in $l&c, '&C$t&c'" },
-
-    { CHANNEL_SHOUT,    F,  F,  CGROUP_NONE,         F,   F,      F,    F,    T,   F,   F,   T,   T,   F,   "shout",        AT_GOSSIP,
+    { CHANNEL_SHOUT,    F,  F,  CGROUP_NONE,         F,   F,    T,   F,   F,   T,   T,   F,   "shout",        AT_GOSSIP,
       NULL,
       "You %s in %s, '%s'\n",
       "$n %ss in $l, '$t'" },
 
-    { CHANNEL_YELL,     F,  F,  CGROUP_NONE,         F,   F,      F,    F,    T,   F,   F,   T,   T,   F,   "yell",         AT_GOSSIP,
+    { CHANNEL_YELL,     F,  F,  CGROUP_NONE,         F,   F,    T,   F,   F,   T,   T,   F,   "yell",         AT_GOSSIP,
       NULL,
       "You %s in %s, '%s'\n",
       "$n %ss in $l, '$t'" },
 
-    { CHANNEL_ASK,      F,  F,  CGROUP_NONE,         F,   F,      F,    F,    F,   F,   T,   F,   T,   F,   "ask",          AT_OOC,
+    { CHANNEL_ASK,      F,  F,  CGROUP_NONE,         F,   F,    F,   F,   T,   F,   T,   F,   "ask",          AT_OOC,
       "&z&g(&GOOC&g)&Y",
-      "&z&g(&GOOC&g)&Y You %s, '%s'\n",
+      "&z&g(&GOOC&g)&Y You %s in %s, '%s'\n",
       "$n &Y%ss, '$t'" },
 
-    { CHANNEL_NEWBIE,   F,  F,  CGROUP_NONE,         F,   F,      F,    F,    F,   F,   T,   F,   F,   T,   "newbie",       AT_OOC,
+    { CHANNEL_NEWBIE,   F,  F,  CGROUP_NONE,         F,   F,    F,   F,   T,   F,   F,   T,   "newbie",       AT_OOC,
       "&z&r(&RNEWBIE&r)&Y",
       NULL,
       "$n&Y: $t" },
 
-    { CHANNEL_NEWBIEASST,F, F,  CGROUP_NONE,         F,   F,      F,    F,    F,   F,   T,   F,   F,   F,   "newbieasst",   AT_OOC,
+    { CHANNEL_NEWBIEASST,F, F,  CGROUP_NONE,         F,   F,    F,   F,   T,   F,   F,   F,   "newbieasst",   AT_OOC,
       "&z&B(&G*&BNewbie Helper&G*&B)&G",
       "&z&B(&G*&BNewbie Helper&G*&B)&G %s&Y You say: %s\n",
       "$n&Y: $t" },
 
-    { CHANNEL_VULGAR,   T,  F,  CGROUP_NONE,         F,   F,      F,    F,    F,   F,   F,   F,   F,   T,   "vulgar",       AT_VULGAR,
+    { CHANNEL_VULGAR,   T,  F,  CGROUP_NONE,         F,   F,    F,   F,   F,   F,   F,   T,   "vulgar",       AT_VULGAR,
       "&z&R<&WVULGAR&R> &W",
       NULL,
       "$n&R: &W'&R$t&W'" },
 
-    { CHANNEL_SHIP,     F,  F,  CGROUP_NONE,         F,   F,      F,    F,    F,   T,   F,   F,   F,   F,   "ship",         AT_SHIP,
+    { CHANNEL_SHIP,     F,  F,  CGROUP_NONE,         F,   F,    F,   T,   F,   F,   F,   F,   "ship",         AT_SHIP,
       NULL,
       "&z&rYou tell the ship in %s&P, '%s'\n",
       "&z&r$n &rsays over the ships com system in $l,&P '$t'" },
 
-    { CHANNEL_SYSTEM,   F,  F,  CGROUP_NONE,         F,   F,      F,    F,    F,   T,   F,   F,   F,   F,   "system",       AT_GOSSIP,
+    { CHANNEL_SYSTEM,   F,  F,  CGROUP_NONE,         F,   F,    F,   T,   F,   F,   F,   F,   "system",       AT_GOSSIP,
       "&z&R(System)",
       "&z&R(System) (%s): '&W%s&r'\n",
       "$n&r: '&W$t&r'" },
 
-    { CHANNEL_SPACE,    F,  F,  CGROUP_NONE,         F,   F,      F,    F,    F,   T,   F,   F,   F,   F,   "space",        AT_GOSSIP,
+    { CHANNEL_SPACE,    F,  F,  CGROUP_NONE,         F,   F,    F,   T,   F,   F,   F,   F,   "space",        AT_GOSSIP,
       "&z&g(&GOOC&g)&R(Space)",
-      "&z&rYou space &g(&GOOC&g):, '&W%s&r'\n",
+      "&z&rYou speak over space &g(&GOOC&g) in %s, '&W%s&r'\n",
       "$n&r: '&W$t&r'" },
 
-    { CHANNEL_103,      F,  F,  CGROUP_ADMIN,        F,   F,      F,    F,    F,   F,   T,   F,   F,   T,   "admin",        AT_IMMORT,
+    { CHANNEL_103,      F,  F,  CGROUP_ADMIN,        F,   F,    F,   F,   T,   F,   F,   T,   "admin",        AT_IMMORT,
       "&z&Y(&WAdmin&Y)&W",
       NULL,
       "$n&Y>&W $t" },
 
-    { CHANNEL_104,      F,  F,  CGROUP_HEAD_ADMIN,   F,   F,      F,    F,    F,   F,   T,   F,   F,   T,   "headadmin",    AT_IMMORT,
+    { CHANNEL_104,      F,  F,  CGROUP_HEAD_ADMIN,   F,   F,    F,   F,   T,   F,   F,   T,   "headadmin",    AT_IMMORT,
       "&z&Y(&WHeadAdmin&Y)&W",
       NULL,
       "$n&Y>&W $t" },
 
-    { CHANNEL_105,      F,  F,  CGROUP_IMPLEMENTOR,  F,   F,      F,    F,    F,   F,   T,   F,   F,   T,   "imp",          AT_IMMORT,
+    { CHANNEL_105,      F,  F,  CGROUP_IMPLEMENTOR,  F,   F,    F,   F,   T,   F,   F,   T,   "imp",          AT_IMMORT,
       "&z&Y(&WImp&Y)&W",
       NULL,
       "$n&Y>&W $t" },
 
-    { CHANNEL_NEWS,     F,  F,  CGROUP_NONE,         F,   F,      F,    F,    F,   F,   T,   F,   F,   F,   "news",         AT_GOSSIP,
+    { CHANNEL_NEWS,     F,  F,  CGROUP_NONE,         F,   F,    F,   F,   T,   F,   F,   T,   "news",         AT_GOSSIP,
       "&W[&RICNN&W]",
       NULL,
-      "%s\n" },
+      "$t" },
 };
 
 static const CHANNEL_INFO *get_channel_info(int channel)
@@ -211,6 +203,7 @@ const FLAG_SET &valid_langs()
         bv.set(LANG_RODIAN);
         bv.set(LANG_HUTT);
         bv.set(LANG_MON_CALAMARI);
+        bv.set(LANG_SHISTAVANEN);
         bv.set(LANG_NOGHRI);
         bv.set(LANG_GAMORREAN);
         bv.set(LANG_JAWA);
@@ -287,7 +280,7 @@ std::string lang_string(CHAR_DATA *ch,  CHAR_DATA *vch)
         {
             std::string result = get_flag_name(lang_names, lang, LANG_MAX);
             if (!result.empty())
-                result[0] = toupper(result[0]);
+                result[0] = static_cast<char>(toupper(static_cast<unsigned char>(result[0])));
             return result;
         }
     }
@@ -303,10 +296,11 @@ void do_beep( CHAR_DATA *ch, char *argument )
     OBJ_DATA *obj;
     bool ch_comlink, victim_comlink;
     
-    argumentstr = one_argument( argument, arg );
-    
-    BV_SET_BIT( ch->channels, CHANNEL_TELLS );
     if (!ch || !ch->in_room) return;
+
+    argumentstr = one_argument( argument ? argument : "", arg );
+
+    BV_SET_BIT( ch->channels, CHANNEL_TELLS );
     if ( BV_IS_SET( ch->in_room->room_flags, ROOM_SILENCE ) )
     {
         send_to_char( "You can't do that here.\n", ch );
@@ -405,7 +399,7 @@ void do_beep( CHAR_DATA *ch, char *argument )
 
     if (!ch || !ch->in_room) return;
     if ( (!IS_IMMORTAL(ch) && !IS_AWAKE(victim) )
-    || (!IS_NPC(victim) && BV_IS_SET(victim->in_room->room_flags, ROOM_SILENCE ) ) )
+    || (!IS_NPC(victim) && (!victim->in_room || BV_IS_SET(victim->in_room->room_flags, ROOM_SILENCE ) ) ) )
     {
     act( AT_PLAIN, "$E can't hear you.", ch, 0, victim, TO_CHAR );
 	return;
@@ -423,7 +417,7 @@ void do_beep( CHAR_DATA *ch, char *argument )
     send_to_char("\a",victim);    
 
     if ( knows_language( victim, ch->speaking, ch )
-    ||  (IS_NPC(ch) && !ch->speaking) )
+    ||  (IS_NPC(ch) && ch->speaking == LANG_UNKNOWN) )
 	act( AT_WHITE, std::string("$n beeps: '$t'"), ch, argumentstr, victim, TO_VICT );
     else
 	act( AT_WHITE, "$n beeps: '$t'", ch, scramble(argumentstr, ch->speaking), victim, TO_VICT );
@@ -604,7 +598,7 @@ static bool can_receive_channel(
     const CHANNEL_INFO *info,
     CLAN_DATA *clan)
 {
-    if (!vch || !vch->in_room)
+    if (!ch || !ch->in_room || !vch || !vch->in_room || !och || !info)
         return false;
 
     if (BV_IS_SET(vch->in_room->room_flags, ROOM_SILENCE))
@@ -617,7 +611,7 @@ static bool can_receive_channel(
         return false;
 
     if (info->command_group != CGROUP_NONE &&
-        !BV_IS_SET(och->pcdata->commandgroup, info->command_group))
+        (IS_NPC(och) || !och->pcdata || !BV_IS_SET(och->pcdata->commandgroup, info->command_group)))
         return false;
 
     if (info->room_only && ch->in_room != och->in_room)
@@ -633,30 +627,60 @@ static bool can_receive_channel(
 
         if (info->allclan)
         {
-            if (vch->pcdata->clan != clan
-            && vch->pcdata->clan->mainclan != clan
-            && clan->mainclan != vch->pcdata->clan)
+            if (!clan ||
+                (vch->pcdata->clan != clan
+                && vch->pcdata->clan->mainclan != clan
+                && clan->mainclan != vch->pcdata->clan))
                 return false;
         }
     }
 
     if (info->ship_channel)
     {
-        SHIP_DATA *ship = ship_from_cockpit(ch->game,ch->in_room->vnum);
-        SHIP_DATA *target = ship_from_cockpit(ch->game, vch->in_room->vnum);
+        SHIP_DATA *ship = ch->in_room->ship;
+        SHIP_DATA *target = vch->in_room->ship;
 
         if (!ship || !target)
             return false;
 
-        if (info->channel == CHANNEL_SHIP)
-            if (vch->in_room->vnum < ship->get_firstroom() || vch->in_room->vnum > ship->get_lastroom())
-                return false;
+        if (info->channel == CHANNEL_SHIP && ship != target)
+            return false;
 
         if (info->channel == CHANNEL_SYSTEM && !ship_in_range(ship, target))
             return false;
     }
 
     return true;
+}
+
+static std::string format_channel_template(
+    const char *fmt,
+    const char *a0,
+    const char *a1 = nullptr,
+    const char *a2 = nullptr )
+{
+    if ( !fmt )
+        return "";
+
+    const char *args[3] = { a0, a1, a2 };
+    size_t idx = 0;
+    std::string out;
+
+    for ( const char *p = fmt; *p != '\0'; ++p )
+    {
+        if ( p[0] == '%' && p[1] == 's' && idx < 3 )
+        {
+            if ( args[idx] )
+                out += args[idx];
+            ++idx;
+            ++p;
+        }
+        else
+        {
+            out += *p;
+        }
+    }
+    return out;
 }
 
 static void format_channel_message(
@@ -679,17 +703,18 @@ static void format_channel_message(
     /* --- SELF --- */
     if ( info->self_fmt )
     {
-        if ( info->uses_verb )
-            ch_printf( ch, info->self_fmt, verb.c_str(), lang.c_str(), argument.c_str() );
-        else
-            ch_printf( ch, info->self_fmt, lang.c_str(), argument.c_str() );
+        const std::string self_msg = info->uses_verb
+            ? format_channel_template( info->self_fmt, verb.c_str(), lang.c_str(), argument.c_str() )
+            : format_channel_template( info->self_fmt, lang.c_str(), argument.c_str() );
+
+        send_to_char( self_msg, ch );
     }
 
     /* --- OTHER --- */
     if ( info->other_fmt )
     {
         std::string tmp = info->uses_verb
-            ? str_printf( info->other_fmt, verb.c_str() )
+            ? format_channel_template( info->other_fmt, verb.c_str() )
             : std::string( info->other_fmt );
 
         buf = info->prefix_fmt
@@ -759,6 +784,16 @@ void talk_channel( CHAR_DATA *ch, const std::string &argument_in, int channel, c
         return;
     }
 
+    if ( channel == CHANNEL_CHAT )
+    {
+        if ( ch->gold < 1 )
+        {
+            send_to_char( "&RYou don't have enough credits!\n", ch );
+            return;
+        }
+        --ch->gold;
+    }
+
     if ( info->clan_only && !IS_NPC( ch ) && ch->pcdata )
         clan = ch->pcdata->clan;
 
@@ -773,21 +808,28 @@ void talk_channel( CHAR_DATA *ch, const std::string &argument_in, int channel, c
     if ( BV_IS_SET( ch->in_room->room_flags, ROOM_LOGSPEECH ) )
     {
         buf2 = str_printf( "%s: %s (%s)",
-            IS_NPC( ch ) ? ch->short_descr : ch->name,
+            IS_NPC( ch ) ? (ch->short_descr ? ch->short_descr : "") : (ch->name ? ch->name : ""),
             argument.c_str(),
             verb.c_str() );
         append_to_file( LOG_FILE, buf2.c_str() );
     }
 
+    std::vector<DESCRIPTOR_DATA *> targets;
     for ( d = first_descriptor; d; d = d->next )
     {
-        CHAR_DATA *och = d->original ? d->original : d->character;
-        CHAR_DATA *vch = d->character;
+        if ( comm_desc_alive( d ) && d->connected == CON_PLAYING )
+            targets.push_back( d );
+    }
 
-        if ( d->connected != CON_PLAYING )
+    for ( DESCRIPTOR_DATA *td : targets )
+    {
+        if ( !comm_desc_alive( td ) || td->connected != CON_PLAYING )
             continue;
 
-        if ( !vch || vch == ch )
+        CHAR_DATA *och = td->original ? td->original : td->character;
+        CHAR_DATA *vch = td->character;
+
+        if ( !och || !vch || vch == ch )
             continue;
 
         if ( !BV_IS_SET( och->channels, channel ) )
@@ -800,7 +842,7 @@ void talk_channel( CHAR_DATA *ch, const std::string &argument_in, int channel, c
 
         if ( !info->no_scramble &&
             !knows_language( vch, ch->speaking, ch ) &&
-            ( !IS_NPC( ch ) || ch->speaking != 0 ) )
+            ( !IS_NPC( ch ) || ch->speaking != LANG_UNKNOWN ) )
         {
             sbuf = scramble( argument, ch->speaking );
         }
@@ -813,7 +855,8 @@ void talk_channel( CHAR_DATA *ch, const std::string &argument_in, int channel, c
 
         act( info->color, buf, ch, sbuf, vch, TO_VICT );
 
-        vch->position = position;
+        if ( !char_died( vch ) )
+            vch->position = position;
     }
 }
 
@@ -826,22 +869,31 @@ void to_channel( const std::string &argument, int channel, const std::string &ve
 
     std::string buf = str_printf( "%s: %s\n", verb.c_str(), argument.c_str() );
 
+    std::vector<DESCRIPTOR_DATA *> targets;
     for ( d = first_descriptor; d; d = d->next )
     {
-        CHAR_DATA *och = d->original ? d->original : d->character;
-        CHAR_DATA *vch = d->character;
+        if ( comm_desc_alive( d ) && d->connected == CON_PLAYING )
+            targets.push_back( d );
+    }
 
-        if ( !och || !vch )
+    for ( DESCRIPTOR_DATA *td : targets )
+    {
+        if ( !comm_desc_alive( td ) || td->connected != CON_PLAYING )
+            continue;
+
+        CHAR_DATA *och = td->original ? td->original : td->character;
+        CHAR_DATA *vch = td->character;
+
+        if ( !och || !vch || !td->game )
             continue;
 
         if ( ( !IS_IMMORTAL(vch) && channel != CHANNEL_ARENA )
-        ||   ( vch->top_level < d->game->get_sysdata()->build_level && channel == CHANNEL_BUILD )
-        ||   ( vch->top_level < d->game->get_sysdata()->log_level
+        ||   ( vch->top_level < td->game->get_sysdata()->build_level && channel == CHANNEL_BUILD )
+        ||   ( vch->top_level < td->game->get_sysdata()->log_level
         &&     ( channel == CHANNEL_LOG || channel == CHANNEL_COMM ) ) )
             continue;
 
-        if ( d->connected == CON_PLAYING
-        &&   BV_IS_SET( och->channels, channel )
+        if ( BV_IS_SET( och->channels, channel )
         &&   vch->top_level >= level )
         {
             set_char_color( AT_LOG, vch );
@@ -853,28 +905,20 @@ void to_channel( const std::string &argument, int channel, const std::string &ve
 
 void do_chat( CHAR_DATA *ch, char *argument )
 {
-    if ( ch->gold < 1 )
-    {
-    	send_to_char("&RYou don't have enough credits!\n",ch);
-    	return;
-    }
-    
-    ch->gold -= 1;
-    
-    talk_channel( ch, argument, CHANNEL_CHAT, "chat" );
-    return;
+    talk_channel( ch, argument ? argument : "", CHANNEL_CHAT, "chat" );
 }
 
 void do_shiptalk( CHAR_DATA *ch, char *argument )
 {
-     SHIP_DATA *ship;
+     if ( !ch || !ch->in_room )
+         return;
 
-     if ( (ship = ship_from_cockpit(ch->game, ch->in_room->vnum)) == NULL )  
+     if ( !ch->in_room->ship )
      {
-    	  send_to_char("&RYou must be in the cockpit of a ship to do that!\n",ch);
+        send_to_char("&RYou must be aboard a ship to use its intercom!\n",ch);
     	  return;
      }
-     talk_channel( ch, argument, CHANNEL_SHIP, "shiptalk" );
+     talk_channel( ch, argument ? argument : "", CHANNEL_SHIP, "shiptalk" );
      return;
 }    	        
 
@@ -882,12 +926,15 @@ void do_systemtalk( CHAR_DATA *ch, char *argument )
 {
      SHIP_DATA *ship;
      
+     if ( !ch || !ch->in_room )
+         return;
+
      if ( (ship = ship_from_cockpit(ch->game, ch->in_room->vnum)) == NULL )  
      {
     	  send_to_char("&RYou must be in the cockpit of a ship to do that!\n",ch);
     	  return;
      }
-     talk_channel( ch, argument, CHANNEL_SYSTEM, "systemtalk" );
+     talk_channel( ch, argument ? argument : "", CHANNEL_SYSTEM, "systemtalk" );
      return;
 }    	        
 
@@ -895,128 +942,135 @@ void do_spacetalk( CHAR_DATA *ch, char *argument )
 {
      SHIP_DATA *ship;
 
+     if ( !ch || !ch->in_room )
+         return;
+
      if ( (ship = ship_from_cockpit(ch->game, ch->in_room->vnum)) == NULL )  
      {
     	  send_to_char("&RYou must be in the cockpit of a ship to do that!\n",ch);
     	  return;
      }
-     talk_channel( ch, argument, CHANNEL_SPACE, "spacetalk" );
+     talk_channel( ch, argument ? argument : "", CHANNEL_SPACE, "spacetalk" );
      return;
 }    	        
 
 void do_ooc( CHAR_DATA *ch, char *argument )
 {
-    if ( ch && !IS_NPC(ch) && ch->pcdata && ch->pcdata->bestowments && is_name("noooc", ch->pcdata->bestowments) )
+    if ( !ch )
+        return;
+
+    if ( !IS_NPC(ch) && ch->pcdata && ch->pcdata->bestowments && is_name("noooc", ch->pcdata->bestowments) )
     {
       send_to_char( "You have lost the ability to use that channel\n",ch);
       return;
     }
 
-    talk_channel( ch, argument, CHANNEL_OOC, "ooc" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_OOC, "ooc" );
     return;
 }
 
 void do_newbieasst( CHAR_DATA *ch, char *argument )
 {
-if ( !( ch->pcdata->bestowments && is_name( "newbieasst", ch->pcdata->bestowments) ))
-           return;
-    talk_channel( ch, argument, CHANNEL_NEWBIEASST, "newbieasst" );
+    if ( !ch || IS_NPC(ch) || !ch->pcdata || !ch->pcdata->bestowments || !is_name( "newbieasst", ch->pcdata->bestowments ) )
+        return;
+    talk_channel( ch, argument ? argument : "", CHANNEL_NEWBIEASST, "newbieasst" );
     return;
 }
 
 void do_allclantalk( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
 
-    if ( IS_NPC( ch ) || !ch->pcdata->clan )
+    if ( IS_NPC( ch ) || !ch->pcdata || !ch->pcdata->clan )
     {
 	send_to_char( "Huh?\n", ch );
 	return;
     }
-    talk_channel( ch, argument, CHANNEL_ALLCLAN, "allclantalk" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_ALLCLAN, "allclantalk" );
     return;
 }
 
 void do_clantalk( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
 
-    if ( IS_NPC( ch ) || !ch->pcdata->clan )
+    if ( IS_NPC( ch ) || !ch->pcdata || !ch->pcdata->clan )
     {
 	send_to_char( "Huh?\n", ch );
 	return;
     }
-    talk_channel( ch, argument, CHANNEL_CLAN, "clantalk" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_CLAN, "clantalk" );
     return;
 }
 
 void do_newbiechat( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if ( ch->top_level > 5 )
     {
 	send_to_char( "Aren't you a little old for the newbie channel?\n", ch );
 	return;
     }
-    talk_channel( ch, argument, CHANNEL_NEWBIE, "newbiechat" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_NEWBIE, "newbiechat" );
     return;
-}
-
-void do_ot( CHAR_DATA *ch, char *argument )
-{
-  do_ordertalk( ch, argument );
-}
-
-void do_ordertalk( CHAR_DATA *ch, char *argument )
-{
-      send_to_char("Huh?\n", ch);
-      return;
-}
-
-void do_guildtalk( CHAR_DATA *ch, char *argument )
-{
-      send_to_char("Huh?\n", ch);
-      return;
 }
 
 void do_music( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-    talk_channel( ch, argument, CHANNEL_MUSIC, "sing" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_MUSIC, "sing" );
     return;
 }
 
 
 void do_quest( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-    talk_channel( ch, argument, CHANNEL_QUEST, "quest" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_QUEST, "quest" );
     return;
 }
 
 void do_ask( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-    talk_channel( ch, argument, CHANNEL_ASK, "ask" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_ASK, "ask" );
     return;
 }
 
@@ -1024,12 +1078,15 @@ void do_ask( CHAR_DATA *ch, char *argument )
 
 void do_answer( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-    talk_channel( ch, argument, CHANNEL_ASK, "answer" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_ASK, "answer" );
     return;
 }
 
@@ -1037,12 +1094,15 @@ void do_answer( CHAR_DATA *ch, char *argument )
 
 void do_shout( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-  talk_channel( ch, drunk_speech( argument, ch ), CHANNEL_SHOUT, "shout" );
+  talk_channel( ch, argument ? argument : "", CHANNEL_SHOUT, "shout" );
   WAIT_STATE( ch, 12 );
   return;
 }
@@ -1051,12 +1111,15 @@ void do_shout( CHAR_DATA *ch, char *argument )
 
 void do_yell( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-  talk_channel( ch, drunk_speech( argument, ch ), CHANNEL_YELL, "yell" );
+  talk_channel( ch, argument ? argument : "", CHANNEL_YELL, "yell" );
   return;
 }
 
@@ -1064,58 +1127,73 @@ void do_yell( CHAR_DATA *ch, char *argument )
 
 void do_immtalk( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-    talk_channel( ch, argument, CHANNEL_IMMTALK, "immtalk" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_IMMTALK, "immtalk" );
     return;
 }
 
 
 void do_i103( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-    talk_channel( ch, argument, CHANNEL_103, "i103" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_103, "i103" );
     return;
 }
 
 void do_i104( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-    talk_channel( ch, argument, CHANNEL_104, "i104" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_104, "i104" );
     return;
 }
 
 void do_i105( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-    talk_channel( ch, argument, CHANNEL_105, "i105" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_105, "i105" );
     return;
 }
 
 
 void do_avtalk( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-    talk_channel( ch, drunk_speech( argument, ch ), CHANNEL_AVTALK, "avtalk" );
+    talk_channel( ch, argument ? argument : "", CHANNEL_AVTALK, "avtalk" );
     return;
 }
 
@@ -1127,14 +1205,14 @@ void do_say(CHAR_DATA *ch, char *argument)
     FLAG_SET actflags;
     int lang;
 
-    if (argument[0] == '\0')
+    if (!ch || !ch->in_room)
+        return;
+
+    if (!argument || argument[0] == '\0')
     {
         send_to_char("Say what?\n", ch);
         return;
     }
-
-    if (!ch || !ch->in_room)
-        return;
 
     if (BV_IS_SET(ch->in_room->room_flags, ROOM_SILENCE))
     {
@@ -1191,7 +1269,7 @@ void do_say(CHAR_DATA *ch, char *argument)
     if (BV_IS_SET(ch->in_room->room_flags, ROOM_LOGSPEECH))
     {
         buf = str_printf("%s: %s",
-                IS_NPC(ch) ? ch->short_descr : ch->name,
+                IS_NPC(ch) ? (ch->short_descr ? ch->short_descr : "") : (ch->name ? ch->name : ""),
                 argument);
         append_to_file(LOG_FILE, buf);
     }
@@ -1213,7 +1291,7 @@ void do_tell( CHAR_DATA *ch, char *argument )
 {
     std::string arg;
     std::string buf;
-    std::string sbuf = argument;
+    std::string sbuf;
     std::string sbuflang;
     CHAR_DATA *victim;
     int position;
@@ -1224,6 +1302,11 @@ void do_tell( CHAR_DATA *ch, char *argument )
     CHAR_DATA *vch;
     bool sameroom = FALSE;
     
+    if ( !ch || !ch->in_room )
+        return;
+
+    const char *arg_cstr = argument ? argument : "";
+    sbuf = arg_cstr;
     switched_victim = NULL;
 
     if ( !BV_IS_SET( ch->channels, CHANNEL_TELLS ) 
@@ -1248,7 +1331,7 @@ void do_tell( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    std::string argumentstr = one_argument( argument, arg );
+    std::string argumentstr = one_argument( arg_cstr, arg );
 
     if ( arg.empty() || argumentstr.empty() )
     {
@@ -1347,7 +1430,7 @@ void do_tell( CHAR_DATA *ch, char *argument )
       }   
 
     if ( (!IS_IMMORTAL(ch) && !IS_AWAKE(victim) )
-    || (!IS_NPC(victim) && BV_IS_SET(victim->in_room->room_flags, ROOM_SILENCE ) ) )
+    || (!IS_NPC(victim) && (!victim->in_room || BV_IS_SET(victim->in_room->room_flags, ROOM_SILENCE ) ) ) )
     {
     act( AT_PLAIN, "$E can't hear you.", ch, 0, victim, TO_CHAR );
 	return;
@@ -1376,7 +1459,7 @@ void do_tell( CHAR_DATA *ch, char *argument )
 
     sbuf = argumentstr;
     if ( !knows_language(victim, ch->speaking, ch) &&
-       (!IS_NPC(ch) || ch->speaking != 0) )
+       (!IS_NPC(ch) || ch->speaking != LANG_UNKNOWN) )
       sbuf = scramble(argumentstr, ch->speaking);
     sbuf = drunk_speech( sbuf, ch );
     
@@ -1385,7 +1468,7 @@ void do_tell( CHAR_DATA *ch, char *argument )
 
 
 /*  if ( knows_language( victim, ch->speaking, ch )
-    ||  (IS_NPC(ch) && !ch->speaking) )
+    ||  (IS_NPC(ch) && ch->speaking == LANG_UNKNOWN) )
 	act( AT_TELL, "(&CIncoming Message&B) $n: '$t'", ch, argument, victim, TO_VICT );
     else
 	act( AT_TELL, "(&CIncoming Message&B) $n: '$t'", ch, scramble(argument, ch->speaking), victim, TO_VICT ); */
@@ -1396,9 +1479,9 @@ void do_tell( CHAR_DATA *ch, char *argument )
     if ( BV_IS_SET( ch->in_room->room_flags, ROOM_LOGSPEECH ) )
     {
 	    buf = str_printf("%s: %s (tell to) %s.",
-		 IS_NPC( ch ) ? ch->short_descr : ch->name,
-		 argument,
-		 IS_NPC( victim ) ? victim->short_descr : victim->name );
+		 IS_NPC( ch ) ? (ch->short_descr ? ch->short_descr : "") : (ch->name ? ch->name : ""),
+		 arg_cstr,
+		 IS_NPC( victim ) ? (victim->short_descr ? victim->short_descr : "") : (victim->name ? victim->name : "") );
 	    append_to_file( LOG_FILE, buf );
     }
    if( !IS_IMMORTAL(ch) && !sameroom )
@@ -1411,12 +1494,12 @@ void do_tell( CHAR_DATA *ch, char *argument )
 	  continue;
 	sbuf = argumentstr;
 	if ( !knows_language(vch, ch->speaking, ch) &&
-		 (!IS_NPC(ch) || ch->speaking != 0) )
+		 (!IS_NPC(ch) || ch->speaking != LANG_UNKNOWN) )
 	 sbuf = scramble(argumentstr, ch->speaking);
 	sbuf = drunk_speech( sbuf, ch );
 
 	MOBtrigger = FALSE;
-    if ( ( !IS_NPC(vch) && knows_language(vch, ch->speaking, ch ) ) && ( (!IS_NPC(ch) ) || ch->speaking != 0 ) )
+    if ( ( !IS_NPC(vch) && knows_language(vch, ch->speaking, ch ) ) && ( (!IS_NPC(ch) ) || ch->speaking != LANG_UNKNOWN ) )
     {
       sbuflang = str_printf( "$n says quietly into $s comlink in %s '$t'", lang_string(ch, vch ).c_str() );
       act( AT_TELL, sbuflang, ch, sbuf, vch, TO_VICT );
@@ -1428,10 +1511,10 @@ void do_tell( CHAR_DATA *ch, char *argument )
     
 //  act( AT_SAY, "$n says quietly into $s comlink '$t'", ch, sbuf, vch, TO_VICT );
     }
-    if ( !IS_IMMORTAL(victim) )
+    if ( victim->in_room && !IS_IMMORTAL(victim) )
       act( AT_ACTION, "$n's comlink buzzes with a message.", victim, NULL, NULL, TO_ROOM);
    }
-   mprog_speech_trigger( argument, ch );
+   mprog_speech_trigger( arg_cstr, ch );
    return;
 }
 
@@ -1447,6 +1530,11 @@ void do_reply( CHAR_DATA *ch, char *argument )
     CHAR_DATA *vch;
     bool sameroom = FALSE;
 
+    if ( !ch || !ch->in_room )
+        return;
+
+    const char *arg_cstr = argument ? argument : "";
+
     BV_SET_BIT( ch->channels, CHANNEL_TELLS );
     if ( BV_IS_SET( ch->in_room->room_flags, ROOM_SILENCE ) )
     {
@@ -1460,8 +1548,9 @@ void do_reply( CHAR_DATA *ch, char *argument )
 	return;
     }
 
-    if ( ( victim = ch->reply ) == NULL )
+    if ( ( victim = ch->reply ) == NULL || char_died( victim ) || !victim->in_room )
     {
+	ch->reply = NULL;
 	send_to_char( "They can't hear you.\n", ch );
 	return;
     }
@@ -1487,7 +1576,7 @@ void do_reply( CHAR_DATA *ch, char *argument )
     }
 
     if ( ( !IS_IMMORTAL(ch) && !IS_AWAKE(victim) )
-    || ( !IS_NPC(victim) && BV_IS_SET( victim->in_room->room_flags, ROOM_SILENCE ) ) )
+    || ( !IS_NPC(victim) && (!victim->in_room || BV_IS_SET( victim->in_room->room_flags, ROOM_SILENCE ) ) ) )
     {
     act( AT_PLAIN, "$E can't hear you.", ch, 0, victim, TO_CHAR );
 	return;
@@ -1501,14 +1590,14 @@ void do_reply( CHAR_DATA *ch, char *argument )
     if (victim->in_room == ch->in_room )
       sameroom = TRUE;
 
-    act( AT_TELL, "(&COutgoing Message&B)($l) $N: '$t'", ch, argument, victim, TO_CHAR );
+    act( AT_TELL, "(&COutgoing Message&B)($l) $N: '$t'", ch, arg_cstr, victim, TO_CHAR );
     position		= victim->position;
     victim->position	= POS_STANDING;
 
-    sbuf = argument;
+    sbuf = arg_cstr;
     if ( !knows_language(victim, ch->speaking, ch) &&
-       (!IS_NPC(ch) || ch->speaking != 0) )
-      sbuf = scramble(argument, ch->speaking);
+       (!IS_NPC(ch) || ch->speaking != LANG_UNKNOWN) )
+      sbuf = scramble(arg_cstr, ch->speaking);
     sbuf = drunk_speech( sbuf, ch );
 
     sbuflang = str_printf("(&CIncoming Message&B)(&C%s&B) $n: '$t'", lang_string(ch, victim ).c_str() );
@@ -1519,9 +1608,9 @@ void do_reply( CHAR_DATA *ch, char *argument )
     if ( BV_IS_SET( ch->in_room->room_flags, ROOM_LOGSPEECH ) )
     {
 	buf = str_printf("%s: %s (reply to) %s.",
-		 IS_NPC( ch ) ? ch->short_descr : ch->name,
-		 argument,
-		 IS_NPC( victim ) ? victim->short_descr : victim->name );
+		 IS_NPC( ch ) ? (ch->short_descr ? ch->short_descr : "") : (ch->name ? ch->name : ""),
+		 arg_cstr,
+		 IS_NPC( victim ) ? (victim->short_descr ? victim->short_descr : "") : (victim->name ? victim->name : "") );
 	append_to_file( LOG_FILE, buf );
     }
 
@@ -1533,15 +1622,15 @@ void do_reply( CHAR_DATA *ch, char *argument )
     {
 	if ( vch == ch )
 	  continue;
-	sbuf = argument;
+	sbuf = arg_cstr;
 	if ( !knows_language(vch, ch->speaking, ch) &&
-		 (!IS_NPC(ch) || ch->speaking != 0) )
-	 sbuf = scramble(argument, ch->speaking);
+		 (!IS_NPC(ch) || ch->speaking != LANG_UNKNOWN) )
+	 sbuf = scramble(arg_cstr, ch->speaking);
 	sbuf = drunk_speech( sbuf, ch );
 
 	MOBtrigger = FALSE;
 
-    if ( ( !IS_NPC(vch) && knows_language(vch, ch->speaking, ch ) ) && ( (!IS_NPC(ch) ) || ch->speaking != 0 ) )
+    if ( ( !IS_NPC(vch) && knows_language(vch, ch->speaking, ch ) ) && ( (!IS_NPC(ch) ) || ch->speaking != LANG_UNKNOWN ) )
     {
       sbuflang = str_printf( "$n says quietly into $s comlink in %s '$t'", lang_string(ch, vch ).c_str() );
       act( AT_TELL, sbuflang, ch, sbuf, vch, TO_VICT );
@@ -1569,7 +1658,9 @@ void do_retell( CHAR_DATA *ch, char *argument )
 	std::string buf;
 	std::string sbuf;
 	std::string sbuflang;
-	if( argument[0] == '\0' ) {
+	if ( !ch || !ch->in_room )
+		return;
+	if( !argument || argument[0] == '\0' ) {
 		send_to_char("Retell what?\n",ch );		
 		return;	
 	}
@@ -1582,7 +1673,8 @@ void do_retell( CHAR_DATA *ch, char *argument )
 		send_to_char("You've been forbidden to send tells.\n",ch);
 		return;	
 	}
-	if( ( victim = ch->retell ) == NULL )	{
+	if( ( victim = ch->retell ) == NULL || char_died( victim ) || !victim->in_room )	{
+		ch->retell = NULL;
 		send_to_char("They can't hear you.\n",ch);
 		return;	
 	}
@@ -1595,8 +1687,8 @@ void do_retell( CHAR_DATA *ch, char *argument )
 		send_to_char("They can't hear you.\n",ch);
 		return;	
 	}
-	if( (!IS_IMMORTAL(ch) && !IS_AWAKE( ch ) ) ||
-		(!IS_NPC(victim) && BV_IS_SET( victim->in_room->room_flags, ROOM_SILENCE ) ) )	{
+	if( (!IS_IMMORTAL(ch) && !IS_AWAKE( victim ) ) ||
+		(!IS_NPC(victim) && (!victim->in_room || BV_IS_SET( victim->in_room->room_flags, ROOM_SILENCE ) ) ) )	{
 		act( AT_PLAIN, "$E can't hear you.", ch, NULL, victim, TO_CHAR );
 		return;	
 	}
@@ -1610,7 +1702,7 @@ void do_retell( CHAR_DATA *ch, char *argument )
 
         sbuf = argument;
         if ( !knows_language(victim, ch->speaking, ch) &&
-           (!IS_NPC(ch) || ch->speaking != 0) )
+           (!IS_NPC(ch) || ch->speaking != LANG_UNKNOWN) )
           sbuf = scramble(argument, ch->speaking);
         sbuf = drunk_speech( sbuf, ch );
 
@@ -1620,22 +1712,28 @@ void do_retell( CHAR_DATA *ch, char *argument )
 	victim->position = position;	
 	victim->reply = ch;
 	if( BV_IS_SET( ch->in_room->room_flags, ROOM_LOGSPEECH ) )	{
-		buf = str_printf("%s: %s (retell to) %s", IS_NPC( ch ) ?ch->short_descr : ch->name, argument, IS_NPC( victim ) ? victim->short_descr : victim->name );
+		buf = str_printf("%s: %s (retell to) %s",
+			IS_NPC( ch ) ? (ch->short_descr ? ch->short_descr : "") : (ch->name ? ch->name : ""),
+			argument,
+			IS_NPC( victim ) ? (victim->short_descr ? victim->short_descr : "") : (victim->name ? victim->name : "") );
 		append_to_file( LOG_FILE, buf );	
 	}	
 	if(!IS_IMMORTAL( ch ) && !sameroom )	{
 		CHAR_DATA *vch;
 		for( vch = ch->in_room->first_person; vch != NULL; vch = vch->next_in_room )
 		{			
+			if ( vch == ch )
+				continue;
+
 			MOBtrigger = FALSE;
 
 		        sbuf = argument;
-		        if ( !knows_language(victim, ch->speaking, ch) &&
-		           (!IS_NPC(ch) || ch->speaking != 0) )
+		        if ( !knows_language(vch, ch->speaking, ch) &&
+		           (!IS_NPC(ch) || ch->speaking != LANG_UNKNOWN) )
 		          sbuf = scramble(argument, ch->speaking);
 		        sbuf = drunk_speech( sbuf, ch );
 
-		    if ( ( !IS_NPC(vch) && knows_language(vch, ch->speaking, ch ) ) && ( (!IS_NPC(ch) ) || ch->speaking != 0 ) )
+		    if ( ( !IS_NPC(vch) && knows_language(vch, ch->speaking, ch ) ) && ( (!IS_NPC(ch) ) || ch->speaking != LANG_UNKNOWN ) )
 		    {
 		      sbuflang = str_printf("$n says quietly into $s comlink in %s '$t'", lang_string(ch, vch ).c_str() );
 		      act( AT_TELL, sbuflang, ch, sbuf, vch, TO_VICT );
@@ -1658,13 +1756,16 @@ void do_emote( CHAR_DATA *ch, char *argument )
     char *plast;
     FLAG_SET actflags;
 
+    if ( !ch || !ch->in_room )
+        return;
+
     if ( !IS_NPC(ch) && BV_IS_SET(ch->act, PLR_NO_EMOTE) )
     {
 	send_to_char( "You can't show your emotions.\n", ch );
 	return;
     }
 
-    if ( argument[0] == '\0' )
+    if ( !argument || argument[0] == '\0' )
     {
 	send_to_char( "Emote what?\n", ch );
 	return;
@@ -1676,7 +1777,7 @@ void do_emote( CHAR_DATA *ch, char *argument )
 	;
 
     buf = argument;
-    if ( isalpha(plast[-1]) )
+    if ( plast > argument && isalpha( static_cast<unsigned char>( plast[-1] ) ) )
 	buf += ".";
 
     MOBtrigger = FALSE;
@@ -1684,10 +1785,10 @@ void do_emote( CHAR_DATA *ch, char *argument )
     MOBtrigger = FALSE;
     act( AT_ACTION, "$n $T", ch, NULL, buf, TO_CHAR );
     ch->act = actflags;
-    if (!ch || !ch->in_room) return;
     if ( BV_IS_SET( ch->in_room->room_flags, ROOM_LOGSPEECH ) )
     {
-	    buf = str_printf("%s %s (emote)", IS_NPC( ch ) ? ch->short_descr : ch->name,
+	    buf = str_printf("%s %s (emote)",
+		 IS_NPC( ch ) ? (ch->short_descr ? ch->short_descr : "") : (ch->name ? ch->name : ""),
 		 argument );
 	append_to_file( LOG_FILE, buf );
     }
@@ -1764,10 +1865,13 @@ void do_qui( CHAR_DATA *ch, char *argument )
 void do_quit( CHAR_DATA *ch, char *argument )
 {
 /*  OBJ_DATA *obj; */ /* Unused */
-    int x, y, cost;
+    int cost;
 //  int level;
     std::string qbuf;
     std::string buf;
+
+    if ( !ch )
+        return;
 
     if ( IS_NPC(ch) && BV_IS_SET(ch->act, ACT_POLYMORPHED))
     { 
@@ -1775,30 +1879,33 @@ void do_quit( CHAR_DATA *ch, char *argument )
       return;
     }
 
-    if ( IS_NPC(ch) )
+    if ( IS_NPC(ch) || !ch->pcdata )
 	return;
 
-    if ( ch->position == POS_FIGHTING )
+    const bool linkdead_quit = (ch->desc == NULL);
+
+    if ( !linkdead_quit && ch->position == POS_FIGHTING )
     {
 	set_char_color( AT_RED, ch );
 	send_to_char( "No way! You are fighting.\n", ch );
 	return;
     }
 
-    if ( ch->position  < POS_STUNNED  )
+    if ( !linkdead_quit && ch->position  < POS_STUNNED  )
     {
 	set_char_color( AT_BLOOD, ch );
 	send_to_char( "You're not DEAD yet.\n", ch );
 	return;
     }
 
-    if ( auction->item != NULL && ((ch == auction->buyer) || (ch == auction->seller) ) )
+    if ( !linkdead_quit && auction->item != NULL && ((ch == auction->buyer) || (ch == auction->seller) ) )
     {
 	send_to_char("Wait until you have bought/sold the item on auction.\n", ch);
 	return;
     }
-        if (!ch || !ch->in_room) return;
-    if ( !IS_IMMORTAL(ch) && ch->in_room && (!BV_IS_SET( ch->in_room->room_flags , ROOM_HOTEL ) && !BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) && !NOT_AUTHED(ch) )
+    if ( !linkdead_quit && !ch->in_room )
+        return;
+    if ( !linkdead_quit && !IS_IMMORTAL(ch) && ch->in_room && (!BV_IS_SET( ch->in_room->room_flags , ROOM_HOTEL ) && !BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) ) && !NOT_AUTHED(ch) )
     {
 	send_to_char("You may not quit here.\n", ch);
 	send_to_char("You will have to find a safer resting place such as a hotel...\n", ch);
@@ -1806,7 +1913,7 @@ void do_quit( CHAR_DATA *ch, char *argument )
 	return;
     }
     
-    if ( !IS_IMMORTAL(ch) && ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_HOTEL ) && !BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) && 
+    if ( !linkdead_quit && !IS_IMMORTAL(ch) && ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_HOTEL ) && !BV_IS_SET( ch->in_room->room_flags, ROOM_PLR_HOME ) && 
         !BV_IS_SET( ch->in_room->room_flags, ROOM_SPACECRAFT )&& !NOT_AUTHED(ch) )
     {
     	cost = get_cost_quit( ch );
@@ -1830,6 +1937,13 @@ void do_quit( CHAR_DATA *ch, char *argument )
             boost_economy( ch->in_room->area, cost );
         }
      }
+
+    if ( linkdead_quit )
+    {
+        if ( ch->fighting )
+            stop_fighting( ch, TRUE );
+        auction_cleanup_char_for_quit( ch );
+    }
     
     if ( ch->challenged )
     {
@@ -1841,7 +1955,8 @@ void do_quit( CHAR_DATA *ch, char *argument )
     set_char_color( AT_WHITE, ch );
     send_to_char( "Your surroundings begin to fade as a mystical swirling vortex of colors\nenvelops your body... When you come to, things are not as they were.\n\n", ch );
     act( AT_SAY, "A strange voice says, 'We await your return, $n...'", ch, NULL, NULL, TO_CHAR );
-    act( AT_BYE, "$n has left the game.", ch, NULL, NULL, TO_ROOM );
+    if ( ch->in_room )
+      act( AT_BYE, "$n has left the game.", ch, NULL, NULL, TO_ROOM );
     set_char_color( AT_GREY, ch);
 
     if (ch->in_room)
@@ -1854,7 +1969,8 @@ void do_quit( CHAR_DATA *ch, char *argument )
 
     if ( ch->pcdata->pet )
     {
-       act( AT_BYE, "$N follows $S master out of the game.", ch, NULL, 
+       if ( ch->in_room )
+         act( AT_BYE, "$N follows $S master out of the game.", ch, NULL, 
 		ch->pcdata->pet, TO_ROOM );
        extract_char( ch->pcdata->pet, TRUE );
     }
@@ -1866,9 +1982,6 @@ void do_quit( CHAR_DATA *ch, char *argument )
      * After extract_char the ch is no longer valid!
      */
     extract_char( ch, TRUE );
-    for ( x = 0; x < MAX_WEAR; x++ )
-	for ( y = 0; y < MAX_LAYERS; y++ )
-	    save_equipment[x][y] = NULL;
 
     return;
 }
@@ -1996,20 +2109,17 @@ void do_sound( CHAR_DATA *ch, char *argument )
 
 void do_save( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch || !ch->in_room )
+	return;
+
     if ( IS_NPC(ch) && BV_IS_SET(ch->act, ACT_POLYMORPHED))
     { 
       send_to_char("You can't save while polymorphed.\n", ch);
       return;
     }
 
-    if ( IS_NPC(ch) )
+    if ( IS_NPC(ch) || !ch->pcdata )
 	return;
-
-    ch->affected_by != race_table[ch->race].affected;
-//    if ( !BV_IS_SET( ch->affected_by, race_table[ch->race].affected ) )
-	    //BV_SET_BIT( ch->affected_by, race_table[ch->race].affected );
-    ch->resistant != race_table[ch->race].resist;
-    ch->susceptible != race_table[ch->race].suscept;
 
     if ( NOT_AUTHED(ch) )
     { 
@@ -2017,14 +2127,19 @@ void do_save( CHAR_DATA *ch, char *argument )
       return;
     }
 
-    save_char_obj( ch );
-    save_home (ch );
-    if (!ch || !ch->in_room) return;
-    if ( BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
-    	save_storeroom( ch->in_room );
-    
-    saving_char = NULL;
-    send_to_char( "Ok.\n", ch );
+    if ( ch->race >= 0 && ch->race < MAX_RACE )
+    {
+	ch->affected_by |= race_table[ch->race].affected;
+	ch->resistant |= race_table[ch->race].resist;
+	ch->susceptible |= race_table[ch->race].suscept;
+    }
+
+    const bool saved = save_char_obj( ch );
+    save_home( ch );
+    if ( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
+        save_storeroom( ch->in_room );
+
+    send_to_char( saved ? "Ok.\n" : "Unable to save your character.\n", ch );
     return;
 }
 
@@ -2049,7 +2164,10 @@ void do_dismiss( CHAR_DATA *ch, char *argument )
    std::string arg;
    CHAR_DATA *victim;
 
-    one_argument( argument, arg );     
+    if ( !ch || !ch->in_room )
+        return;
+
+    one_argument( argument ? argument : "", arg );     
 
     if ( arg.empty() )
     {
@@ -2087,7 +2205,10 @@ void do_follow( CHAR_DATA *ch, char *argument )
     std::string arg;
     CHAR_DATA *victim;
 
-    one_argument( argument, arg );
+    if ( !ch || !ch->in_room )
+        return;
+
+    one_argument( argument ? argument : "", arg );
 
     if ( arg[0] == '\0' )
     {
@@ -2135,6 +2256,9 @@ void do_follow( CHAR_DATA *ch, char *argument )
 
 void add_follower( CHAR_DATA *ch, CHAR_DATA *master )
 {
+    if ( !ch || !master )
+        return;
+
     if ( ch->master )
     {
         bug( "%s: non-null master.", __func__ );
@@ -2143,7 +2267,7 @@ void add_follower( CHAR_DATA *ch, CHAR_DATA *master )
 
     ch->master        = master;
     ch->leader        = NULL;
-    if ( IS_NPC(ch) && BV_IS_SET(ch->act, ACT_PET) && !IS_NPC(master) )
+    if ( IS_NPC(ch) && BV_IS_SET(ch->act, ACT_PET) && !IS_NPC(master) && master->pcdata )
 	master->pcdata->pet = ch;
 
     if ( can_see( master, ch ) )
@@ -2158,13 +2282,16 @@ void add_follower( CHAR_DATA *ch, CHAR_DATA *master )
 
 void stop_follower( CHAR_DATA *ch )
 {
+    if ( !ch )
+        return;
+
     if ( !ch->master )
     {
       bug( "%s: null master.", __func__ );
 	    return;
     }
 
-    if ( IS_NPC(ch) && !IS_NPC(ch->master) && ch->master->pcdata->pet == ch )
+    if ( IS_NPC(ch) && !IS_NPC(ch->master) && ch->master->pcdata && ch->master->pcdata->pet == ch )
 	ch->master->pcdata->pet = NULL;
 
     if ( IS_AFFECTED(ch, AFF_CHARM) )
@@ -2209,13 +2336,18 @@ void die_follower( CHAR_DATA *ch )
 void do_order( CHAR_DATA *ch, char *argument )
 {
     std::string arg;
-    std::string argumentstr = argument;
+    std::string argumentstr;
     CHAR_DATA *victim;
     CHAR_DATA *och;
-    CHAR_DATA *och_next;
+    ROOM_INDEX_DATA *room;
+    std::vector<CHAR_DATA *> targets;
     bool found;
     bool fAll;
 
+    if ( !ch || !ch->in_room )
+        return;
+
+    argumentstr = argument ? argument : "";
     argumentstr = one_argument( argumentstr, arg );
 
     if ( arg.empty() || argumentstr.empty() )
@@ -2264,23 +2396,38 @@ void do_order( CHAR_DATA *ch, char *argument )
     }
 
     found = FALSE;
-    if (!ch || !ch->in_room) return;
-    for ( och = ch->in_room->first_person; och; och = och_next )
+    room = ch->in_room;
+    for ( och = room->first_person; och; och = och->next_in_room )
     {
-	och_next = och->next_in_room;
+        if ( IS_AFFECTED( och, AFF_CHARM ) && och->master == ch && ( fAll || och == victim ) && !IS_IMMORTAL( och ) )
+            targets.push_back( och );
+    }
 
-      if( IS_AFFECTED( och, AFF_CHARM ) && och->master == ch && ( fAll || och == victim ) && !IS_IMMORTAL( och ) )
-	{
-	    found = TRUE;
-	    act( AT_ACTION, "$n orders you to '$t'.", ch, argumentstr, och, TO_VICT );
-        interpret(och, argumentstr);
-	}
+    for ( CHAR_DATA *target : targets )
+    {
+        if ( char_died( ch ) || ch->in_room != room )
+            return;
+        if ( char_died( target ) || target->in_room != room
+        ||   !IS_AFFECTED( target, AFF_CHARM ) || target->master != ch || IS_IMMORTAL( target ) )
+            continue;
+
+        found = TRUE;
+        act( AT_ACTION, "$n orders you to '$t'.", ch, argumentstr, target, TO_VICT );
+        if ( char_died( ch ) || ch->in_room != room )
+            return;
+        if ( char_died( target ) || target->in_room != room
+        ||   !IS_AFFECTED( target, AFF_CHARM ) || target->master != ch || IS_IMMORTAL( target ) )
+            continue;
+
+        interpret( target, argumentstr );
+        if ( char_died( ch ) )
+            return;
     }
 
     if ( found )
     {
         log_printf_plus( LOG_NORMAL, ch->top_level,
-                "%s: order %s.", ch->name, argumentstr.data() );
+                "%s: order %s.", ch->name ? ch->name : "(null)", argumentstr.c_str() );
  	    send_to_char( "Ok.\n", ch );
         WAIT_STATE( ch, 12 );
     }
@@ -2294,7 +2441,10 @@ void do_group( CHAR_DATA *ch, char *argument )
     std::string arg;
     CHAR_DATA *victim = NULL;
 
-    one_argument( argument, arg );
+    if ( !ch || !ch->in_room )
+        return;
+
+    one_argument( argument ? argument : "", arg );
 
     if ( arg.empty() )
     {
@@ -2311,12 +2461,14 @@ void do_group( CHAR_DATA *ch, char *argument )
 	{
 	    if ( is_same_group( gch, ch ) )
 	    {
+		const char *race_str = IS_NPC(gch) ? "Mob"
+		    : (gch->race >= 0 && gch->race < MAX_RACE ? race_table[gch->race].race_name : "Unknown");
 		set_char_color( AT_DGREEN, ch );
 		if (IS_AFFECTED(gch, AFF_POSSESS))
 		  ch_printf( ch,
 		    "[%2d %s] %-16s %4s/%4s hp %4s/%4s mv %5s xp\n",
 		    gch->top_level,
-		    IS_NPC(gch) ? "Mob" : race_table[gch->race].race_name,
+		    race_str,
 		    capitalize( PERS(gch, ch) ).c_str(),
 		    "????",   
 		    "????",
@@ -2328,7 +2480,7 @@ void do_group( CHAR_DATA *ch, char *argument )
 		  ch_printf( ch,
 		    "[%2d %s] %-16s %4d/%4d hp %4d/%4d mv\n",
 		    gch->top_level,
-		    IS_NPC(gch) ? "Mob" : race_table[gch->race].race_name,
+		    race_str,
 		    capitalize( PERS(gch, ch) ).c_str(),
 		    gch->hit,
 		    gch->max_hit,
@@ -2375,7 +2527,10 @@ void do_group( CHAR_DATA *ch, char *argument )
         CHAR_DATA *rch;
         int count = 0;
 
-            for ( rch = ch->in_room->first_person; rch; rch = rch->next_in_room )
+        if ( !ch->in_room )
+            return;
+
+        for ( rch = ch->in_room->first_person; rch; rch = rch->next_in_room )
             {
                 if ( ch != rch
                 &&   !IS_NPC( rch )
@@ -2449,7 +2604,10 @@ void do_split( CHAR_DATA *ch, char *argument )
     int share;
     int extra;
 
-    one_argument( argument, arg );
+    if ( !ch || !ch->in_room )
+        return;
+
+    one_argument( argument ? argument : "", arg );
 
     if ( arg.empty() )
     {
@@ -2531,7 +2689,10 @@ void do_gtell( CHAR_DATA *ch, char *argument )
 {
     CHAR_DATA *gch;
 
-    if ( argument[0] == '\0' )
+    if ( !ch )
+        return;
+
+    if ( !argument || argument[0] == '\0' )
     {
 	send_to_char( "Tell your group what?\n", ch );
 	return;
@@ -2554,10 +2715,10 @@ void do_gtell( CHAR_DATA *ch, char *argument )
 	    /* Groups unscrambled regardless of clan language.  Other languages
 		   still garble though. -- Altrag */
 	    if ( knows_language( gch, ch->speaking, gch )
-	    ||  (IS_NPC(ch) && !ch->speaking) )
-		    ch_printf( gch, "%s tells the group '%s'.\n", ch->name, argument );
+	    ||  (IS_NPC(ch) && ch->speaking == LANG_UNKNOWN) )
+		    ch_printf( gch, "%s tells the group '%s'.\n", ch->name ? ch->name : "", argument );
 	    else
-		    ch_printf( gch, "%s tells the group '%s'.\n", ch->name, scramble(argument, ch->speaking) );
+		    ch_printf( gch, "%s tells the group '%s'.\n", ch->name ? ch->name : "", scramble(argument, ch->speaking).c_str() );
 	}
     }
 
@@ -2573,6 +2734,8 @@ void do_gtell( CHAR_DATA *ch, char *argument )
  */
 bool is_same_group( CHAR_DATA *ach, CHAR_DATA *bch )
 {
+    if ( !ach || !bch )
+        return FALSE;
     if ( ach->leader ) ach = ach->leader;
     if ( bch->leader ) bch = bch->leader;
     return ach == bch;
@@ -2589,12 +2752,25 @@ void talk_auction (const std::string& argument)
     CHAR_DATA *original;
     std::string buf = argument;
 
+    std::vector<DESCRIPTOR_DATA *> targets;
     for (d = first_descriptor; d; d = d->next)
     {
-        original = d->original ? d->original : d->character; /* if switched */
-        if ((d->connected == CON_PLAYING) && BV_IS_SET(original->channels,CHANNEL_AUCTION) 
+        if (comm_desc_alive(d) && d->connected == CON_PLAYING)
+            targets.push_back(d);
+    }
+
+    for (DESCRIPTOR_DATA *td : targets)
+    {
+        if (!comm_desc_alive(td) || td->connected != CON_PLAYING)
+            continue;
+        original = td->original ? td->original : td->character; /* if switched */
+        if (original && !char_died(original) && original->in_room
+        && BV_IS_SET(original->channels,CHANNEL_AUCTION) 
         && !BV_IS_SET(original->in_room->room_flags, ROOM_SILENCE) && !NOT_AUTHED(original))
+        {
+            MOBtrigger = FALSE;
             act( AT_GOSSIP, buf, original, "", NULL, TO_CHAR );
+        }
     }
 }
 
@@ -2646,8 +2822,14 @@ bool knows_language(CHAR_DATA *ch, int language, CHAR_DATA *cch)
     // Clan language handling
     if (language == LANG_CLAN)
     {
-        if (IS_NPC(ch) || IS_NPC(cch))
+        if (IS_NPC(ch))
             return true;
+        if (!cch)
+            return false;
+        if (IS_NPC(cch))
+            return true;
+        if (!ch->pcdata || !cch->pcdata)
+            return false;
 
         return (ch->pcdata->clan &&
                 ch->pcdata->clan == cch->pcdata->clan);
@@ -2658,7 +2840,7 @@ bool knows_language(CHAR_DATA *ch, int language, CHAR_DATA *cch)
         return BV_IS_SET(ch->speaks, language);
 
     // PCs: racial language (single enum)
-    if (race_table[ch->race].language == language)
+    if (ch->race >= 0 && ch->race < MAX_RACE && race_table[ch->race].language == language)
         return true;
 
     // If player doesn't know the language at all
@@ -2668,7 +2850,7 @@ bool knows_language(CHAR_DATA *ch, int language, CHAR_DATA *cch)
     // Skill-based comprehension
         int sn = lang_sn[language];
 
-    if (sn != -1)
+    if (sn != -1 && ch->pcdata)
         return (number_percent() - 1 < ch->pcdata->learned[sn]);
 
     return false;
@@ -2688,7 +2870,7 @@ bool can_learn_lang(CHAR_DATA *ch, int language)
         return false;
 
     // Racial language cannot be learned
-    if (race_table[ch->race].language == language)
+    if (ch->race >= 0 && ch->race < MAX_RACE && race_table[ch->race].language == language)
         return false;
     if (language == LANG_DIVINE)
         return false;
@@ -2707,7 +2889,7 @@ bool can_learn_lang(CHAR_DATA *ch, int language)
             return false;
         }
 
-        if (ch->pcdata->learned[sn] >= 99)
+        if (!ch->pcdata || ch->pcdata->learned[sn] >= 99)
             return false;
     }
 
@@ -2822,135 +3004,136 @@ const struct flag_name channel_names[] =
     { CHANNEL_NEWS,       "news" },
     { CHANNEL_NEWBIEASST, "newbieasst" },
 
-    { CHANNEL_MAX,        NULL },
     { (size_t)-1, nullptr } // terminator    
 };
+
+static int resolve_language(const std::string &argument)
+{
+    int match = LANG_UNKNOWN;
+    for (const flag_name *entry = lang_names; entry->name; ++entry)
+    {
+        if (entry->bit >= LANG_MAX || str_prefix(argument, entry->name))
+            continue;
+        if (!str_cmp(argument, entry->name))
+            return entry->bit;
+        match = match == LANG_UNKNOWN ? static_cast<int>(entry->bit) : LANG_MAX;
+    }
+    return match;
+}
 
 void do_speak(CHAR_DATA *ch, char *argument)
 {
     std::string arg;
-    one_argument(argument, arg);
+    if (!ch)
+        return;
+    const std::string rest = one_argument(argument ? argument : "", arg);
+    if (!rest.empty())
+        arg += " " + rest;
+    set_char_color(AT_SAY, ch);
+    if (arg.empty())
+    {
+        send_to_char("Speak which language?\n", ch);
+        return;
+    }
 
-    // Immortal: speak all (keep behavior, though questionable now)
     if (!str_cmp(arg, "all") && IS_IMMORTAL(ch))
     {
-        set_char_color(AT_SAY, ch);
-        ch->speaking = LANG_DIVINE; // or whatever default you want
+        ch->speaking = LANG_DIVINE;
         send_to_char("Now speaking the divine language, understood by all.\n", ch);
         return;
     }
 
-    if (!str_prefix(arg, "clan"))
+    const int lang = resolve_language(arg);
+    if (lang == LANG_MAX)
     {
-        set_char_color(AT_SAY, ch);
+        send_to_char("Please specify which language you mean.\n", ch);
+        return;
+    }
+    if (lang == LANG_UNKNOWN)
+    {
+        send_to_char("You do not know that language.\n", ch);
+        return;
+    }
+    if (lang == LANG_CLAN)
+    {
         send_to_char("Clan language? There is no such thing.\n", ch);
         return;
     }
 
-    // --- Race restrictions (unchanged logic) ---
-    if (ch->race == RACE_WOOKIEE && str_prefix(arg, "shyriiwook"))
+    if (ch->race == RACE_WOOKIEE && lang != LANG_WOOKIEE)
     {
-        set_char_color(AT_SAY, ch);
         send_to_char("Your vocal cords refuse to make those sounds.\n", ch);
         return;
     }
 
-    if (ch->race == RACE_VERPINE && str_prefix(arg, "verpine"))
+    if (ch->race == RACE_VERPINE && lang != LANG_VERPINE)
     {
-        set_char_color(AT_SAY, ch);
         send_to_char("Your jaws cant pronounce that language.\n", ch);
         return;
     }
 
-    if (ch->race == RACE_GAMORREAN && str_prefix(arg, "gamorrese"))
+    if (ch->race == RACE_GAMORREAN && lang != LANG_GAMORREAN)
     {
-        set_char_color(AT_SAY, ch);
         send_to_char("You can barely speak your own language!\n", ch);
         return;
     }
 
-    if (!str_prefix(arg, "common") &&
+    if (lang == LANG_COMMON &&
         (ch->race == RACE_EWOK || ch->race == RACE_JAWA))
     {
-        set_char_color(AT_SAY, ch);
         send_to_char("You can not speak common, although you may be able to learn to understand it.\n", ch);
         return;
     }
 
-    if (!str_prefix(arg, "ryl") && ch->race != RACE_TWI_LEK)
+    if (lang == LANG_TWI_LEK && ch->race != RACE_TWI_LEK)
     {
-        set_char_color(AT_SAY, ch);
         send_to_char("To speak the Twi'lek language requires body parts that you don't have.\n", ch);
         return;
     }
 
-    if (!str_prefix(arg, "binary") && !is_droid(ch))
+    if (lang == LANG_BINARY && !is_droid(ch))
     {
-        set_char_color(AT_SAY, ch);
         send_to_char("Only droids are able to speak binary.\n", ch);
         return;
     }
 
-    if (!str_prefix(arg, "verpine") && ch->race != RACE_VERPINE)
+    if (lang == LANG_VERPINE && ch->race != RACE_VERPINE)
     {
-        set_char_color(AT_SAY, ch);
         send_to_char("You need certain bodyparts you do not have to speak verpine.\n", ch);
         return;
     }
 
-    if (!str_prefix(arg, "dosh") && ch->race != RACE_TRANDOSHAN)
+    if (lang == LANG_TRANDOSHAN && ch->race != RACE_TRANDOSHAN)
     {
-        set_char_color(AT_SAY, ch);
         send_to_char("Only a fellow reptile can speak the trandoshan language.\n", ch);
         return;
     }
 
-    if (!str_prefix(arg, "gamorrese") && ch->race != RACE_GAMORREAN)
+    if (lang == LANG_GAMORREAN && ch->race != RACE_GAMORREAN)
     {
-        set_char_color(AT_SAY, ch);
         send_to_char("The gamorrean language can only be spoken by the pigs themselves!\n", ch);
         return;
     }
 
-    if (!str_prefix(arg, "ithorese") && ch->race != RACE_ITHORIAN)
+    if (lang == LANG_ITHORIAN && ch->race != RACE_ITHORIAN)
     {
-        set_char_color(AT_SAY, ch);
         send_to_char("You can not replicate the sounds of the ithorian language.\n", ch);
         return;
     }
 
-    // --- New language selection logic ---
-    for (int lang = 0; lang < LANG_MAX; ++lang)
+    if (lang == LANG_DIVINE && !IS_IMMORTAL(ch))
     {
-        const std::string name = get_flag_name(lang_names, lang, LANG_MAX);
-        if (name.empty())
-            continue;
-
-        if (!str_prefix(arg, name))
-        {
-            if (!knows_language(ch, lang, ch))
-                break;
-
-            if (lang == LANG_CLAN &&
-                (IS_NPC(ch) || !ch->pcdata->clan))
-                break;
-
-            if (lang == LANG_DIVINE && !IS_IMMORTAL(ch))
-            {
-                set_char_color(AT_SAY, ch);
-                send_to_char("You cannot speak the divine tongue.\n", ch);
-                return;
-            }
-            ch->speaking = lang;
-
-            set_char_color(AT_SAY, ch);
-            ch_printf(ch, "You now speak %s.\n", name.c_str());
-            return;
-        }
+        send_to_char("You cannot speak the divine tongue.\n", ch);
+        return;
+    }
+    if (!knows_language(ch, lang, ch))
+    {
+        send_to_char("You do not know that language.\n", ch);
+        return;
     }
 
-    set_char_color(AT_SAY, ch);
-    send_to_char("You do not know that language.\n", ch);
+    ch->speaking = lang;
+    ch_printf(ch, "You now speak %s.\n", get_flag_name(lang_names, lang, LANG_MAX));
 }
 
 void do_languages(CHAR_DATA *ch, char *argument)
@@ -2959,16 +3142,21 @@ void do_languages(CHAR_DATA *ch, char *argument)
     int lang;
     int sn;
 
-    std::string argumentstr = one_argument(argument, arg);
+    if (!ch)
+        return;
+
+    std::string argumentstr = one_argument(argument ? argument : "", arg);
 
     if (!arg.empty() && !str_prefix(arg, "learn") &&
-        !IS_IMMORTAL(ch) && !IS_NPC(ch))
+        !IS_IMMORTAL(ch) && !IS_NPC(ch) && ch->pcdata)
     {
         CHAR_DATA *sch;
         std::string arg2;
         int prct;
 
         argumentstr = one_argument(argumentstr, arg2);
+        if (!argumentstr.empty())
+            arg2 += " " + argumentstr;
 
         if (arg2.empty())
         {
@@ -2976,20 +3164,14 @@ void do_languages(CHAR_DATA *ch, char *argument)
             return;
         }
 
-        // Find language
-        for (lang = 0; lang < LANG_MAX; ++lang)
+        lang = resolve_language(arg2);
+        if (lang == LANG_MAX)
         {
-            if (lang == LANG_CLAN)
-                continue;
-
-            if (!get_flag_name(lang_names, lang, LANG_MAX))
-                continue;
-
-            if (!str_prefix(arg2, get_flag_name(lang_names, lang, LANG_MAX)))
-                break;
+            send_to_char("Please specify which language you mean.\n", ch);
+            return;
         }
 
-        if (lang >= LANG_MAX)
+        if (lang == LANG_UNKNOWN || lang == LANG_CLAN)
         {
             send_to_char("That is not a language.\n", ch);
             return;
@@ -3016,7 +3198,7 @@ void do_languages(CHAR_DATA *ch, char *argument)
         }
 
         // Already fluent?
-        if (race_table[ch->race].language == lang ||
+        if ((ch->race >= 0 && ch->race < MAX_RACE && race_table[ch->race].language == lang) ||
             ch->pcdata->learned[sn] >= 99)
         {
             act(AT_PLAIN, "You are already fluent in $t.",
@@ -3024,13 +3206,19 @@ void do_languages(CHAR_DATA *ch, char *argument)
             return;
         }
 
+        if (!ch->in_room)
+        {
+            send_to_char("There is no one who can teach that language here.\n", ch);
+            return;
+        }
+
         // Find a teacher
-        for (sch = ch->in_room->first_person; sch; sch = sch->next)
+        for (sch = ch->in_room->first_person; sch; sch = sch->next_in_room)
         {
             if (IS_NPC(sch) && BV_IS_SET(sch->act, ACT_SCHOLAR) &&
                 knows_language(sch, ch->speaking, ch) &&
                 knows_language(sch, lang, sch) &&
-                (!sch->speaking || knows_language(ch, sch->speaking, sch)))
+                (sch->speaking == LANG_UNKNOWN || knows_language(ch, sch->speaking, sch)))
                 break;
         }
 
@@ -3076,17 +3264,17 @@ void do_languages(CHAR_DATA *ch, char *argument)
         if (!VALID_LANG(lang))
             continue;
 
-        if (!get_flag_name(lang_names, lang, LANG_MAX))
+        if (strcmp(get_flag_name(lang_names, lang, LANG_MAX), "none") == 0)
             continue;
 
-        if (ch->speaking == lang || (IS_NPC(ch) && ch->speaking == 0))
+        if (ch->speaking == lang || (IS_NPC(ch) && ch->speaking == LANG_UNKNOWN))
             set_char_color(AT_RED, ch);
         else
             set_char_color(AT_SAY, ch);
 
         sn = lang_sn[lang];
 
-        if (sn < 0)
+        if (sn < 0 || IS_NPC(ch) || !ch->pcdata)
             send_to_char("(  0) ", ch);
         else
             ch_printf(ch, "(%3d) ", ch->pcdata->learned[sn]);
@@ -3101,41 +3289,15 @@ void do_languages(CHAR_DATA *ch, char *argument)
 
 void do_vulgar( CHAR_DATA *ch, char *argument )
 {
+    if ( !ch )
+        return;
+
     if (NOT_AUTHED(ch))
     {
       send_to_char("Huh?\n", ch);
       return;
     }
-    talk_channel( ch, argument, CHANNEL_VULGAR, "war" );
-    return;
-}
-
-void do_ahelp( CHAR_DATA *ch, char *argument )
-{
-    set_char_color( AT_PLAIN, ch );
-    if ( argument[0] == '\0' )
-    {
-        send_to_char( "\nUsage:  'ahelp list' or 'ahelp clear now'\n", ch);
-        return;
-    }
-    if ( !str_cmp( argument, "clear now" ) )
-    {
-        FILE *fp = fopen( HELP_FILE, "w" );
-        if ( fp )
-          FCLOSE( fp );
-        send_to_char( "Add Help file cleared.\n", ch);
-        return;
-    }
-    if ( !str_cmp( argument, "list" ) )
-    {
-	  send_to_char( "\n VNUM \n.......\n", ch );
-        show_file( ch, HELP_FILE );
-    }
-    else
-    {
-        send_to_char( "\nUsage:  'ahelp list' or 'ahelp clear now'\n", ch);
-        return;
-    }
+    talk_channel( ch, argument ? argument : "", CHANNEL_VULGAR, "war" );
     return;
 }
 

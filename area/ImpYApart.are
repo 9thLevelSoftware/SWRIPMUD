@@ -46,7 +46,7 @@ A food dispensor sits in the corner here.
 0 0 0 0 0 0 0 0
 > speech_prog food ration hungry~
 emote beeps as it processes the request.
-mpoload 24609
+mpoload 10313
 give ration $n
 drop ration 
 Say Enjoy.

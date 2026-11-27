@@ -19,17 +19,22 @@
 ****************************************************************************/
 
 #include <sys/types.h>
+#include <errno.h>
 #include <ctype.h>
+#include <limits>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include "mud.h"
 
 /* Defines for voting on notes. -- Narn */
 #define VOTE_NONE 0
 #define VOTE_OPEN 1
 #define VOTE_CLOSED 2
+
+static const int DEFAULT_BOARD_MAX_POSTS = 50;
 
 BOARD_DATA *		first_board;
 BOARD_DATA *		last_board;
@@ -39,18 +44,22 @@ void	note_attach	args( ( CHAR_DATA *ch ) );
 void	note_remove	args( ( CHAR_DATA *ch, BOARD_DATA *board,
 				NOTE_DATA *pnote ) );
 void  	do_note		args( ( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL) );
+bool check_parse_name( const std::string& name );
 
 
 
 bool can_remove( CHAR_DATA *ch, BOARD_DATA *board )
 {
+  if ( !ch || !board )
+    return FALSE;
+
   /* If your trust is high enough, you can remove it. */
   if ( get_trust( ch ) >= board->min_remove_level )
     return TRUE;
   
-  if ( board->extra_removers[0] != '\0' )
+  if ( board->extra_removers && board->extra_removers[0] != '\0' )
   {
-    if ( is_name( ch->name, board->extra_removers ) )
+    if ( ch->name && is_name( ch->name, board->extra_removers ) )
       return TRUE;
   }
   return FALSE;
@@ -58,23 +67,26 @@ bool can_remove( CHAR_DATA *ch, BOARD_DATA *board )
  
 bool can_read( CHAR_DATA *ch, BOARD_DATA *board )
 {
+  if ( !ch || !board || IS_NPC( ch ) || !ch->pcdata )
+    return FALSE;
+
   /* If your trust is high enough, you can read it. */
   if ( get_trust( ch ) >= board->min_read_level )
     return TRUE;
 
   /* Your trust wasn't high enough, so check if a read_group or extra
      readers have been set up. */
-  if ( board->read_group[0] != '\0' )
+  if ( board->read_group && board->read_group[0] != '\0' )
   {
-    if ( ch->pcdata->clan && !str_cmp( ch->pcdata->clan->name, board->read_group ) ) 
+    if ( ch->pcdata->clan && ch->pcdata->clan->name && !str_cmp( ch->pcdata->clan->name, board->read_group ) )
       return TRUE; 
-    if ( ch->pcdata->clan && ch->pcdata->clan->mainclan && !str_cmp( ch->pcdata->clan->mainclan->name, board->read_group ) ) 
+    if ( ch->pcdata->clan && ch->pcdata->clan->mainclan && ch->pcdata->clan->mainclan->name && !str_cmp( ch->pcdata->clan->mainclan->name, board->read_group ) )
       return TRUE; 
     
   }
-  if ( board->extra_readers[0] != '\0' )
+  if ( board->extra_readers && board->extra_readers[0] != '\0' )
   {
-    if ( is_name( ch->name, board->extra_readers ) )
+    if ( ch->name && is_name( ch->name, board->extra_readers ) )
       return TRUE;
   } 
   return FALSE;
@@ -82,16 +94,19 @@ bool can_read( CHAR_DATA *ch, BOARD_DATA *board )
 
 bool can_post( CHAR_DATA *ch, BOARD_DATA *board )
 {
+  if ( !ch || !board || IS_NPC( ch ) || !ch->pcdata )
+    return FALSE;
+
   /* If your trust is high enough, you can post. */
   if ( get_trust( ch ) >= board->min_post_level )
     return TRUE;
 
   /* Your trust wasn't high enough, so check if a post_group has been set up. */
-  if ( board->post_group[0] != '\0' )
+  if ( board->post_group && board->post_group[0] != '\0' )
   {
-    if ( ch->pcdata->clan && !str_cmp( ch->pcdata->clan->name, board->post_group ) ) 
+    if ( ch->pcdata->clan && ch->pcdata->clan->name && !str_cmp( ch->pcdata->clan->name, board->post_group ) )
       return TRUE; 
-    if ( ch->pcdata->clan && ch->pcdata->clan->mainclan && !str_cmp( ch->pcdata->clan->mainclan->name, board->post_group ) ) 
+    if ( ch->pcdata->clan && ch->pcdata->clan->mainclan && ch->pcdata->clan->mainclan->name && !str_cmp( ch->pcdata->clan->mainclan->name, board->post_group ) )
       return TRUE; 
   }
   return FALSE;
@@ -101,42 +116,98 @@ bool can_post( CHAR_DATA *ch, BOARD_DATA *board )
 /*
  * board commands.
  */
-void write_boards_txt( )
+static BOARD_DATA *find_board_by_filename( const std::string &filename )
 {
-    BOARD_DATA *tboard;
-    FILE *fpout;
-    char filename[256];
+    for ( BOARD_DATA *board = first_board; board; board = board->next )
+        if ( !str_cmp( filename, board->note_file ) )
+            return board;
+    return NULL;
+}
 
-    SPRINTF( filename, "%s%s", BOARD_DIR, BOARD_FILE );
-    fpout = fopen( filename, "w" );
-    if ( !fpout )
-    {
-      	bug( "%s: FATAL: cannot open board.txt for writing!\n", __func__ );
- 		return;
-    }	  
-    for ( tboard = first_board; tboard; tboard = tboard->next )
-    {
-	fprintf( fpout, "Filename          %s~\n", tboard->note_file	    );
-	fprintf( fpout, "Vnum              %d\n",  tboard->board_obj	    );
-	fprintf( fpout, "Min_read_level    %d\n",  tboard->min_read_level   );
-	fprintf( fpout, "Min_post_level    %d\n",  tboard->min_post_level   );
-	fprintf( fpout, "Min_remove_level  %d\n",  tboard->min_remove_level );
-	fprintf( fpout, "Max_posts         %d\n",  tboard->max_posts	    );
-       	fprintf( fpout, "Type 	           %d\n",  tboard->type		    ); 
-	fprintf( fpout, "Read_group        %s~\n", tboard->read_group       );
-	fprintf( fpout, "Post_group        %s~\n", tboard->post_group       );
-	fprintf( fpout, "Extra_readers     %s~\n", tboard->extra_readers    );
-        fprintf( fpout, "Extra_removers    %s~\n", tboard->extra_removers    );
+static bool valid_board_filename( const std::string &filename )
+{
+    return filename.size() >= 3 && filename.size() < 256 - sizeof(BOARD_DIR)
+        && filename.front() != '.' && filename.back() != '.'
+        && str_cmp( filename, BOARD_FILE ) && filename.find( ".." ) == std::string::npos
+        && filename.find_first_not_of( "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" ) == std::string::npos;
+}
 
-	fprintf( fpout, "End\n" );
+static bool new_board_filename( CHAR_DATA *ch, const std::string &filename )
+{
+    if ( !valid_board_filename( filename ) )
+    {
+        send_to_char( "Enter a board filename using letters, digits, dots, hyphens or underscores.\n", ch );
+        return false;
     }
-    FCLOSE( fpout );
+    if ( find_board_by_filename( filename ) )
+    {
+        send_to_char( "A board already uses that filename.\n", ch );
+        return false;
+    }
+    return is_valid_filename( ch, BOARD_DIR, filename );
+}
+
+template <typename Write>
+static bool write_board_file( const std::string &filename, Write write )
+{
+    std::string temporary = filename + ".tmp.XXXXXX";
+    const int fd = mkstemp( temporary.data() );
+    if ( fd < 0 )
+    {
+        perror( filename.c_str() );
+        return false;
+    }
+
+    FILE *fp = fdopen( fd, "w" );
+    if ( !fp )
+    {
+        perror( filename.c_str() );
+        close( fd );
+        unlink( temporary.c_str() );
+        return false;
+    }
+
+    write( fp );
+    const bool written = !ferror( fp ) && fflush( fp ) == 0 && fsync( fd ) == 0;
+    const bool closed = fclose( fp ) == 0;
+    if ( written && closed && rename( temporary.c_str(), filename.c_str() ) == 0 )
+        return true;
+
+    perror( filename.c_str() );
+    unlink( temporary.c_str() );
+    return false;
+}
+
+static bool write_boards_txt( const BOARD_DATA *original = NULL, const BOARD_DATA *replacement = NULL )
+{
+    return write_board_file( BOARD_DIR BOARD_FILE, [&]( FILE *fpout ) {
+        for ( const BOARD_DATA *entry = first_board; entry; entry = entry->next )
+        {
+            const BOARD_DATA *board = entry == original ? replacement : entry;
+            fprintf( fpout, "Filename          %s~\n", board->note_file );
+            fprintf( fpout, "Vnum              %d\n",  board->board_obj );
+            fprintf( fpout, "Min_read_level    %d\n",  board->min_read_level );
+            fprintf( fpout, "Min_post_level    %d\n",  board->min_post_level );
+            fprintf( fpout, "Min_remove_level  %d\n",  board->min_remove_level );
+            fprintf( fpout, "Max_posts         %d\n",  board->max_posts );
+            fprintf( fpout, "Type              %d\n",  board->type );
+            fprintf( fpout, "Read_group        %s~\n", board->read_group );
+            fprintf( fpout, "Post_group        %s~\n", board->post_group );
+            fprintf( fpout, "Extra_readers     %s~\n", board->extra_readers );
+            fprintf( fpout, "Extra_removers    %s~\n", board->extra_removers );
+            fprintf( fpout, "End\n" );
+        }
+        fprintf( fpout, "$\n" );
+    } );
 }
 
 BOARD_DATA *get_board( OBJ_DATA *obj )
 {
     BOARD_DATA *board;
-    
+
+    if ( !obj || !obj->pIndexData )
+      return NULL;
+
     for ( board = first_board; board; board = board->next )
        if ( board->board_obj == obj->pIndexData->vnum )
          return board;
@@ -147,6 +218,9 @@ BOARD_DATA *find_board( CHAR_DATA *ch )
 {
     OBJ_DATA *obj;
     BOARD_DATA  *board;
+
+    if ( !ch || !ch->in_room )
+      return NULL;
 
     for ( obj = ch->in_room->first_content;
 	  obj;
@@ -162,6 +236,9 @@ BOARD_DATA *find_board( CHAR_DATA *ch )
 
 bool is_note_to( CHAR_DATA *ch, NOTE_DATA *pnote )
 {
+    if ( !ch || !pnote )
+	return FALSE;
+
     if ( !str_cmp( ch->name, pnote->sender ) )
 	return TRUE;
 
@@ -183,7 +260,7 @@ void note_attach( CHAR_DATA *ch )
 {
     NOTE_DATA *pnote;
 
-    if ( IS_NPC( ch ) )
+    if ( !ch || IS_NPC( ch ) || !ch->pcdata )
         return;
 
     if ( ch->pcdata->pnote )
@@ -201,24 +278,10 @@ void note_attach( CHAR_DATA *ch )
     return;
 }
 
-void write_board( BOARD_DATA *board )
+static bool write_board( const BOARD_DATA *board )
 {
-    FILE *fp;
-    char filename[256];
-    NOTE_DATA *pnote;
-
-    /*
-     * Rewrite entire list.
-     */
-    FCLOSE( fpReserve );
-    SPRINTF( filename, "%s%s", BOARD_DIR, board->note_file );
-    if ( ( fp = fopen( filename, "w" ) ) == NULL )
-    {
-	perror( filename );
-    }
-    else
-    {
-	for ( pnote = board->first_note; pnote; pnote = pnote->next )
+    return write_board_file( std::string( BOARD_DIR ) + board->note_file, [&]( FILE *fp ) {
+	for ( const NOTE_DATA *pnote = board->first_note; pnote; pnote = pnote->next )
 	{
 	    fprintf( fp, "Sender  %s~\nDate    %s~\nTo      %s~\nSubject %s~\nVoting %d\nYesvotes %s~\nNovotes %s~\nAbstentions %s~\nText\n%s~\n\n",
 		pnote->sender,
@@ -232,20 +295,17 @@ void write_board( BOARD_DATA *board )
 		pnote->text
 		);
 	}
-	FCLOSE( fp );
-    }
-    fpReserve = fopen( NULL_FILE, "r" );
-    return;
+    } );
 }
 
 
 void free_note( NOTE_DATA *pnote )
 {
-    STRFREE( pnote->text    );
-    STRFREE( pnote->subject );
-    STRFREE( pnote->to_list );
-    STRFREE( pnote->date    );
-    STRFREE( pnote->sender  );
+    if ( pnote->text )    STRFREE( pnote->text );
+    if ( pnote->subject ) STRFREE( pnote->subject );
+    if ( pnote->to_list ) STRFREE( pnote->to_list );
+    if ( pnote->date )    STRFREE( pnote->date );
+    if ( pnote->sender )  STRFREE( pnote->sender );
     if ( pnote->yesvotes )
 	STR_DISPOSE( pnote->yesvotes );
     if ( pnote->novotes )
@@ -297,8 +357,9 @@ void do_noteroom( CHAR_DATA *ch, char *argument )
     BOARD_DATA *board;
     std::string arg;
     char arg_passed[MAX_STRING_LENGTH];
+    const char *safe_arg = argument ? argument : "";
 
-    SPRINTF(arg_passed, "%s", argument);
+    SPRINTF(arg_passed, "%s", safe_arg);
 
     switch( ch->substate )
     {
@@ -308,7 +369,7 @@ void do_noteroom( CHAR_DATA *ch, char *argument )
 
 	default:
 
-    one_argument(argument, arg);  
+    one_argument(safe_arg, arg);
     smash_tilde( arg_passed );
     if (!str_cmp(arg, "write") || !str_cmp(arg, "to") 
     ||  !str_cmp(arg, "subject") || !str_cmp(arg, "show"))        
@@ -342,8 +403,9 @@ void do_mailroom(CHAR_DATA *ch, char *argument)
     BOARD_DATA *board;
     std::string arg;
     char arg_passed[MAX_STRING_LENGTH];
+    const char *safe_arg = argument ? argument : "";
 
-    SPRINTF(arg_passed, "%s", argument);
+    SPRINTF(arg_passed, "%s", safe_arg);
 
     switch( ch->substate )
     {
@@ -353,7 +415,7 @@ void do_mailroom(CHAR_DATA *ch, char *argument)
 
 	default:
 
-    one_argument(argument, arg);  
+    one_argument(safe_arg, arg);
   smash_tilde( arg_passed );
     if (!str_cmp(arg, "write") || !str_cmp(arg, "to") 
     ||  !str_cmp(arg, "subject") || !str_cmp(arg, "show"))        
@@ -397,10 +459,10 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
     bool mfound = FALSE;
     bool wasfound = FALSE;
 
-    if ( IS_NPC(ch) )
+    if ( !ch || IS_NPC(ch) || !ch->pcdata )
 	return;
 
-    if ( !ch->desc )
+    if ( !ch->desc || ch->desc->closing || ch->desc->write_failed )
     {
       	bug( "%s: no descriptor", __func__ );
 		return;
@@ -418,8 +480,29 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 	     stop_editing( ch );
 	     return;
       }
-	  ed = (EXTRA_DESCR_DATA *) ch->dest_buf;
-	  STRFREE( ed->description );
+	  if ( !ch->dest_buf )
+	  {
+	     bug( "%s: NULL ch->dest_buf", __func__ );
+	     stop_editing( ch );
+	     return;
+	  }
+	  ed = NULL;
+	  for ( EXTRA_DESCR_DATA *ped = paper->first_extradesc; ped; ped = ped->next )
+	  {
+	     if ( ped == ch->dest_buf )
+	     {
+	        ed = ped;
+	        break;
+	     }
+	  }
+	  if ( !ed )
+	  {
+	     bug( "%s: ch->dest_buf does not match held paper", __func__ );
+	     stop_editing( ch );
+	     return;
+	  }
+	  if ( ed->description )
+	     STRFREE( ed->description );
 	  ed->description = copy_buffer( ch );
 	  stop_editing( ch );	   
 	  return;
@@ -633,6 +716,14 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
             return;
 	}
 
+        if ( str_cmp( argstr, "open" ) && str_cmp( argstr, "close" )
+          && str_cmp( argstr, "yes" ) && str_cmp( argstr, "no" ) && str_cmp( argstr, "abstain" ) )
+        {
+            ch_printf( ch, "Usage: %s vote <number> <open|close|yes|no|abstain>\n",
+                       IS_MAIL ? "mail" : "note" );
+            return;
+        }
+
 	vnum = 1;
 	for ( pnote = board->first_note; pnote && vnum < anum; pnote = pnote->next )
 	    vnum++;
@@ -718,7 +809,7 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 	    write_board( board );
 	    return;
 	}  
-	do_note( ch, "", FALSE );
+        return;
     }
     if ( !str_cmp( arg, "write" ) )
     {
@@ -749,7 +840,14 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 		send_to_char("You need to be holding a message disk to write a note.\n", ch);
 		return;
 	    }
-	    paper = create_object( get_obj_index(OBJ_VNUM_NOTE), 0 );
+	    OBJ_INDEX_DATA *note_idx = get_obj_index(OBJ_VNUM_NOTE);
+	    if ( !note_idx )
+	    {
+		bug( "%s: missing OBJ_VNUM_NOTE (%d)", __func__, OBJ_VNUM_NOTE );
+		send_to_char( "Note disks are currently unavailable.\n", ch );
+		return;
+	    }
+	    paper = create_object( note_idx, 0 );
 	    if ((tmpobj = get_eq_char(ch, WEAR_HOLD)) != NULL)
 	      unequip_char(ch, tmpobj); 
 	    paper = obj_to_char(paper, ch);
@@ -806,7 +904,14 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 		send_to_char("You need to be holding a message disk to record a note.\n", ch);
 		return;
 	    }
-	    paper = create_object( get_obj_index(OBJ_VNUM_NOTE), 0 );
+	    OBJ_INDEX_DATA *note_idx = get_obj_index(OBJ_VNUM_NOTE);
+	    if ( !note_idx )
+	    {
+		bug( "%s: missing OBJ_VNUM_NOTE (%d)", __func__, OBJ_VNUM_NOTE );
+		send_to_char( "Note disks are currently unavailable.\n", ch );
+		return;
+	    }
+	    paper = create_object( note_idx, 0 );
     	    if ((tmpobj = get_eq_char(ch, WEAR_HOLD)) != NULL)
 		unequip_char(ch, tmpobj); 
 	    paper = obj_to_char(paper, ch);
@@ -834,8 +939,6 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 
     if ( !str_cmp( arg, "to" ) )
     {
-	struct stat fst;
-	char fname[1024];
 	if(get_trust(ch) < ch->game->get_sysdata()->write_mail_free )
 	{
 	    quill = find_quill( ch );
@@ -855,6 +958,23 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 	    send_to_char("Please specify an addressee.\n", ch);
 	    return;
 	}
+	if ( IS_MAIL && str_cmp( argstr, "all" ) )
+	{
+	    if ( argstr.find_first_not_of( "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" ) != std::string::npos
+	         || !check_parse_name( argstr ) )
+	    {
+		send_to_char( "No player exists by that name.\n", ch );
+		return;
+	    }
+	    const std::string filename = std::string( PLAYER_DIR ) + static_cast<char>( LOWER(argstr[0]) )
+	        + "/" + capitalize( argstr );
+	    struct stat recipient;
+	    if ( stat( filename.c_str(), &recipient ) != 0 || !S_ISREG( recipient.st_mode ) )
+	    {
+		send_to_char( "No player exists by that name.\n", ch );
+		return;
+	    }
+	}
 	if ( ( paper = get_eq_char(ch, WEAR_HOLD) ) == NULL
 	||     paper->item_type != ITEM_PAPER )
 	{
@@ -863,7 +983,14 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 		send_to_char("You need to be holding a message disk to record a note.\n", ch);
 		return;
 	    }
-	    paper = create_object( get_obj_index(OBJ_VNUM_NOTE), 0 );
+	    OBJ_INDEX_DATA *note_idx = get_obj_index(OBJ_VNUM_NOTE);
+	    if ( !note_idx )
+	    {
+		bug( "%s: missing OBJ_VNUM_NOTE (%d)", __func__, OBJ_VNUM_NOTE );
+		send_to_char( "Note disks are currently unavailable.\n", ch );
+		return;
+	    }
+	    paper = create_object( note_idx, 0 );
     	    if ((tmpobj = get_eq_char(ch, WEAR_HOLD)) != NULL)
 		unequip_char(ch, tmpobj);
 	    paper = obj_to_char(paper, ch);
@@ -880,26 +1007,13 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 	    return;
 	}
 
-        argstr[0] = UPPER(argstr[0]);
-
-        SPRINTF( fname, "%s%c/%s", PLAYER_DIR, tolower(argstr[0]),
-                 capitalize( argstr ).c_str() );
- 
-	if ( !IS_MAIL || stat( fname, &fst ) != -1 || !str_cmp(argstr, "all") )
-	{                                       
-	    paper->value[2] = 1;
-	    ed = SetOExtra(paper, "_to_");
-	    STRFREE( ed->description );
-	    ed->description = STRALLOC( argstr );
-	    send_to_char("Ok.\n",ch);
-	    return;
-        }
-	else
-	{
-	    send_to_char("No player exists by that name.\n",ch);
-	    return;
-	}
-
+	argstr[0] = UPPER(argstr[0]);
+	paper->value[2] = 1;
+	ed = SetOExtra( paper, "_to_" );
+	STRFREE( ed->description );
+	ed->description = STRALLOC( argstr );
+	send_to_char( "Ok.\n", ch );
+	return;
     }
 
     if ( !str_cmp( arg, "show" ) )
@@ -989,8 +1103,6 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 			return;
 		}
 
-		act( AT_ACTION, "$n uploads a message.", ch, NULL, NULL, TO_ROOM );
-
 		strtime				= ctime( &current_time );
 		strtime[strlen(strtime)-1]	= '\0';
 		CREATE( pnote, NOTE_DATA, 1 );
@@ -1010,7 +1122,15 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 
 		LINK( pnote, board->first_note, board->last_note, next, prev );
 		board->num_posts++;
-			write_board( board );
+		if ( !write_board( board ) )
+		{
+		    UNLINK( pnote, board->first_note, board->last_note, next, prev );
+		    --board->num_posts;
+		    free_note( pnote );
+		    send_to_char( "Could not save your message.\n", ch );
+		    return;
+		}
+		act( AT_ACTION, "$n uploads a message.", ch, NULL, NULL, TO_ROOM );
 		send_to_char( "You upload your message to the terminal.\n", ch );
 		extract_obj( paper );
 		return;
@@ -1077,6 +1197,13 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 
  		if ( take != 0 )
 		{
+		    OBJ_INDEX_DATA *note_idx = get_obj_index(OBJ_VNUM_NOTE);
+		    if ( !note_idx )
+		    {
+			bug( "%s: missing OBJ_VNUM_NOTE (%d)", __func__, OBJ_VNUM_NOTE );
+			send_to_char( "Note disks are currently unavailable.\n", ch );
+			return;
+		    }
 		    if ( ch->gold < 50 && get_trust(ch) < ch->game->get_sysdata()->read_mail_free )
 		    {
 			if ( take == 1 )
@@ -1087,7 +1214,7 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 		    }
 		    if ( get_trust(ch) < ch->game->get_sysdata()->read_mail_free )
 		      ch->gold -= 50;
-		    paper = create_object( get_obj_index(OBJ_VNUM_NOTE), 0 );
+		    paper = create_object( note_idx, 0 );
 		    ed = SetOExtra( paper, "_sender_" );
 		    STRFREE( ed->description );
 		    ed->description = QUICKLINK(pnote->sender);
@@ -1160,120 +1287,112 @@ void do_note( CHAR_DATA *ch, const std::string& arg_passed, bool IS_MAIL )
 
 
 
-BOARD_DATA *read_board( GameContext *game, const std::string& boardfile, FILE *fp )
+static int peek_board_char( FILE *fp )
 {
-    BOARD_DATA *board;
-    const char *word;
-    std::string buf;
-    bool fMatch;
-    char letter;
-
-	do
-	{
-	    letter = getc( fp );
-	    if ( feof(fp) )
-	    {
-		FCLOSE( fp );
-		return NULL;
-	    }
-	}
-	while ( isspace(letter) );
-	ungetc( letter, fp );
-
-	CREATE( board, BOARD_DATA, 1 );
-	board->game = game;
-#ifdef KEY
-#undef KEY
-#endif
-#define KEY( literal, field, value )					\
-				if ( !str_cmp( word, literal ) )	\
-				{					\
-				    field  = value;			\
-				    fMatch = TRUE;			\
-				    break;				\
-				}
-
-
-    for ( ; ; )
+    int letter;
+    do
     {
-	word   = feof( fp ) ? "End" : fread_word( fp );
-	fMatch = FALSE;
-
-	switch ( UPPER(word[0]) )
-	{
-	case '*':
-	    fMatch = TRUE;
-	    fread_to_eol( fp );
-	    break;
-	case 'E':
-	    KEY( "Extra_readers",	board->extra_readers,	fread_string_nohash( fp ) );
-            KEY( "Extra_removers",       board->extra_removers,   fread_string_nohash( fp ) );
-            if ( !str_cmp( word, "End" ) )  
-            {
- 	      board->num_posts	= 0;
-	      board->first_note	= NULL;
-	      board->last_note	= NULL;
-	      board->next	= NULL;
-	      board->prev	= NULL;
-              if ( !board->read_group )
-                board->read_group    = str_dup( "" );
-              if ( !board->post_group )
-                board->post_group    = str_dup( "" );
-              if ( !board->extra_readers )
-                board->extra_readers = str_dup( "" );
-              if ( !board->extra_removers )
-                board->extra_removers = str_dup( "" );
-              return board;
-            }
-	case 'F':
-	    KEY( "Filename",	board->note_file,	fread_string_nohash( fp ) );
-	case 'M':
-	    KEY( "Min_read_level",	board->min_read_level,	fread_number( fp ) );
-	    KEY( "Min_post_level",	board->min_post_level,	fread_number( fp ) );
-	    KEY( "Min_remove_level",	board->min_remove_level,fread_number( fp ) );
-	    KEY( "Max_posts",		board->max_posts,	fread_number( fp ) );
-	case 'P':
-	    KEY( "Post_group",	board->post_group,	fread_string_nohash( fp ) );
-	case 'R':
-	    KEY( "Read_group",	board->read_group,	fread_string_nohash( fp ) );
-	case 'T':
-	    KEY( "Type",	board->type,		fread_number( fp ) );
-	case 'V':
-	    KEY( "Vnum",	board->board_obj,	fread_number( fp ) );
-        }
-	if ( !fMatch )
-	{
-	    buf = str_printf("read_board: no match: %s", word );
-	    bug( buf.c_str(), 0 );
-	}
+        letter = getc( fp );
     }
+    while ( letter != EOF && isspace( static_cast<unsigned char>(letter) ) );
 
-  return board;
+    if ( letter != EOF )
+        ungetc( letter, fp );
+    return letter;
 }
 
-NOTE_DATA *read_note( const std::string& notefile, FILE *fp )
+template <typename Integer>
+static bool read_board_number( FILE *fp, Integer &field )
+{
+    const char *word = fread_word( fp );
+    char *end;
+    errno = 0;
+    const long number = strtol( word, &end, 10 );
+    if ( end == word || *end || errno == ERANGE || number < std::numeric_limits<Integer>::min()
+         || number > std::numeric_limits<Integer>::max() )
+        return false;
+    field = static_cast<Integer>( number );
+    return true;
+}
+
+static void free_board( BOARD_DATA *board )
+{
+    if ( board->note_file )     STR_DISPOSE( board->note_file );
+    if ( board->read_group )    STR_DISPOSE( board->read_group );
+    if ( board->post_group )    STR_DISPOSE( board->post_group );
+    if ( board->extra_readers ) STR_DISPOSE( board->extra_readers );
+    if ( board->extra_removers ) STR_DISPOSE( board->extra_removers );
+    DISPOSE( board );
+}
+
+static BOARD_DATA *read_board( GameContext *game, const char *boardfile, FILE *fp )
+{
+    int letter = peek_board_char( fp );
+    if ( letter == EOF || letter == '$' )
+        return NULL;
+
+    BOARD_DATA *board;
+    CREATE( board, BOARD_DATA, 1 );
+    board->game = game;
+    board->max_posts = DEFAULT_BOARD_MAX_POSTS;
+    while ( letter != EOF && letter != '$' )
+    {
+        const char *word = fread_word( fp );
+        if ( !str_cmp( word, "End" ) )
+        {
+            if ( !board->read_group )    board->read_group = str_dup( "" );
+            if ( !board->post_group )    board->post_group = str_dup( "" );
+            if ( !board->extra_readers ) board->extra_readers = str_dup( "" );
+            if ( !board->extra_removers ) board->extra_removers = str_dup( "" );
+            return board;
+        }
+
+        char **field = NULL;
+        bool valid_number = true;
+        if ( !str_cmp( word, "Filename" ) )              field = &board->note_file;
+        else if ( !str_cmp( word, "Read_group" ) )       field = &board->read_group;
+        else if ( !str_cmp( word, "Post_group" ) )       field = &board->post_group;
+        else if ( !str_cmp( word, "Extra_readers" ) )    field = &board->extra_readers;
+        else if ( !str_cmp( word, "Extra_removers" ) )   field = &board->extra_removers;
+        else if ( !str_cmp( word, "Vnum" ) )             valid_number = read_board_number( fp, board->board_obj );
+        else if ( !str_cmp( word, "Min_read_level" ) )   valid_number = read_board_number( fp, board->min_read_level );
+        else if ( !str_cmp( word, "Min_post_level" ) )   valid_number = read_board_number( fp, board->min_post_level );
+        else if ( !str_cmp( word, "Min_remove_level" ) ) valid_number = read_board_number( fp, board->min_remove_level );
+        else if ( !str_cmp( word, "Max_posts" ) )        valid_number = read_board_number( fp, board->max_posts );
+        else if ( !str_cmp( word, "Type" ) )             valid_number = read_board_number( fp, board->type );
+        else
+        {
+            if ( word[0] != '*' )
+                bug( "%s: unknown field %s in %s", __func__, word, boardfile );
+            fread_to_eol( fp );
+        }
+
+        if ( field )
+        {
+            if ( *field ) STR_DISPOSE( *field );
+            *field = fread_string_nohash( fp );
+        }
+        if ( !valid_number )
+            break;
+        letter = peek_board_char( fp );
+    }
+
+    bug( "%s: incomplete or invalid board record in %s", __func__, boardfile );
+    free_board( board );
+    return NULL;
+}
+
+static NOTE_DATA *read_note( const std::string& notefile, FILE *fp )
 {
     NOTE_DATA *pnote;
     char *word;
 
+    if ( peek_board_char( fp ) == EOF )
+        return NULL;
+
+    CREATE( pnote, NOTE_DATA, 1 );
     for ( ; ; )
     {
-	char letter;
-
-	do
-	{
-	    letter = getc( fp );
-	    if ( feof(fp) )
-	    {
-			FCLOSE( fp );
-			return NULL;
-	    }
-	}
-	while ( isspace(letter) );
-	ungetc( letter, fp );
-
-	CREATE( pnote, NOTE_DATA, 1 );
-
 	if ( str_cmp( fread_word( fp ), "sender" ) )
 	    break;
 	pnote->sender	= fread_string( fp );
@@ -1293,7 +1412,8 @@ NOTE_DATA *read_note( const std::string& notefile, FILE *fp )
         word = fread_word( fp );
         if ( !str_cmp( word, "voting" ) )
         {
-          pnote->voting = fread_number( fp );
+          if ( !read_board_number( fp, pnote->voting ) )
+              break;
 
 	  if ( str_cmp( fread_word( fp ), "yesvotes" ) )
 	    break;
@@ -1313,6 +1433,8 @@ NOTE_DATA *read_note( const std::string& notefile, FILE *fp )
 	if ( str_cmp( word, "text" ) )
 	    break;
 	pnote->text	= fread_string( fp );
+	if ( feof( fp ) || ferror( fp ) )
+	    break;
 
         if ( !pnote->yesvotes )    pnote->yesvotes	= str_dup( "" );
         if ( !pnote->novotes )     pnote->novotes	= str_dup( "" );
@@ -1322,8 +1444,9 @@ NOTE_DATA *read_note( const std::string& notefile, FILE *fp )
 	return pnote;
     }
 
-    bug( "%s: bad key word.", __func__ );
-    exit( 1 );
+    bug( "%s: incomplete or invalid note record in %s", __func__, notefile.c_str() );
+    free_note( pnote );
+    return NULL;
 }
 
 /*
@@ -1331,260 +1454,195 @@ NOTE_DATA *read_note( const std::string& notefile, FILE *fp )
  */
 void load_boards( GameContext *game )
 {
-    FILE	*board_fp;
-    FILE	*note_fp;
-    BOARD_DATA	*board;
-    NOTE_DATA	*pnote;
-    char	boardfile[256];
-    char	notefile[256];
-
     first_board	= NULL;
     last_board	= NULL;
 
-    SPRINTF( boardfile, "%s%s", BOARD_DIR, BOARD_FILE );
-    if ( ( board_fp = fopen( boardfile, "r" ) ) == NULL )
-	return;
+    const char *boardfile = BOARD_DIR BOARD_FILE;
+    FILE *board_fp = fopen( boardfile, "r" );
+    if ( !board_fp )
+        return;
 
+    BOARD_DATA *board;
     while ( (board = read_board( game, boardfile, board_fp )) != NULL )
     {
-		board->game = game;
-	LINK( board, first_board, last_board, next, prev );
-	log_printf( notefile, "%s%s", BOARD_DIR, board->note_file );
-	if ( ( note_fp = fopen( notefile, "r" ) ) != NULL )
-	{
-	    while ( (pnote = read_note( notefile, note_fp )) != NULL )
-	    {
-		LINK( pnote, board->first_note, board->last_note, next, prev );
-		board->num_posts++;
-	    }
-	}
+        if ( !board->note_file || !valid_board_filename( board->note_file )
+             || find_board_by_filename( board->note_file ) )
+        {
+            bug( "%s: skipping a board with a missing, invalid or duplicate filename in %s", __func__, boardfile );
+            free_board( board );
+            continue;
+        }
+
+        LINK( board, first_board, last_board, next, prev );
+        const std::string notefile = std::string( BOARD_DIR ) + board->note_file;
+        FILE *note_fp = fopen( notefile.c_str(), "r" );
+        if ( !note_fp )
+            continue;
+
+        NOTE_DATA *pnote;
+        while ( (pnote = read_note( notefile, note_fp )) != NULL )
+        {
+            LINK( pnote, board->first_note, board->last_note, next, prev );
+            board->num_posts++;
+        }
+        FCLOSE( note_fp );
     }
-    return;
+    FCLOSE( board_fp );
 }
 
 
 void do_makeboard( CHAR_DATA *ch, char *argument )
 {
-    BOARD_DATA *board;
-	std::string argstr = argument;
-
     if ( !argument || argument[0] == '\0' )
     {
 	send_to_char( "Usage: makeboard <filename>\n", ch );
 	return;
     }
 
-    smash_tilde( argstr );
+    const std::string filename = strlower( argument );
+    if ( !new_board_filename( ch, filename ) )
+        return;
 
+    BOARD_DATA *board;
     CREATE( board, BOARD_DATA, 1 );
-	board->game = ch->game;
-    LINK( board, first_board, last_board, next, prev );
-    board->note_file	   = str_dup( strlower( argstr ) );
+    board->game = ch->game;
+    board->note_file       = str_dup( filename );
+    board->max_posts       = DEFAULT_BOARD_MAX_POSTS;
     board->read_group      = str_dup( "" );
     board->post_group      = str_dup( "" );
     board->extra_readers   = str_dup( "" );
     board->extra_removers  = str_dup( "" );
+    LINK( board, first_board, last_board, next, prev );
+    if ( !write_boards_txt() )
+    {
+        UNLINK( board, first_board, last_board, next, prev );
+        free_board( board );
+        send_to_char( "Could not save the board list.\n", ch );
+        return;
+    }
+    send_to_char( "Board created.\n", ch );
 }
 
 void do_bset( CHAR_DATA *ch, char *argument )
 {
-    BOARD_DATA *board;
-    bool found;
-    std::string arg1;
-    std::string arg2;
-	std::string argstr = argument;
-    std::string buf;
-    int value;
-    
-    argstr = one_argument( argstr, arg1 );
-    argstr = one_argument( argstr, arg2 );
+    std::string filename, field;
+    std::string value_arg = argument ? argument : "";
+    value_arg = one_argument( value_arg, filename );
+    value_arg = one_argument( value_arg, field );
 
-    if ( arg1.empty() || arg2.empty() )
+    if ( filename.empty() || field.empty() )
     {
-	send_to_char( "Usage: bset <board filename> <field> value\n", ch );
-	send_to_char( "\nField being one of:\n", ch );
-	send_to_char( "  vnum read post remove maxpost filename type\n", ch );
-	send_to_char( "  read_group post_group extra_readers extra_removers\n", ch );
-	return;
-    }
-
-    value = strtoi( argstr );
-    found = FALSE;
-    for ( board = first_board; board; board = board->next )
-	if ( !str_cmp( arg1, board->note_file ) )
-	{
-	   found = TRUE;
-	   break;
-	}
-    if ( !found )
-    {
-	send_to_char( "Board not found.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "vnum" ) )
-    {
-	if ( !get_obj_index(value) )
-	{
-	    send_to_char( "No such object.\n", ch );
-	    return;
-	}
-	board->board_obj = value;
-	write_boards_txt( );
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "read" ) )
-    {
-	if ( value < 0 || value > MAX_LEVEL )
-	{
-	    send_to_char( "Value out of range.\n", ch );
-	    return;
-	}
-	board->min_read_level = value;
-	write_boards_txt( );
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "read_group" ) )
-    {
-	if ( argstr.empty() )
-	{
-	    send_to_char( "No group specified.\n", ch );
-	    return;
-	}
-	STR_DISPOSE( board->read_group );
-        if ( !str_cmp( argstr, "none" ) )
-	  board->read_group = str_dup( "" );
-        else
-	  board->read_group = str_dup( argstr );
-	write_boards_txt( );
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "post_group" ) )
-    {
-	if ( argstr.empty() )
-	{
-	    send_to_char( "No group specified.\n", ch );
-	    return;
-	}
-	STR_DISPOSE( board->post_group );
-        if ( !str_cmp( argstr, "none" ) )
-	  board->post_group = str_dup( "" );
-        else
-	  board->post_group = str_dup( argstr );
-	write_boards_txt( );
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-   if ( !str_cmp( arg2, "extra_removers" ) )
-    {
-        if ( argstr.empty() )
-        {   
-            send_to_char( "No names specified.\n", ch );
-            return;
-        }
-        if ( !str_cmp( argstr, "none" ) )
-            buf = "";
-        else
-            buf = str_printf("%s %s", board->extra_removers, argstr.c_str());
-        STR_DISPOSE( board->extra_removers );
-        board->extra_removers = str_dup( buf ); 
-        write_boards_txt( );
-        send_to_char( "Done.\n", ch );
+        send_to_char( "Usage: bset <board filename> <field> value\n", ch );
+        send_to_char( "\nField being one of:\n", ch );
+        send_to_char( "  vnum read post remove maxpost filename type\n", ch );
+        send_to_char( "  read_group post_group extra_readers extra_removers\n", ch );
         return;
     }
- 
-    if ( !str_cmp( arg2, "extra_readers" ) )
+
+    BOARD_DATA *board = find_board_by_filename( filename );
+    if ( !board )
     {
-	if ( argstr.empty() )
-	{
-	    send_to_char( "No names specified.\n", ch );
-	    return;
-	}
-	if ( !str_cmp( argstr, "none" ) )
-	    buf = "";
-	else
-	    buf = str_printf("%s %s", board->extra_readers, argstr.c_str());        
-	STR_DISPOSE( board->extra_readers );
-	board->extra_readers = str_dup( buf );
-	write_boards_txt( );
-	send_to_char( "Done.\n", ch );
-	return;
+        send_to_char( "Board not found.\n", ch );
+        return;
     }
 
-    if ( !str_cmp( arg2, "filename" ) )
+    BOARD_DATA updated = *board;
+    char *BOARD_DATA::*string_field = NULL;
+    sh_int *level = NULL;
+    bool append_names = false;
+    bool rename_board = false;
+    if ( !str_cmp( field, "read_group" ) )          string_field = &BOARD_DATA::read_group;
+    else if ( !str_cmp( field, "post_group" ) )     string_field = &BOARD_DATA::post_group;
+    else if ( !str_cmp( field, "extra_readers" ) )
     {
-	if ( argstr.empty() )
-	{
-	    send_to_char( "No filename specified.\n", ch );
-	    return;
-	}
-	STR_DISPOSE( board->note_file );
-	board->note_file = str_dup( argstr );
-	write_boards_txt( );
-	send_to_char( "Done.\n", ch );
-	return;
+        string_field = &BOARD_DATA::extra_readers;
+        append_names = true;
+    }
+    else if ( !str_cmp( field, "extra_removers" ) )
+    {
+        string_field = &BOARD_DATA::extra_removers;
+        append_names = true;
+    }
+    else if ( !str_cmp( field, "filename" ) )
+    {
+        if ( value_arg != board->note_file && !new_board_filename( ch, value_arg ) )
+            return;
+        string_field = &BOARD_DATA::note_file;
+        rename_board = value_arg != board->note_file;
+    }
+    else if ( !str_cmp( field, "read" ) )           level = &updated.min_read_level;
+    else if ( !str_cmp( field, "post" ) )           level = &updated.min_post_level;
+    else if ( !str_cmp( field, "remove" ) )         level = &updated.min_remove_level;
+
+    if ( string_field )
+    {
+        if ( value_arg.empty() )
+        {
+            send_to_char( "No value specified.\n", ch );
+            return;
+        }
+        if ( string_field != &BOARD_DATA::note_file )
+        {
+            smash_tilde( value_arg );
+            if ( !str_cmp( value_arg, "none" ) )
+                value_arg.clear();
+            else if ( append_names && *(board->*string_field) )
+                value_arg = std::string( board->*string_field ) + " " + value_arg;
+        }
+        updated.*string_field = str_dup( value_arg );
+    }
+    else if ( level || !str_cmp( field, "vnum" ) || !str_cmp( field, "maxpost" )
+                    || !str_cmp( field, "type" ) )
+    {
+        const int value = strtoi( value_arg );
+        if ( level && value >= 0 && value <= MAX_LEVEL )
+            *level = value;
+        else if ( !str_cmp( field, "maxpost" ) && value >= 1 && value <= 1000 )
+            updated.max_posts = value;
+        else if ( !str_cmp( field, "type" ) && value >= BOARD_NOTE && value <= BOARD_MAIL )
+            updated.type = value;
+        else if ( !str_cmp( field, "vnum" ) )
+        {
+            if ( !get_obj_index( value ) )
+            {
+                send_to_char( "No such object.\n", ch );
+                return;
+            }
+            updated.board_obj = value;
+        }
+        else
+        {
+            send_to_char( "Value out of range.\n", ch );
+            return;
+        }
+    }
+    else
+    {
+        do_bset( ch, NULL );
+        return;
     }
 
-    if ( !str_cmp( arg2, "post" ) )
+    // Keep the old note file available until the board list points at the new one.
+    const bool copy_notes = rename_board && updated.first_note;
+    const bool copied = copy_notes && write_board( &updated );
+    if ( (copy_notes && !copied) || !write_boards_txt( board, &updated ) )
     {
-	if ( value < 0 || value > MAX_LEVEL )
-	{
-	  send_to_char( "Value out of range.\n", ch );
-	  return;
-	}
-	board->min_post_level = value;
-	write_boards_txt( );
-	send_to_char( "Done.\n", ch );
-	return;
+        if ( copied )
+        {
+            const std::string new_note_path = std::string( BOARD_DIR ) + updated.note_file;
+            if ( unlink( new_note_path.c_str() ) != 0 )
+                perror( new_note_path.c_str() );
+        }
+        if ( string_field )
+            STR_DISPOSE( updated.*string_field );
+        send_to_char( "Could not save the board change.\n", ch );
+        return;
     }
 
-    if ( !str_cmp( arg2, "remove" ) )
-    {
-	if ( value < 0 || value > MAX_LEVEL )
-	{
-	  send_to_char( "Value out of range.\n", ch );
-	  return;
-	}
-	board->min_remove_level = value;
-	write_boards_txt( );
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    if ( !str_cmp( arg2, "maxpost" ) )
-    {
-	if ( value < 1 || value > 1000 )
-	{
-	  send_to_char( "Value out of range.\n", ch );
-	  return;
-	}
-	board->max_posts = value;
-	write_boards_txt( );
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-    if ( !str_cmp( arg2, "type" ) )
-    {
-	if ( value < 0 || value > 1 )
-	{
-	  send_to_char( "Value out of range.\n", ch );
-	  return;
-	}
-	board->type = value;
-	write_boards_txt( );
-	send_to_char( "Done.\n", ch );
-	return;
-    }
-
-    do_bset( ch, "" );
-    return;
+    if ( string_field )
+        STR_DISPOSE( board->*string_field );
+    *board = updated;
+    send_to_char( "Done.\n", ch );
 }
 
 
@@ -1594,7 +1652,7 @@ void do_bstat( CHAR_DATA *ch, char *argument )
     bool found;
     std::string arg;
     
-    one_argument( argument, arg );
+    one_argument( argument ? argument : "", arg );
 
     if ( arg.empty() )
     {
@@ -1651,6 +1709,9 @@ void mail_count(CHAR_DATA *ch)
   BOARD_DATA *board;
   NOTE_DATA *note;
   int cnt = 0;
+
+  if ( !ch )
+    return;
   
   for ( board = first_board; board; board = board->next )
     if ( board->type == BOARD_MAIL && can_read(ch, board) )
