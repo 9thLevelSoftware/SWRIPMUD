@@ -184,7 +184,7 @@ void do_restrict( CHAR_DATA *ch, char *argument )
 
     level = UMAX( UMIN( get_trust( ch ), level ), 0 );
 
-    hash = arg[0] % 126;
+    hash = command_hash_bucket(arg.front());
     for ( cmd = command_hash[hash]; cmd; cmd = cmd->next )
     {
 	if ( !str_prefix( arg, cmd->name )
@@ -7058,7 +7058,7 @@ void unlink_command( CMDTYPE *command )
 	    return;
     }
 
-    hash = command->name[0]%126;
+    hash = command_hash_bucket(command->name[0]);
 
     if ( command == (tmp=command_hash[hash]) )
     {
@@ -7106,7 +7106,7 @@ void add_command( CMDTYPE *command )
     for ( x = 0; command->name[x] != '\0'; x++ )
 	command->name[x] = LOWER(command->name[x]);
 
-    hash = command->name[0] % 126;
+    hash = command_hash_bucket(command->name[0]);
 
     if ( (prev = tmp = command_hash[hash]) == NULL )
     {

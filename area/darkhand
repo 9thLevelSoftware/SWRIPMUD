@@ -260,21 +260,6 @@ Captain Harlef stands supervising the bridge.
 0 0 0 0 1 1 0
 17 17 0 0 0 0 0 0
 0 0 0 0 0 0 0 0
-> act_prog package~
-if ovnuminv(10210) >= 1
-say Thank you.
-mpwithdraw 5000
-give 5000 credits $n
-drop 5000 credits
-mpgain $n 6 100000
-else
-say hmm... Thanks, but this isn't adressed to me.
-drop all
-endif
-mpat 10299 drop all
-mpat 10299 mppurge
-~
-|
 #614
 pilot~
 an imperial pilot~

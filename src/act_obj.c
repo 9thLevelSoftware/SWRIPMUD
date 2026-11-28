@@ -1073,6 +1073,122 @@ void do_drop( CHAR_DATA *ch, char *argument )
 
 
 
+namespace
+{
+constexpr int HARLEF_PACKAGE_VNUM = 10210;
+constexpr int RIIICE_REPRESENTATIVE_VNUM = 10248;
+constexpr int HARLEF_VNUM = 613;
+constexpr int HARLEF_CREDITS = 5000;
+constexpr int HARLEF_XP = 100000;
+constexpr int HARLEF_ABILITY = LEADERSHIP_ABILITY;
+
+bool carries_harlef_package( const OBJ_DATA *item )
+{
+    for ( ; item; item = item->next_content )
+    {
+        if ( item->pIndexData && item->pIndexData->vnum == HARLEF_PACKAGE_VNUM )
+            return true;
+        if ( carries_harlef_package( item->first_content ) )
+            return true;
+    }
+    return false;
+}
+
+void complete_harlef_delivery( CHAR_DATA *player, OBJ_DATA *package )
+{
+    if ( !player->pcdata || NOT_AUTHED( player ) )
+    {
+        send_to_char( "Captain Harlef says 'Come back when your character is authorized.'\n", player );
+        return;
+    }
+
+    if ( !package->pIndexData || package->pIndexData->vnum != HARLEF_PACKAGE_VNUM
+         || package->first_content )
+    {
+        send_to_char( "Captain Harlef says 'I only accept the package from Riiice Service.'\n", player );
+        return;
+    }
+
+    if ( player->gold > INT_MAX - HARLEF_CREDITS
+         || player->experience[HARLEF_ABILITY] > LONG_MAX - HARLEF_XP )
+    {
+        send_to_char( "Captain Harlef says 'You cannot receive the payment right now. Keep the package for now.'\n", player );
+        return;
+    }
+
+    separate_obj( package );
+    extract_obj( package );
+    player->gold += HARLEF_CREDITS;
+    const long previous_xp = player->experience[HARLEF_ABILITY];
+    const int leadership_limit = exp_level( max_level( player, HARLEF_ABILITY ) + 1 ) - 1;
+    if ( previous_xp < leadership_limit )
+        gain_exp( player, HARLEF_XP, HARLEF_ABILITY );
+    const long earned_xp = player->experience[HARLEF_ABILITY] - previous_xp;
+    send_to_char( "Captain Harlef accepts the package and pays you 5000 credits.\n", player );
+    if ( earned_xp > 0 )
+        ch_printf( player, "You gain %ld %s experience.\n", earned_xp, ability_name[HARLEF_ABILITY] );
+    if ( earned_xp < HARLEF_XP )
+        send_to_char( "Your leadership experience is capped at your current maximum.\n", player );
+
+    if ( BV_IS_SET( player->game->get_sysdata()->save_flags, SV_GIVE ) )
+        save_char_obj( player );
+}
+}
+
+void do_mpcourier( CHAR_DATA *representative, char *argument )
+{
+    if ( !representative || !IS_NPC( representative ) || representative->desc || !representative->in_room
+         || !representative->pIndexData || representative->pIndexData->vnum != RIIICE_REPRESENTATIVE_VNUM
+         || IS_AFFECTED( representative, AFF_CHARM ) )
+    {
+        if ( representative )
+            send_to_char( "Huh?\n", representative );
+        return;
+    }
+
+    CHAR_DATA *player = representative->in_room->first_person;
+    for ( ; player; player = player->next_in_room )
+        if ( !IS_NPC( player ) && player->name && !str_cmp( player->name, argument ) )
+            break;
+    if ( !player )
+        return;
+
+    if ( !player->pcdata || NOT_AUTHED( player ) )
+    {
+        send_to_char( "The Riiice representative says 'Come back when your character is authorized.'\n", player );
+        return;
+    }
+
+    if ( carries_harlef_package( player->first_carrying ) )
+    {
+        send_to_char( "The Riiice representative says 'You already have a delivery for Captain Harlef.'\n", player );
+        return;
+    }
+
+    OBJ_INDEX_DATA *prototype = get_obj_index( HARLEF_PACKAGE_VNUM );
+    if ( !prototype )
+    {
+        send_to_char( "The Riiice representative says 'I have no package for you right now.'\n", player );
+        return;
+    }
+
+    if ( player->carry_number >= can_carry_n( player )
+         || prototype->weight > can_carry_w( player ) - player->carry_weight )
+    {
+        send_to_char( "The Riiice representative says 'Make room for the package and then accept the delivery.'\n", player );
+        return;
+    }
+
+    OBJ_DATA *package = create_object( prototype, 1 );
+    BV_SET_BIT( package->objflags, ITEM_NODROP );
+    BV_SET_BIT( package->objflags, ITEM_DEATHROT );
+    obj_to_char( package, player );
+    send_to_char( "The Riiice representative hands you a package for Captain Harlef.\n", player );
+
+    if ( BV_IS_SET( player->game->get_sysdata()->save_flags, SV_GIVE ) )
+        save_char_obj( player );
+}
+
 void do_give( CHAR_DATA *ch, char *argument )
 {
     std::string arg1;
@@ -1170,6 +1286,13 @@ void do_give( CHAR_DATA *ch, char *argument )
     {
 	send_to_char( "They aren't here.\n", ch );
 	return;
+    }
+
+    if ( !IS_NPC( ch ) && IS_NPC( victim ) && victim->pIndexData
+         && victim->pIndexData->vnum == HARLEF_VNUM )
+    {
+        complete_harlef_delivery( ch, obj );
+        return;
     }
 
     if ( !can_drop_obj( ch, obj ) )

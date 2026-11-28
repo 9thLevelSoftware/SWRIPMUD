@@ -165,207 +165,130 @@ void do_buyhome( CHAR_DATA *ch, char *argument )
 
 void do_clone( CHAR_DATA *ch, char *argument )
 {
-	  long credits, bank;
-	  long frc_experience;
-	  long long played;
-    std::string clanname, oldbestowments;
-    int experience[MAX_ABILITY];
-    int skill_level[MAX_ABILITY];
-	  FLAG_SET flags;
-    int ability;
-     sh_int frc, change, change2, frc_level, low_frc = 0, mana;
-     ROOM_INDEX_DATA *home;
-     ROOM_INDEX_DATA *clone_room;
+    if ( !ch )
+        return;
 
-	  if ( !ch )
-		 return;
-
-	  if ( IS_NPC(ch) || !ch->pcdata )
-	  {
-		 ch_printf( ch, "Yeah right!\n" );
-		 return;
-	  }
-
-    if( IS_IMMORTAL(ch) )
+    if ( IS_NPC(ch) || !ch->pcdata )
+    {
+        send_to_char( "Yeah right!\n", ch );
+        return;
+    }
+    if ( IS_IMMORTAL(ch) )
     {
         send_to_char( "You can't clone an imm!\n", ch );
         return;
-    }    
+    }
+    if ( !ch->in_room || ch->in_room->vnum != ROOM_VNUM_CLONE_PAY )
+    {
+        send_to_char( "You can't do that here!\n", ch );
+        return;
+    }
 
-	  if ( !ch->in_room || ch->in_room->vnum != ROOM_VNUM_CLONE_PAY )
-	  {
-		 ch_printf( ch, "You can't do that here!\n" );
-		 return;
-	  }
+    PC_DATA *pc = ch->pcdata;
+    if ( pc->clones >= 2 )
+    {
+        send_to_char( "The medical droids tell you your genetical material is too far degraded.\n", ch );
+        return;
+    }
+    ROOM_INDEX_DATA *clone_room = get_room_index( ROOM_VNUM_CLONE_CHAMBER );
+    if ( !clone_room )
+    {
+        send_to_char( "The cloning chambers are currently unavailable.\n", ch );
+        return;
+    }
+    const int cost = ch->top_level * 200;
+    if ( ch->gold < cost )
+    {
+        ch_printf( ch, "You don't have enough credits... You need %d.\n", cost );
+        return;
+    }
 
-          if ( ch->pcdata->clones >= 2 )
-          {
-            ch_printf( ch, "The medical droids tell you your genetical material is too far degraded.\n");
-            return;
-          }
+    const int gold = ch->gold;
+    const long bank = pc->bank;
+    const long long played = pc->played;
+    const sh_int force = ch->perm_frc;
+    const sh_int mana = ch->mana;
+    const FLAG_SET flags = ch->act;
+    ROOM_INDEX_DATA *home = ch->plr_home;
+    char *clan_name = pc->clan_name;
+    char *bestowments = pc->bestowments;
+    long experience[MAX_ABILITY];
+    sh_int skill_level[MAX_ABILITY];
+    std::copy_n( ch->experience, MAX_ABILITY, experience );
+    std::copy_n( ch->skill_level, MAX_ABILITY, skill_level );
 
-          clone_room = get_room_index( ROOM_VNUM_CLONE_CHAMBER );
-          if ( !clone_room )
-          {
-            send_to_char( "The cloning chambers are currently unavailable.\n", ch );
-            return;
-          }
+    // Prepare the clone's persisted attributes without moving or charging the player.
+    const sh_int minimum_force = ch->main_ability == FORCE_ABILITY ? 1 : 0;
+    if ( force > 0 )
+    {
+        const int loss = std::clamp( number_range(-2, force), -2, 0 );
+        const int gain = std::clamp( number_range(-1000, force), 0, 1 );
+        ch->perm_frc = std::clamp( force + loss + gain, static_cast<int>(minimum_force), 20 );
+    }
+    else
+        ch->perm_frc = std::clamp( force + std::clamp(number_range(-500, 2), 0, 2),
+                                  static_cast<int>(minimum_force), 20 );
 
-	  if ( ch->gold < ch->top_level*200 )
-	  {
-		 ch_printf( ch, "You don't have enough credits... You need %d.\n" , ch->top_level*200 );
-		 return;
-	  }
-	  else
-	  {
-		 ch->gold -= ch->top_level*200;
+    if ( ch->main_ability == HUNTING_ABILITY )
+        ch->perm_frc = minimum_force;
+    if ( ch->race == RACE_DROID )
+        ch->perm_frc = 0;
 
-		 ch_printf( ch, "You pay %d credits for cloning.\n" , ch->top_level*200 );
-		 ch_printf( ch, "You are escorted into a small room.\n\n" );
-	  }
+    if ( force <= 0 || ch->perm_frc > 0 )
+    {
+        ch->experience[FORCE_ABILITY] = force > 0 ? 500 : 0;
+        ch->skill_level[FORCE_ABILITY] = force > 0 ? 2 : 1;
+    }
+    if ( pc->clones == 1 )
+    {
+        std::fill_n( ch->experience, MAX_ABILITY, 0L );
+        std::fill_n( ch->skill_level, MAX_ABILITY, 1 );
+    }
 
-	  char_from_room( ch );
-	  char_to_room( ch, clone_room );
+    ch->mana = 100 + 100 * ch->perm_frc;
+    ch->gold = std::min( gold - cost, CLONEGOLD );
+    pc->played = played / 2;
+    pc->bank = 0;
+    ch->plr_home = nullptr;
+    BV_REMOVE_BIT( ch->act, PLR_KILLER );
+    if ( clan_name && *clan_name )
+    {
+        pc->clan_name = nullptr;
+        pc->bestowments = nullptr;
+    }
 
-     /* random force change on cloning */
-     frc = ch->perm_frc;
-     mana = ch->mana;
+    const bool saved = save_clone( ch, clone_room );
 
-     /* if character has force, there is a chance of losing force
-     depending on the magnitude, the lesser force  the greater chance, as
-     well as a slight chance of gaining force, also depending on
-     the magnitude of the character's force */
+    ch->gold = gold;
+    ch->perm_frc = force;
+    ch->mana = mana;
+    ch->plr_home = home;
+    ch->act = flags;
+    pc->played = played;
+    pc->bank = bank;
+    pc->clan_name = clan_name;
+    pc->bestowments = bestowments;
+    std::copy_n( experience, MAX_ABILITY, ch->experience );
+    std::copy_n( skill_level, MAX_ABILITY, ch->skill_level );
+    if ( !saved )
+    {
+        send_to_char( "Unable to save your clone. You were not charged.\n", ch );
+        return;
+    }
 
-     if ( ch->main_ability == FORCE_ABILITY )
-       low_frc = 1;
-
-
-     if(ch->perm_frc > 0)
-     {
-       change = number_range(-2, ch->perm_frc);
-       change = URANGE( -2 , change , 0 );
-       change2 = number_range( -1000, ch->perm_frc );
-       change2 = URANGE(0, change2, 1);
-       ch->perm_frc = URANGE( low_frc, ch->perm_frc + change + change2, 20);
-     }
-     else
-     {
-     /* a character with no force has a 1/100 chance of gaining it */
-
-       change = number_range(-500, 2);
-       change = URANGE( 0, change, 2);
-       ch->perm_frc = URANGE( low_frc, ch->perm_frc + change, 20);
-
-     }
-
-     frc_level = ch->skill_level[7];
-     frc_experience = ch->experience[7];
-
-     /* Droids and hunters dont get force. DV */
-
-     if (ch->main_ability == HUNTING_ABILITY )
-       ch->perm_frc = low_frc;
-
-     if (ch->race == RACE_DROID )
-       ch->perm_frc = 0;
-
-     if(frc > 0)
-     {
-       if(ch->perm_frc > 0)
-       {
-         ch->experience[7] = 500;
-         ch->skill_level[7] = 2;
-       }
-     }
-     else
-       {
-         ch->experience[7] = 0;
-         ch->skill_level[7] = 1;
-       }
-     ch->mana = 100 + 100*ch->perm_frc;
-
-	  flags   = ch->act;
-	  BV_REMOVE_BIT( ch->act, PLR_KILLER );
-	  credits = ch->gold;
-     if(credits <= CLONEGOLD)
-     {
-       ch->gold = credits;
-     }
-     else
-     {
-	    ch->gold = CLONEGOLD;
-     }
-
-	  played = ch->pcdata->played;
-	  ch->pcdata->played = ch->pcdata->played/2;
-	  bank = ch->pcdata->bank;
-	  ch->pcdata->bank = 0;
-	  home = ch->plr_home;
-	  ch->plr_home = NULL;
-	  oldbestowments = ch->pcdata->bestowments ? ch->pcdata->bestowments : "";
-	  
-	  
-      if( ch->pcdata->clones == 1 )
-      {
-
-        ch_printf( ch, "The medical droids tell you your genetical material has degraded significantly.\n");
-
-      	for(ability = 0; ability < MAX_ABILITY; ability++)
-      	{
-          experience[ability] = ch->experience[ability];
-          skill_level[ability] = ch->skill_level[ability];
-          ch->experience[ability] = 0;
-          ch->skill_level[ability] = 1;
-        }
-        experience[7] = frc_experience;
-        skill_level[7] = frc_level;
-      }
-      	  
-      ch->mana = 100 + (ch->perm_frc*100);
-      
-      if ( ch->pcdata->clan_name && ch->pcdata->clan_name[0] != '\0' )
-      {
-        clanname = ch->pcdata->clan_name;
-        STRFREE( ch->pcdata->clan_name );
-        ch->pcdata->clan_name = STRALLOC( "" );
-         if ( ch->pcdata->bestowments )
-             STR_DISPOSE( ch->pcdata->bestowments );
-         ch->pcdata->bestowments = str_dup( "" );
-         save_clone(ch);
-         STRFREE( ch->pcdata->clan_name );
-			ch->pcdata->clan_name = STRALLOC( clanname );
-     }
-     else
-       save_clone( ch );
-     ch->perm_frc = frc;
-     ch->skill_level[7] = frc_level;
-     ch->experience[7] = frc_experience;
-     ch->mana = mana;
-      if( ch->pcdata->clones == 1 )
-      	for(ability = 0; ability < MAX_ABILITY; ability++)
-      	{
-          ch->experience[ability] = experience[ability];
-          ch->skill_level[ability] = skill_level[ability];
-        }
-     ch->plr_home = home;
-     ch->pcdata->played = played;
-     ch->gold = credits;
-     ch->pcdata->bank = bank;
-     ch->act = flags;
-     if ( ch->pcdata->bestowments )
-         STR_DISPOSE( ch->pcdata->bestowments );
-     ch->pcdata->bestowments = str_dup( oldbestowments );
-     char_from_room( ch );
-     char_to_room( ch, clone_room );
-     do_look( ch , "" );
-
-     ch_printf( ch, "\n&WA small tissue sample is taken from your arm.\n" );
-	  ch_printf( ch, "&ROuch!\n\n" );
-     ch_printf( ch, "&WYou have been succesfully cloned.\n" );
-
-     ch->hit--;
-     update_pos( ch );
-     gmcp_evt_char_vitals(ch);
+    ch->gold -= cost;
+    ch_printf( ch, "You pay %d credits for cloning.\n", cost );
+    send_to_char( "You are escorted into a small room.\n\n", ch );
+    if ( pc->clones == 1 )
+        send_to_char( "The medical droids tell you your genetical material has degraded significantly.\n", ch );
+    char_from_room( ch );
+    char_to_room( ch, clone_room );
+    do_look( ch, "" );
+    send_to_char( "\n&WA small tissue sample is taken from your arm.\n&ROuch!\n\n"
+                  "&WYou have been successfully cloned.\n", ch );
+    --ch->hit;
+    update_pos( ch );
+    gmcp_evt_char_vitals(ch);
 }
 
 void do_arm( CHAR_DATA *ch, char *argument )

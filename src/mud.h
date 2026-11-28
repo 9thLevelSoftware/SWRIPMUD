@@ -185,14 +185,6 @@ typedef struct	member_list		MEMBER_LIST; /* List of members in clan */
 typedef struct  membersort_data         MS_DATA;     /* List for sorted roster list */
 typedef struct  tracker_data    TRACKER_DATA;
 typedef struct  OlcSession      OLC_SESSION;
-typedef struct wilderness_system      WILDERNESS_SYSTEM;
-typedef struct wilderness_data        WILDERNESS_DATA;
-typedef struct wild_delta_data        WILD_DELTA_DATA;
-typedef struct wild_site_proto        WILD_SITE_PROTO;
-typedef struct wild_site_data         WILD_SITE_DATA;
-typedef struct wild_room_cache_data   WILD_ROOM_CACHE_DATA;
-typedef struct wild_actor_data        WILD_ACTOR_DATA;
-typedef struct wild_vnum_alloc_data   WILD_VNUM_ALLOC_DATA;
 
 
 /*
@@ -946,7 +938,6 @@ class GameContext
 {
     system_data sysdata;
     public:
-    WILDERNESS_SYSTEM *wilderness = nullptr;
     system_data* get_sysdata() { return &sysdata; };
 
 };
@@ -3113,7 +3104,7 @@ typedef enum
     ROOM_WILD_TEMP          = 33,
     ROOM_WILD_SITE_EDGE     = 34,
     ROOM_WILD_TRANSITION    = 35,
-    ROOM_MAX                = 36    
+    ROOM_MAX                = 36    // Keep reserved wilderness flag indices stable in persisted area data.
 } RoomFlags;
 
 /*
@@ -3161,7 +3152,7 @@ typedef enum
 #define EX_NOMOB		  BV24
 #define EX_WINDOW		  BV25
 #define EX_xLOOK		  BV26
-#define EX_WILDERNESS          BV27
+#define EX_WILDERNESS          BV27  /* Reserved exit flag bit; keep stable in persisted area data. */
 #define MAX_EXFLAG		  27
 
 /*
@@ -4011,7 +4002,6 @@ struct move_plan
     int distance;
     bool fall;
 
-    bool is_wilderness;
     bool drunk;
 
     std::string leave_verb;
@@ -4019,25 +4009,15 @@ struct move_plan
 
     int move_cost;
 
-    WILDERNESS_DATA *wild;
-    int wild_x;
-    int wild_y;
-    sh_int wild_z;
-
     move_plan()
         : from_room( nullptr ),
           to_room( nullptr ),
           door( -1 ),
           distance( 1 ),
           fall( false ),
-          is_wilderness( false ),
           drunk( false ),
-          move_cost( 1 ),
-          wild( nullptr )
+          move_cost( 1 )
     {
-        wild_x = 0;
-        wild_y = 0;
-        wild_z = 0;
     }
 };
 
@@ -4047,7 +4027,6 @@ struct move_plan
 struct	room_index_data
 {
     GameContext *   game = NULL;
-    WILD_ROOM_CACHE_DATA *wild_cache = nullptr;
     ROOM_INDEX_DATA *	next;
     ROOM_INDEX_DATA *	next_sort;
     CHAR_DATA *		first_person;
@@ -5285,7 +5264,15 @@ extern		WEATHER_DATA		weather_info;
 using EquipmentSlots = std::array<std::array<OBJ_DATA *, MAX_LAYERS>, MAX_WEAR>;
 using ObjectNest = std::array<OBJ_DATA *, MAX_NEST>;
 
-extern		CMDTYPE		  *	command_hash	[126];
+inline constexpr size_t COMMAND_HASH_BUCKETS = 126;
+extern CMDTYPE *command_hash[COMMAND_HASH_BUCKETS];
+
+inline constexpr size_t command_hash_bucket(unsigned char initial)
+{
+    return LOWER(initial) % COMMAND_HASH_BUCKETS;
+}
+
+static_assert(command_hash_bucket('A') == command_hash_bucket('a'));
 extern		SOCIALTYPE	  *	social_index	[27];
 
 extern		SKILLTYPE	  *	skill_table	[MAX_SKILL];
@@ -5897,6 +5884,7 @@ DECLARE_DO_FUN( do_mptransfer   );
 DECLARE_DO_FUN( do_mpapply	);
 DECLARE_DO_FUN( do_mpapplyb  	);
 DECLARE_DO_FUN( do_mpgain	);
+DECLARE_DO_FUN( do_mpcourier	);
 
 /*
  * Spell functions.
@@ -6797,7 +6785,7 @@ void    fwrite_bitset(FILE *fp, const char *name, const FLAG_SET &bv);
 void    fread_bitset(FILE *fp, FLAG_SET &bv);
 bool	save_char_obj	args( ( CHAR_DATA *ch ) );
 bool    read_saved_bounty_transaction( const std::string &name, std::string &transaction );
-void	save_clone	args( ( CHAR_DATA *ch ) );
+bool save_clone( CHAR_DATA *ch, const ROOM_INDEX_DATA *room );
 bool	load_char_obj( DESCRIPTOR_DATA *d, const std::string& name, bool preload, long *password_offset = nullptr );
 bool 	load_char_obj_v2( DESCRIPTOR_DATA *d, const std::string& name, bool preload, int undead, long *password_offset = nullptr );
 bool    replace_player_password( const CHAR_DATA *ch, long offset, const char *digest );
@@ -6808,7 +6796,7 @@ void fwrite_obj(CHAR_DATA *ch, OBJ_DATA *obj, FILE *fp, int iNest, sh_int os_typ
 void fread_obj(GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type, ObjectNest &nest);
 void de_equip_char(CHAR_DATA *ch, EquipmentSlots &equipment);
 void re_equip_char(CHAR_DATA *ch, const EquipmentSlots &equipment);
-void	save_home	args( ( CHAR_DATA *ch ) );
+bool save_home( CHAR_DATA *ch );
 void save_storeroom( ROOM_INDEX_DATA *room );
 void load_storerooms( GameContext *game );
 
@@ -6838,9 +6826,6 @@ void	save_herb_table	args( ( GameContext *game ) );
 /* track.c */
 void	found_prey	args( ( CHAR_DATA *ch, CHAR_DATA *victim ) );
 void	hunt_victim	args( ( CHAR_DATA *ch) );
-
-// Wilderness.c +
-bool room_is_wilderness( ROOM_INDEX_DATA *room );
 
 /* update.c */
 void	advance_level	args( ( CHAR_DATA *ch , int ability ) );

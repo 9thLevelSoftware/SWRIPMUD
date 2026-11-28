@@ -2519,6 +2519,15 @@ CommandGroupEx -1
 End
 
 #COMMAND
+Name        mpcourier~
+Code        do_mpcourier
+Position    0
+Level       1
+Log         0
+CommandGroupEx -1
+End
+
+#COMMAND
 Name        makeplanet~
 Code        do_makeplanet
 Position    0

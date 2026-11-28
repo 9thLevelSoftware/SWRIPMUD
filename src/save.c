@@ -59,7 +59,7 @@ extern int top_ed;
  * Local functions.
  */
 
-static void fwrite_char( CHAR_DATA *ch, FILE *fp );
+static void fwrite_char( CHAR_DATA *ch, FILE *fp, const ROOM_INDEX_DATA *saved_room = nullptr );
 static void fread_char( CHAR_DATA *ch, FILE *fp, bool preload, int &file_version, long *password_offset );
 static void fread_obj_versioned(GameContext *game, CHAR_DATA *ch, FILE *fp, sh_int os_type,
                                int file_version, ObjectNest &nest, EquipmentSlots *equipment = nullptr);
@@ -69,35 +69,6 @@ void write_char_mobile( CHAR_DATA *ch , char *argument );
 void read_char_mobile( GameContext *game, char *argument );
 void fwrite_mobile( FILE *fp, CHAR_DATA *mob );
 
-
-void save_home( CHAR_DATA *ch )
-{
-    if ( ch->plr_home )
-    {
-       	FILE *fp;
-       	std::string filename;
-       	sh_int templvl;
-       	OBJ_DATA *contents;
-
-
-       	filename = str_printf("%s%c/%s.home", PLAYER_DIR, tolower(ch->name[0]),
-				 capitalize( ch->name ).c_str() );
-    	if ( ( fp = fopen( filename.c_str(), "w" ) ) == NULL )
-    	{
-    	}
-    	else
-    	{
-		templvl = ch->top_level;
-		ch->top_level = LEVEL_HERO;		/* make sure EQ doesn't get lost */
-        	contents = ch->plr_home->last_content;
-        	if (contents)
-	  	  fwrite_obj(ch, contents, fp, 0, OS_CARRY );
-		fprintf( fp, "#END\n" );
-		ch->top_level = templvl;
-    		FCLOSE( fp );
-    	}
-    }
-}
 
 /*
  * Un-equip character before saving to ensure proper	-Thoric
@@ -182,6 +153,45 @@ static bool close_pfile( FILE *fp )
     const bool complete = !ferror(fp) && fflush(fp) == 0 && fsync(fileno(fp)) == 0;
     const bool closed = fclose(fp) == 0;
     return complete && closed;
+}
+
+bool save_home( CHAR_DATA *ch )
+{
+    if ( !ch || !ch->plr_home )
+        return true;
+
+    const char initial = tolower( static_cast<unsigned char>(ch->name[0]) );
+    const std::string path = str_printf( "%s%c/%s.home", PLAYER_DIR, initial,
+                                        capitalize(ch->name).c_str() );
+    if ( !create_save_bucket( PLAYER_DIR, initial ) )
+        return false;
+
+    std::string temporary;
+    FILE *fp = open_pfile_temp( path, temporary );
+    if ( !fp )
+    {
+        bug( "Save_home: cannot open new save for %s: %s", path.c_str(), strerror(errno) );
+        return false;
+    }
+
+    const sh_int level = ch->top_level;
+    ch->top_level = LEVEL_HERO;
+    if ( OBJ_DATA *contents = ch->plr_home->last_content )
+        fwrite_obj( ch, contents, fp, 0, OS_CARRY );
+    ch->top_level = level;
+    fprintf( fp, "#END\n" );
+
+    if ( close_pfile(fp) )
+    {
+        if ( rename( temporary.c_str(), path.c_str() ) == 0 )
+            return true;
+        bug( "Save_home: cannot publish save %s: %s", path.c_str(), strerror(errno) );
+    }
+    else
+        bug( "Save_home: cannot finish writing %s", path.c_str() );
+
+    unlink( temporary.c_str() );
+    return false;
 }
 
 static bool sync_save_directory( const std::string &path )
@@ -426,63 +436,62 @@ bool save_char_obj( CHAR_DATA *ch )
     return saved;
 }
 
-void save_clone( CHAR_DATA *ch )
+bool save_clone( CHAR_DATA *ch, const ROOM_INDEX_DATA *room )
 {
-    std::string strsave, strback;
-    FILE *fp;
+    if ( !ch || IS_NPC(ch) || !ch->pcdata || !ch->game || NOT_AUTHED(ch) )
+        return false;
 
-    if ( !ch )
+    const char initial = tolower( static_cast<unsigned char>(ch->name[0]) );
+    const std::string basename = capitalize( ch->name ) + ".clone";
+    const std::string path = str_printf( "%s%c/%s", PLAYER_DIR, initial, basename.c_str() );
+    if ( !create_save_bucket( PLAYER_DIR, initial ) )
+        return false;
+
+    std::string temporary;
+    FILE *fp = open_pfile_temp( path, temporary );
+    if ( !fp )
     {
-	bug( "Save_char_obj: null ch!" );
-	return;
+        bug( "Save_clone: cannot open new save for %s: %s", path.c_str(), strerror(errno) );
+        return false;
     }
 
-    if ( IS_NPC(ch) || NOT_AUTHED(ch) )
-	return;
-
-    if ( ch->desc && ch->desc->original )
-	ch = ch->desc->original;
-
+    CHAR_DATA *previous_saving_char = saving_char;
     saving_char = ch;
     EquipmentSlots equipment;
     de_equip_char(ch, equipment);
-    ch->pcdata->clones++;
-    
-    ch->pcdata->save_time = current_time;
-    strsave = str_printf("%s%c/%s.clone", PLAYER_DIR, tolower(static_cast<unsigned char>(ch->name[0])),
-				 capitalize( ch->name ).c_str() );
+    ++ch->pcdata->clones;
 
-    /*
-     * Auto-backup pfile (can cause lag with high disk access situtations
-     */
-    if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_BACKUP ) )
-    {
-	strback = str_printf("%s%c/%s.clone", BACKUP_DIR, tolower(static_cast<unsigned char>(ch->name[0])),
-				 capitalize( ch->name ).c_str() );
-	rename( strsave.c_str(), strback.c_str() );
-    }
+    fwrite_char( ch, fp, room );
+    if ( ch->pcdata->comments )
+        fwrite_comments( ch, fp );
+    fprintf( fp, "#END\n" );
+    const bool complete = close_pfile( fp );
 
-    if ( ( fp = fopen( strsave.c_str(), "w" ) ) == NULL )
+    --ch->pcdata->clones;
+    re_equip_char(ch, equipment);
+    saving_char = previous_saving_char;
+
+    if ( complete )
     {
-	bug( "Save_char_obj: fopen" );
-	perror( strsave.c_str() );
+        if ( BV_IS_SET( ch->game->get_sysdata()->save_flags, SV_BACKUP )
+             && create_save_bucket( BACKUP_DIR, initial ) )
+        {
+            const std::string backup = str_printf( "%s%c/%s", BACKUP_DIR, initial, basename.c_str() );
+            backup_pfile( path, backup );
+        }
+        if ( rename( temporary.c_str(), path.c_str() ) == 0 )
+        {
+            ch->pcdata->save_time = current_time;
+            write_corpses(ch, "");
+            return true;
+        }
+        bug( "Save_clone: cannot publish save %s: %s", path.c_str(), strerror(errno) );
     }
     else
-    {
-	fwrite_char( ch, fp );
-	if ( ch->pcdata && ch->pcdata->comments )         /* comments */
-	  fwrite_comments( ch, fp );        /* comments */
-	fprintf( fp, "#END\n" );
-	FCLOSE( fp );
-    }
+        bug( "Save_clone: cannot finish writing %s", path.c_str() );
 
-    ch->pcdata->clones--;
-    re_equip_char(ch, equipment);
-
-    write_corpses(ch, "");
-    quitting_char = NULL;
-    saving_char   = NULL;
-    return;
+    unlink( temporary.c_str() );
+    return false;
 }
 
 void fwrite_bitset_noCR(FILE *fp, const char *name, const FLAG_SET &bv)
@@ -715,7 +724,7 @@ void fread_bitset_compat(FILE *fp, FLAG_SET &bv)
 /*
  * Write the char.
  */
-static void fwrite_char( CHAR_DATA *ch, FILE *fp )
+static void fwrite_char( CHAR_DATA *ch, FILE *fp, const ROOM_INDEX_DATA *saved_room )
 {
     AFFECT_DATA *paf;
     ALIAS_DATA *pal;
@@ -751,11 +760,13 @@ static void fwrite_char( CHAR_DATA *ch, FILE *fp )
       }
       fprintf( fp, "Played       %lld\n", played_total );
     }
-    fprintf( fp, "Room         %d\n",
-	(  ch->in_room == get_room_index( ROOM_VNUM_LIMBO )
-	&& ch->was_in_room )
-	    ? ch->was_in_room->vnum
-	    : ( ch->in_room ? ch->in_room->vnum : ROOM_VNUM_LIMBO ) );
+    if ( !saved_room )
+    {
+        saved_room = ch->in_room;
+        if ( saved_room == get_room_index( ROOM_VNUM_LIMBO ) && ch->was_in_room )
+            saved_room = ch->was_in_room;
+    }
+    fprintf( fp, "Room         %d\n", saved_room ? saved_room->vnum : ROOM_VNUM_LIMBO );
     if ( ch->plr_home != NULL )
     {
        fprintf( fp, "PlrHome      %d\n", ch->plr_home->vnum );

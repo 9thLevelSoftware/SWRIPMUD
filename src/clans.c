@@ -53,7 +53,9 @@ bool	load_clan_file	args( ( GameContext *game, const std::string& clanfile ) );
 void	fread_planet	args( ( PLANET_DATA *planet, FILE *fp ) );
 bool	load_planet_file	args( ( GameContext *game, const std::string& planetfile ) );
 void	save_member_list	args( ( MEMBER_LIST *members_list ) );
-static bool save_member_list_file( const CLAN_DATA *clan, const MEMBER_LIST *members_list );
+static bool save_member_list_file( const CLAN_DATA *clan, const MEMBER_LIST *members_list,
+                                   bool create_only = false );
+static bool create_member_list_if_missing( const CLAN_DATA *clan );
 void	show_members		args( ( CHAR_DATA *ch, const std::string& argument, const std::string& format ) );
 
 
@@ -94,7 +96,7 @@ static bool realm_filename_valid( const std::string &name )
 }
 
 template <typename Writer>
-static bool write_realm_file( const std::string &path, Writer write )
+static bool write_realm_file( const std::string &path, Writer write, bool create_only = false )
 {
     std::string temporary = path + ".tmp.XXXXXX";
     const int fd = mkstemp( temporary.data() );
@@ -115,8 +117,16 @@ static bool write_realm_file( const std::string &path, Writer write )
 
     const bool complete = write( fp ) && !ferror( fp ) && fflush( fp ) == 0 && fsync( fd ) == 0;
     const bool closed = fclose( fp ) == 0;
-    if ( complete && closed && rename( temporary.c_str(), path.c_str() ) == 0 )
-        return true;
+    if ( complete && closed )
+    {
+        if ( !create_only && rename( temporary.c_str(), path.c_str() ) == 0 )
+            return true;
+        if ( create_only && link( temporary.c_str(), path.c_str() ) == 0 )
+        {
+            unlink( temporary.c_str() );
+            return true;
+        }
+    }
 
     bug( "Cannot save %s", path.c_str() );
     unlink( temporary.c_str() );
@@ -644,23 +654,19 @@ bool load_clan_file( GameContext *game, const std::string& clanfile )
 
 	LINK( clan, first_clan, last_clan, next, prev );
 
-         if( !clan->filename || clan->filename[0] == '\0' || !load_member_list( game, clan->filename ) )
+         if ( clan->filename && realm_filename_valid( clan->filename ) )
          {
-             MEMBER_LIST *members_list;
-             struct stat fst;
-             std::string mem_file = str_printf("%s%s.mem", CLAN_DIR, clan->filename ? clan->filename : "");
-             bool mem_exists = (clan->filename && clan->filename[0] != '\0' && stat(mem_file.c_str(), &fst) == 0);
-
-             if ( mem_exists )
-                 bug( "load_clan_file: %s.mem failed to load; preserving file on disk", clan->filename );
+             const std::string path = std::string( CLAN_DIR ) + clan->filename + ".mem";
+             struct stat info;
+             if ( lstat( path.c_str(), &info ) == 0 )
+             {
+                 if ( !S_ISREG( info.st_mode ) || !load_member_list( game, clan->filename ) )
+                     bug( "load_clan_file: %s failed to load; preserving file on disk", path.c_str() );
+             }
+             else if ( errno == ENOENT )
+                 create_member_list_if_missing( clan );
              else
-                 log_string( "No memberlist found, creating new list" );
-             CREATE( members_list, MEMBER_LIST, 1 );
-             members_list->game = game;
-             members_list->name = STRALLOC( clan->name ? clan->name : "" );
-             LINK( members_list, first_member_list, last_member_list, next, prev );
-             if ( !mem_exists )
-                 save_member_list( members_list );
+                 bug( "load_clan_file: cannot inspect %s: %s", path.c_str(), strerror( errno ) );
          }
 
 	if ( clan->storeroom == 0
@@ -3487,16 +3493,15 @@ void do_members( CHAR_DATA *ch, char *argument )
          return;
      }
 
-     if( !str_cmp( arg1, "create" ) )
+     if ( !str_cmp( arg1, "create" ) )
      {
-         MEMBER_LIST *members_list;
-
-         CREATE( members_list, MEMBER_LIST, 1 );
-         members_list->game = ch->game;
-         members_list->name = STRALLOC( argstr );
-         LINK( members_list, first_member_list, last_member_list, next, prev );
-         save_member_list( members_list );
-         ch_printf( ch, "Member lists \"%s\" created.\n", argstr.c_str() );
+         CLAN_DATA *clan = get_clan( argstr );
+         if ( !clan )
+             send_to_char( "No such clan.\n", ch );
+         else if ( create_member_list_if_missing( clan ) )
+             ch_printf( ch, "Member lists \"%s\" created.\n", clan->name );
+         else
+             send_to_char( "Could not create a member list. Existing roster data was preserved.\n", ch );
          return;
      }
 
@@ -3551,7 +3556,8 @@ void save_member_list( MEMBER_LIST *members_list )
     save_member_list_file( clan, members_list );
 }
 
-static bool save_member_list_file( const CLAN_DATA *clan, const MEMBER_LIST *members_list )
+static bool save_member_list_file( const CLAN_DATA *clan, const MEMBER_LIST *members_list,
+                                   bool create_only )
 {
     if ( !clan->filename || !realm_filename_valid( clan->filename ) )
     {
@@ -3571,7 +3577,28 @@ static bool save_member_list_file( const CLAN_DATA *clan, const MEMBER_LIST *mem
                      member->laston ? member->laston : "Unknown" );
         fprintf( fp, "End\n\n" );
         return true;
-    } );
+    }, create_only );
+}
+
+static bool create_member_list_if_missing( const CLAN_DATA *clan )
+{
+    for ( const MEMBER_LIST *members = first_member_list; members; members = members->next )
+        if ( members->name && !str_cmp( members->name, clan->name ) )
+            return false;
+
+    MEMBER_LIST *members;
+    CREATE( members, MEMBER_LIST, 1 );
+    members->game = clan->game;
+    members->name = STRALLOC( clan->name ? clan->name : "" );
+    if ( !save_member_list_file( clan, members, true ) )
+    {
+        STRFREE( members->name );
+        DISPOSE( members );
+        return false;
+    }
+
+    LINK( members, first_member_list, last_member_list, next, prev );
+    return true;
 }
 
 bool load_member_list( GameContext *game, const std::string& filename )

@@ -1471,7 +1471,7 @@ CMDTYPE* olc_find_command_exact_for_char(CHAR_DATA* ch, const char* command)
     if (!ch || !command || command[0] == '\0')
         return nullptr;
 
-    for (cmd = command_hash[LOWER(command[0]) % 126]; cmd; cmd = cmd->next)
+    for (cmd = command_hash[command_hash_bucket(command[0])]; cmd; cmd = cmd->next)
     {
         if (str_cmp(command, cmd->name))
             continue;
