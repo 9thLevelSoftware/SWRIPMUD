@@ -452,6 +452,7 @@ DO_FUN *skill_function( const std::string& name )
 	if ( !str_cmp( name, "do_mpedit" ))		return do_mpedit;
 	if ( !str_cmp( name, "do_mpfind" ))		return do_mpfind;
 	if ( !str_cmp( name, "do_mpgain" ))		return do_mpgain;
+	if ( !str_cmp( name, "do_mpcourier" ))		return do_mpcourier;
 	if ( !str_cmp( name, "do_mpforce" ))		return do_mpforce;
 	if ( !str_cmp( name, "do_mpgoto" ))		return do_mpgoto;
 	if ( !str_cmp( name, "do_mpinvis" ))		return do_mpinvis;
@@ -1161,6 +1162,7 @@ char *skill_name( DO_FUN *skill )
     if ( skill == do_mpedit )		return "do_mpedit";
     if ( skill == do_mpfind )		return "do_mpfind";
     if ( skill == do_mpgain )		return "do_mpgain";
+    if ( skill == do_mpcourier )		return "do_mpcourier";
     if ( skill == do_mpforce )		return "do_mpforce";
     if ( skill == do_mpgoto )		return "do_mpgoto";
     if ( skill == do_mpinvis )		return "do_mpinvis";

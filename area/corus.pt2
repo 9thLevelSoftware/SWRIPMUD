@@ -515,6 +515,11 @@ his duties. He has lists to offer anyone that would like it.
 > greet_prog 100~
 say Would you be willing to help me?
 ~
+> speech_prog exact accept harlef delivery~
+if ispc($n)
+mpcourier $n
+endif
+~
 > speech_prog yes~
 mpoload 10248 1
 give list $n
@@ -775,6 +780,8 @@ Riiice Spy Service Jobs:
  
     Deliver the Spy Reports to Dundil on Tatooine
     Obtain the stolen disk from the bandits on Corellia
+    Deliver the package to Captain Harlef
+      To accept, say "accept harlef delivery" to the representative.
 ~
 #10299
 dud~

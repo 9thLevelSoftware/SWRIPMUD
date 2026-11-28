@@ -1949,6 +1949,7 @@ void check_killer( CHAR_DATA *ch, CHAR_DATA *victim )
         if ( ch->pcdata->clan )
             ch->pcdata->clan->mkills++;
         ch->pcdata->mkills++;
+        gmcp_evt_char_vitals(ch);
         if ( ch->in_room && ch->in_room->area )
             ch->in_room->area->mkills++;
         }
@@ -1960,6 +1961,7 @@ void check_killer( CHAR_DATA *ch, CHAR_DATA *victim )
     {
         if ( ch->pcdata->clan ) ch->pcdata->clan->pkills++;
             ch->pcdata->pkills++;
+        gmcp_evt_char_vitals(ch);
         update_pos(victim);
         if ( victim->pcdata->clan )
             victim->pcdata->clan->pdeaths++;	

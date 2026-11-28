@@ -1909,7 +1909,11 @@ void mprog_wordlist_check( const std::string &arg, CHAR_DATA *mob, CHAR_DATA *ac
     ROOM_INDEX_DATA *room = mob->in_room;
     for ( MPROG_DATA *mprg = mob->pIndexData->mudprogs; mprg; mprg = mprg->next )
     {
-        if ( !(mprg->type & type) || !mprog_keyword_check(arg, mprg->arglist ? mprg->arglist : "") )
+        if ( !(mprg->type & type) )
+            continue;
+        const std::string pattern = mprg->arglist ? mprg->arglist : "";
+        const bool exact_speech = type == SPEECH_PROG && !str_prefix( "exact ", pattern );
+        if ( exact_speech ? str_cmp( arg, pattern.substr( 6 ) ) : !mprog_keyword_check( arg, pattern ) )
             continue;
 
         mprog_driver(mprg->comlist ? mprg->comlist : "", mob, actor, obj, vo, FALSE);

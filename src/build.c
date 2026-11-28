@@ -9615,6 +9615,12 @@ void do_rdelete( CHAR_DATA *ch, char *argument )
       return;
     }
 
+    if ( location->ship || ship_from_cockpit(ch->game, location->vnum) )
+    {
+        send_to_char( "Remove the room from the ship before deleting it.\n", ch );
+        return;
+    }
+
     /* We could go to the trouble of clearing out the room, but why? */
     if ( location->first_person || location->first_content )
     {
@@ -9626,7 +9632,11 @@ void do_rdelete( CHAR_DATA *ch, char *argument )
        player has the authority to delete it, so let's dump the thing. 
        The function to do it is in db.c so it can access the top-room 
        variable. */
-    delete_room( location );
+    if ( !delete_room( location ) )
+    {
+        send_to_char( "Unable to delete that room.\n", ch );
+        return;
+    }
 
     send_to_char( "Room deleted.\n", ch );
     return;

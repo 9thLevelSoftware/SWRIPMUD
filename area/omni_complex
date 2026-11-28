@@ -149,7 +149,8 @@ mpecho A packaged ration drops from a dispenser.
 ~
 > speech_prog Gerard MacManus~
 if name($n) == Den
-mpechoat $n The Officer's Lounge is unavailable.
+mpechoat $n You are taken to the Officer's Lounge.
+mptransfer $n 126
 endif
 ~
 > speech_prog Newbie Academy~
@@ -559,6 +560,17 @@ tears stream down your cheek..but no pain can be felt.
 &b"I was me, but now he's gone."&R&W
 ~
 0 75563084 0
+S
+#126
+Officer's Lounge~
+A quiet lounge is set aside for officers. A door to the north returns
+to Den's Den.
+~
+0 0 0
+D0
+The door to the north returns to Den's Den.~
+door~
+0 -1 101
 S
 #150
 Floating in a void~

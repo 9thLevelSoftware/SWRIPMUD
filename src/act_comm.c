@@ -2135,11 +2135,16 @@ void do_save( CHAR_DATA *ch, char *argument )
     }
 
     const bool saved = save_char_obj( ch );
-    save_home( ch );
+    const bool home_saved = save_home( ch );
     if ( ch->in_room && BV_IS_SET( ch->in_room->room_flags, ROOM_CLANSTOREROOM ) )
         save_storeroom( ch->in_room );
 
-    send_to_char( saved ? "Ok.\n" : "Unable to save your character.\n", ch );
+    if ( !saved )
+        send_to_char( "Unable to save your character.\n", ch );
+    if ( !home_saved )
+        send_to_char( "Unable to save your home.\n", ch );
+    if ( saved && home_saved )
+        send_to_char( "Ok.\n", ch );
     return;
 }
 

@@ -2447,7 +2447,8 @@ void read_from_buffer( DESCRIPTOR_DATA *d )
      * BUILD COMMAND FROM INTEXT
      * ============================================================
      */
-    d->incomm_str.clear();
+    std::string command;
+    bool line_too_long = false;
 
     for ( i = 0; i < (int)line_end; i++ )
     {
@@ -2456,30 +2457,20 @@ void read_from_buffer( DESCRIPTOR_DATA *d )
         if ( c == '\r' )
             continue;
 
-        if ( d->incomm_str.size() >= 254 )
+        if ( (c == '\b' || c == 127) && !command.empty() )
         {
-            output_to_descriptor( d, "Line too long.\n" );
-            if ( was_alive && !comm_desc_alive( d ) )
-                return;
-            break;
-        }
-
-        if ( (c == '\b' || c == 127) && !d->incomm_str.empty() )
-        {
-            size_t k = d->incomm_str.size();
-            int back = utf8_prev_len(d->incomm_str.c_str(), d->incomm_str.c_str() + k);
+            size_t k = command.size();
+            int back = utf8_prev_len(command.c_str(), command.c_str() + k);
             if (back > 0 && back <= (int)k)
-                d->incomm_str.erase(k - back);
+                command.erase(k - back);
         }
         else if (c >= 32 || (c & 0x80))
         {
             int char_len = utf8_char_len_safe(&d->intext_str[i]);
 
-            if ( d->incomm_str.size() + char_len >= 254 )
+            if ( command.size() + char_len >= 254 )
             {
-                output_to_descriptor( d, "Line too long.\n" );
-                if ( was_alive && !comm_desc_alive( d ) )
-                    return;
+                line_too_long = true;
                 break;
             }
 
@@ -2488,15 +2479,22 @@ void read_from_buffer( DESCRIPTOR_DATA *d )
                 if ((size_t)(i + j) >= line_end)
                     break;
 
-                d->incomm_str.push_back(d->intext_str[i + j]);
+                command.push_back(d->intext_str[i + j]);
             }
 
             i += char_len - 1;
         }
     }
 
-    if ( d->incomm_str.empty() )
-        d->incomm_str = " ";
+    if ( line_too_long )
+    {
+        // Consume the rejected line without publishing its partial command.
+        d->intext_str.erase(0, line_end + 1);
+        output_to_descriptor( d, "Line too long.\n" );
+        return;
+    }
+
+    d->incomm_str = command.empty() ? " " : std::move(command);
 
     int tail = (d->in_cmd_head + d->in_commands) % 20;
     d->in_cmd_times[tail] = now_ms;

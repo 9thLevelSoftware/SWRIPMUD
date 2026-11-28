@@ -46,7 +46,7 @@ bool	check_social	args( ( CHAR_DATA *ch, const std::string& command,
 bool				fLogAll		= FALSE;
 
 
-CMDTYPE	   *command_hash[126];	/* hash table for cmd_table */
+CMDTYPE	   *command_hash[COMMAND_HASH_BUCKETS];	/* hash table for cmd_table */
 SOCIALTYPE *social_index[27];   /* hash table for socials   */
 
 /*
@@ -366,8 +366,7 @@ void interpret( CHAR_DATA *ch, const std::string &argument )
         */
         if ( !command.empty() )
         {
-            unsigned char cmd_ch = static_cast<unsigned char>( LOWER( static_cast<unsigned char>( command[0] ) ) );
-            for ( cmd = command_hash[cmd_ch % 126]; cmd; cmd = cmd->next )
+            for ( cmd = command_hash[command_hash_bucket(command.front())]; cmd; cmd = cmd->next )
                 if ( !str_prefix( command.c_str(), cmd->name )
                 &&   command_is_authorized_for_char(ch, cmd) )
                 {
@@ -565,7 +564,7 @@ CMDTYPE *find_command( const std::string& command )
     if ( command.empty() )
         return NULL;
 
-    hash = static_cast<unsigned char>( LOWER( static_cast<unsigned char>( command[0] ) ) ) % 126;
+    hash = command_hash_bucket(command.front());
 
     for ( cmd = command_hash[hash]; cmd; cmd = cmd->next )
 	if ( !str_prefix( command, cmd->name ) )
